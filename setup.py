@@ -9,7 +9,7 @@ setup(
     description='Mesh TensorFlow',
     author='Google Inc.',
     author_email='no-reply@google.com',
-    url='http://github.com/tensorflow/mesh-tensorflow',
+    url='http://github.com/tensorflow/mesh',
     license='Apache 2.0',
     packages=find_packages(),
     package_data={},

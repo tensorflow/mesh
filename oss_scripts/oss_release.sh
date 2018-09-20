@@ -9,8 +9,8 @@ GIT_COMMIT_ID=${1:-""}
 TMP_DIR=$(mktemp -d)
 pushd $TMP_DIR
 
-echo "Cloning tensorflow/mesh-tensorflow and checking out commit $GIT_COMMIT_ID"
-git clone https://github.com/tensorflow/mesh-tensorflow.git
+echo "Cloning tensorflow/mesh and checking out commit $GIT_COMMIT_ID"
+git clone https://github.com/tensorflow/mesh.git
 cd datasets
 git checkout $GIT_COMMIT_ID
 
