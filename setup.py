@@ -1,4 +1,4 @@
-"""Install tensorflow_datasets."""
+"""Install Mesh TensorFlow."""
 
 from setuptools import find_packages
 from setuptools import setup

@@ -11,7 +11,7 @@ pushd $TMP_DIR
 
 echo "Cloning tensorflow/mesh and checking out commit $GIT_COMMIT_ID"
 git clone https://github.com/tensorflow/mesh.git
-cd datasets
+cd mesh
 git checkout $GIT_COMMIT_ID
 
 pip install wheel twine pyopenssl
