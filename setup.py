@@ -22,7 +22,9 @@ setup(
         'tensorflow': ['tensorflow>=1.9.0'],
         'tensorflow_gpu': ['tensorflow-gpu>=1.9.0'],
         'tests': [
+            'absl-py',
             'pytest',
+            'tensor2tensor>=1.9.0',  # TODO(trandustin): rm dependence
         ],
     },
     classifiers=[
