@@ -22,11 +22,12 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-from mesh_tensorflow import mnist_dataset as dataset
 from mesh_tensorflow import mtf_layers
 from mesh_tensorflow import mtf_optimize
 from mesh_tensorflow import ops as mtf
 from mesh_tensorflow import placement_mesh_impl
+
+import mnist_dataset as dataset  # local file import
 import tensorflow as tf
 
 

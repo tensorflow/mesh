@@ -68,11 +68,12 @@ data splitting, we varied the batch size.
 
 To illustrate, let us consider a simple model for the MNIST image-classification
 task.  Our network has one hidden layer with 1024 units, and an output layer
-with 10 units (corresponding to the 10 digit classes).  
+with 10 units (corresponding to the 10 digit classes).
 
 The code consists of two parts, the first describing the mathematical
 operations, and the second describing the devices and tensor/computation layout.
-For the full example, see [`mnist.py`](mnist.py).
+For the full example, see [`examples/mnist.py`](
+https://github.com/tensorflow/mesh/tree/master/mesh_tensorflow/examples/mnist.py).
 TODO(noam): verify that this code works.
 
 ```Python
@@ -348,7 +349,7 @@ TPU_NAME=ylc-mtf-donut
 # 2 ways data-parallelism and 4 ways model-parallelism.
 # In this configuration, we split the batch dimension into 2 cores and the
 # hidden dimension into 4 cores.
-python mtf_toy_model_tpu.py \
+python examples/mtf_toy_model_tpu.py \
   --tpu=$TPU \
   --model_dir=$MODEL_DIR \
   --io_size=8 \
@@ -358,7 +359,7 @@ python mtf_toy_model_tpu.py \
 
 # 8 ways model-parallelism.
 # In this configuration, We split the hidden dimension into 8 cores.
-python mtf_toy_model_tpu.py \
+python examples/mtf_toy_model_tpu.py \
   --tpu=$TPU \
   --model_dir=$MODEL_DIR \
   --io_size=8 \
