@@ -1,22 +1,31 @@
 # Mesh TensorFlow - Model Parallelism Made Easier
 
+[![PyPI
+version](https://badge.fury.io/py/mesh-tensorflow.svg)](https://badge.fury.io/py/mesh-tensorflow)
+[![GitHub
+Issues](https://img.shields.io/github/issues/tensorflow/mesh.svg)](https://github.com/tensorflow/mesh/issues)
+[![Contributions
+welcome](https://img.shields.io/badge/contributions-welcome-brightgreen.svg)](CONTRIBUTING.md)
+[![License](https://img.shields.io/badge/License-Apache%202.0-brightgreen.svg)](https://opensource.org/licenses/Apache-2.0)
+[![Travis](https://img.shields.io/travis/tensorflow/mesh.svg)](https://travis-ci.org/tensorflow/mesh)
+
 Transformer for EN-FR WMT with model splitting |  Transformer for EN-FR WMT with data splitting
 :-------------------------:|:-------------------------:
 ![model_splitting](./mtf_transformer_model_splitting.png) | ![data_splitting](./mtf_transformer_data_splitting.png)
 
 # Introduction
 
-Mesh TensorFlow (mtf) is a language for distributed deep
-learning, capable of specifying a broad class of distributed tensor
-computations.  The purpose of mesh-tensorflow is to formalize and implement
-distribution strategies for your computation graph over your hardware/processors
-For example: "Split the batch over rows of processors and split
-the units in the hidden layer across columns of processors." Mesh-TensorFlow is
-implemented as a layer over TensorFlow.
+Mesh TensorFlow (`mtf`) is a language for distributed deep learning, capable of
+specifying a broad class of distributed tensor computations.  The purpose of
+Mesh TensorFlow is to formalize and implement distribution strategies for your
+computation graph over your hardware/processors. For example: "Split the batch
+over rows of processors and split the units in the hidden layer across columns
+of processors." Mesh TensorFlow is implemented as a layer over TensorFlow.
 
-## Do I need Mesh-TensorFlow?
+## Do I need Mesh TensorFlow?
+
 If you just want data-parallel training (batch-splitting), then you do not need
-mesh-tensorflow, though Mesh-TensorFlow can do this.  The most common reasons
+Mesh TensorFlow, though Mesh TensorFlow can do this.  The most common reasons
 for more sophisticated parallel computation are:
 
 * The parameters of the model do not fit on one device - e.g. a
@@ -28,7 +37,7 @@ convolutions
 
 * Lower-latency parallel inference (at batch size 1).
 
-## The Mesh-TensorFlow Approach to Distributed Computation
+## The Mesh TensorFlow Approach to Distributed Computation
 
 * A "Mesh" is an n-dimensional array of processors, connected by a network.
 
@@ -53,16 +62,29 @@ convolutions
   processor usually just manipulates the slices of the input tensors already
   resident on that processor, and produces the slice of the output that goes on
   that processor.
-  
-## Example Models
 
-This directory contains code for running several well-known models across
-different tasks.
+## Getting Started
 
-We outline an example below. In the above figures, Mesh-TensorFlow scales
-linearly as the number of TPU shards increases. For model splitting, we varied
-the number of hidden units in the feedforward layer and the number of heads; for
-data splitting, we varied the batch size.
+### Installation
+
+To install the latest stable version, run
+
+```sh
+pip install mesh-tensorflow
+```
+
+To install the latest development version, run
+
+```sh
+pip install -e "git+https://github.com/tensorflow/mesh.git#egg=mesh-tensorflow"
+```
+
+Installing `mesh-tensorflow` does not automatically install or update
+TensorFlow. We recommend installing it via `pip install tensorflow` or `pip
+install tensorflow-gpu`. See TensorFlow’s
+[installation instructions for details](https://www.tensorflow.org/install/).
+If you're using a development version of Mesh TensorFlow, you may need to
+use TensorFlow's nightly package (`tf-nightly`).
 
 ### Example Network (MNIST)
 
@@ -101,7 +123,7 @@ update_w1_op = mtf.assign(w1, w1 - w1_grad * 0.001)
 update_w2_op = mtf.assign(w1, w1 - w1_grad * 0.001)
 ```
 
-In the code above, we have built a mesh-tensorflow graph, which is simply
+In the code above, we have built a Mesh TensorFlow graph, which is simply
 a Python structure.  We have completely defined the mathematical operations.
 In the code below, we specify the mesh of processors and the layout of the
 computation.
@@ -141,7 +163,7 @@ layout_rules = [("batch", "processor_rows"), ("hidden", "processor_cols")]
 
 ## Where does the network communication happen?
 
-Some mesh-tensorflow operations cause network communication.  For example, an
+Some Mesh TensorFlow operations cause network communication.  For example, an
 einsum (generalized matrix multiplication) is computed as follows:
 
 * On each processor, compute the einsum of the slices of the two operands that
@@ -162,7 +184,7 @@ While results do not depend on layout (except in the realm of roundoff errors
 and random seeds), performance and memory consumption depend heavily on layout.
 One day we hope to automate the process of choosing a layout.  For now, you
 really need to fully understand the performance implications and pick one
-yourself.  Mesh-tensorflow helps by accumulating and printing counters of
+yourself.  Mesh TensorFlow helps by accumulating and printing counters of
 computation/communication.  To start, here are some tricks/guidelines.
 
 * It is illegal for two dimensions of the same tensor to be split across the
@@ -175,16 +197,16 @@ computation/communication.  To start, here are some tricks/guidelines.
   data-parallelism case, where we want a large batch size per processor to avoid
   spending most of our time communicating.
 
-# The Mesh-TensorFlow Language
+# The Mesh TensorFlow Language
 
-Mesh-TensorFlow (v0.0) is implemented as a Python library which can generate
+Mesh TensorFlow (v0.0) is implemented as a Python library which can generate
 part of a TensorFlow graph.  The user first builds a `mtf.Graph` (the analog of
 a TensorFlow graph) made up of `mtf.Tensor`s and `mtf.Operation`s.  As in
 TensorFlow, this graph consists of simple Python objects.  The user then creates
 a `mtf.Lowering` object, which lowers the `mtf.Graph` into TensorFlow, adding to
 the default TensorFlow graph.
 
-The Mesh-TensorFlow language is nearly identical to TensorFlow, with the
+The Mesh TensorFlow language is nearly identical to TensorFlow, with the
 familiar notion of a Graph, Tensors, Operations, and automatic gradient
 computation.  The principal differences are as follows:
 
@@ -244,7 +266,7 @@ Some layout rules would lead to illegal layouts:
 
 ## Einsum
 
-Mesh-TensorFlow uses Einstein-summation notation, `mtf.einsum(inputs,
+Mesh TensorFlow uses Einstein-summation notation, `mtf.einsum(inputs,
 output_shape)`, using the (named) `Dimensions` as the symbols.  Matrix-
 multiplication, broadcast, sum-reduction, and transposition can all be expressed
 as special cases of `mtf.einsum`, though the familiar interfaces are also
@@ -259,19 +281,19 @@ leading to a new tensor layout and hence network communication.
 
 # CPU/GPU/TPU implementations
 
-Mesh-TensorFlow works on CPU, GPU and TPU.  The TPU implementation is very
+Mesh TensorFlow works on CPU, GPU and TPU.  The TPU implementation is very
 different from the CPU/GPU implementation.
 
 Multi-CPU/GPU meshes are implemented with `PlacementMeshImpl`.  In this case
-mesh-tensorflow emits separate tensorflow operations placed on the different
-devices, all in one big tensorflow graph.
+Mesh TensorFlow emits separate TensorFlow operations placed on the different
+devices, all in one big TensorFlow graph.
 
 TPU meshes are implemented in with `SimdMeshImpl`.  In this case,
-mesh-tensorflow emits tensorflow operations (and communication collectives) from
+Mesh TensorFlow emits TensorFlow operations (and communication collectives) from
 the perspective of one core, and this same program runs on every core, relying
 on the fact that each core actually performs the same operations.  This
 piggy-backs on the TPU data-parallelism infrastructure, which operates the same
-way.  This "SIMD" approach keeps the tensorflow and xla graphs from growing with
+way.  This "SIMD" approach keeps the TensorFlow and XLA graphs from growing with
 the number of cores.  The differences between cores are as follows:
 
 * different slices of the variables (this works now)
@@ -366,18 +388,4 @@ python examples/mtf_toy_model_tpu.py \
   --hidden_size=8 \
   --mesh_shape='all:8' \
   --layout='hidden:all'
-
-# TODO LIST (please add items)
-
-We are actively working on improving Mesh-TensorFlow in a variety of ways.  Some
-of the top-priority items are:
-`Contact us if you'd like to help!`
-
-* Operations necessary for spatial-partitioning (spatially-partitioned
-  convolution, etc)
-* Examples of image-classification models.
-* Support for multiple meshes and efficient communication between them.  For
-  example, we may want to load training data on a mesh of 64 cpu-machines and
-  infeed them to a mesh of 512 tpu-cores.  We do not need this for language
-  tasks where the data is tiny, but it will be important for other tasks.
-
+```

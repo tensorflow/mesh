@@ -21,8 +21,9 @@ from __future__ import print_function
 
 from absl.testing import parameterized
 
+import mesh_tensorflow as mtf
+
 from mesh_tensorflow import mtf_layers
-from mesh_tensorflow import ops as mtf
 from mesh_tensorflow import placement_mesh_impl
 from tensor2tensor.layers import common_layers
 

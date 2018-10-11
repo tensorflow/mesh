@@ -19,10 +19,11 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import mesh_tensorflow as mtf
+
 from mesh_tensorflow import mtf_layers
 from mesh_tensorflow import mtf_optimize
 from mesh_tensorflow import mtf_utils
-from mesh_tensorflow import ops as mtf
 from mesh_tensorflow.simd_mesh_impl import SimdMeshImpl
 
 import numpy

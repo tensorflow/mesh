@@ -21,7 +21,7 @@ from __future__ import print_function
 
 from absl.testing import parameterized
 
-from mesh_tensorflow import ops as mtf
+import mesh_tensorflow as mtf
 from mesh_tensorflow import placement_mesh_impl
 
 import tensorflow as tf

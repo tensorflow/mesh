@@ -13,3 +13,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Mesh TensorFlow."""
+
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+
+from mesh_tensorflow import mtf_beam_search
+from mesh_tensorflow import mtf_layers
+from mesh_tensorflow import mtf_optimize
+from mesh_tensorflow import mtf_utils
+from mesh_tensorflow import placement_mesh_impl
+from mesh_tensorflow import simd_mesh_impl
+from mesh_tensorflow import tpu_variables
+from mesh_tensorflow.ops import *  # pylint: disable=wildcard-import
+
+# TODO(trandustin): Seal module.
+# from tensorflow.python.util.all_util import remove_undocumented  # pylint: disable=line-too-long
+#
+# _allowed_symbols = None
+#
+# remove_undocumented(__name__, _allowed_symbols)

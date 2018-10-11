@@ -384,7 +384,7 @@ class Lowering(object):
   tf.Tensor.
 
   ```python
-  from tensor2tensor.mesh_tensorflow import placement_mesh_impl
+  from mesh_tensorflow import placement_mesh_impl
 
   graph = mtf.Graph()
   mesh = mtf.Mesh(graph, "my_mesh")

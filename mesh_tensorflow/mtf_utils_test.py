@@ -18,8 +18,9 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import mesh_tensorflow as mtf
+
 from mesh_tensorflow import mtf_utils
-from mesh_tensorflow import ops as mtf
 from six.moves import xrange  # pylint: disable=redefined-builtin
 
 import tensorflow as tf
