@@ -1443,6 +1443,10 @@ class BinaryOpWithBroadcasting(Operation):
   def __init__(self, tf_fn, x1, x2, output_shape, output_dtype, name=None):
     super(BinaryOpWithBroadcasting, self).__init__(
         [x1, x2], name=name or "binary_op")
+    if x1.dtype != x2.dtype:
+      # If there is ever a binary operation with different operand types, then
+      # we should add an argument allow_different_operand_dtypes=False.
+      raise ValueError("Dtypes must be equal.")
     assert isinstance(output_dtype, tf.DType)
     self._outputs = [Tensor(self, output_shape, output_dtype)]
     self._tf_fn = tf_fn
@@ -1564,8 +1568,6 @@ class AddOperation(BinaryOpWithBroadcasting):
   def __init__(self, x1, x2, output_shape, name=None):
     super(AddOperation, self).__init__(
         tf.add, x1, x2, output_shape, x1.dtype, name=name or "add")
-    if x1.dtype != x2.dtype:
-      raise ValueError("Dtypes must be equal.")
 
   def gradient(self, grad_ys):
     dy = grad_ys[0]
@@ -1579,8 +1581,6 @@ class MinMaxOperation(BinaryOpWithBroadcasting):
   def __init__(self, tf_fn, x1, x2, output_shape, name=None):
     super(MinMaxOperation, self).__init__(
         tf_fn, x1, x2, output_shape, x1.dtype, name=name or "add")
-    if x1.dtype != x2.dtype:
-      raise ValueError("Dtypes must be equal.")
 
   def gradient(self, grad_ys):
     dy = grad_ys[0]
