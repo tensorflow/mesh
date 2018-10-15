@@ -13,27 +13,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for mtf_utils.py."""
+"""Tests for utilities."""
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
 import mesh_tensorflow as mtf
 
-from mesh_tensorflow import mtf_utils
 from six.moves import xrange  # pylint: disable=redefined-builtin
 
 import tensorflow as tf
 
 
-class MtfUtilsTest(tf.test.TestCase):
+class UtilsTest(tf.test.TestCase):
 
   def test_variable_placer(self):
     sizes = [100, 0, 0, 0]
     device_list = ['cpu:0', 'cpu:1', 'cpu:2', 'cpu:3']
 
     with tf.Graph().as_default() as g:
-      var_placer = mtf_utils.BalancedVariablePlacer(device_list, sizes)
+      var_placer = mtf.utils.BalancedVariablePlacer(device_list, sizes)
       graph = mtf.Graph()
       mesh = mtf.Mesh(graph, 'my_mesh', var_placer)
 

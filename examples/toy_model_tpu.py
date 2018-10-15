@@ -20,12 +20,6 @@ from __future__ import division
 from __future__ import print_function
 
 import mesh_tensorflow as mtf
-
-from mesh_tensorflow import mtf_layers
-from mesh_tensorflow import mtf_optimize
-from mesh_tensorflow import mtf_utils
-from mesh_tensorflow.simd_mesh_impl import SimdMeshImpl
-
 import numpy
 import tensorflow as tf
 
@@ -107,8 +101,8 @@ def toy_model(features, mesh):
   io_dim = mtf.Dimension('io', FLAGS.io_size)
 
   x = mtf.import_tf_tensor(mesh, features, mtf.Shape([batch_dim, io_dim]))
-  h = mtf_layers.dense(x, hidden_dim, name='layer1', use_bias=False)
-  y = mtf_layers.dense(h, io_dim, name='layer2', use_bias=False)
+  h = mtf.layers.dense(x, hidden_dim, name='layer1', use_bias=False)
+  y = mtf.layers.dense(h, io_dim, name='layer2', use_bias=False)
 
   loss = mtf.reduce_sum(mtf.square(y - x))
   return y, loss
@@ -122,17 +116,17 @@ def model_fn(features, labels, mode, params):
   mesh = mtf.Mesh(graph, 'my_mesh')
   mesh_shape = mtf.convert_to_shape(FLAGS.mesh_shape)
   mesh_devices = [''] * mesh_shape.size
-  mesh_impl = SimdMeshImpl(
+  mesh_impl = mtf.simd_mesh_impl.SimdMeshImpl(
       mesh_shape, mtf.convert_to_layout_rules(FLAGS.layout),
       mesh_devices, params['context'].device_assignment)
-  with mtf_utils.outside_all_rewrites():
+  with mtf.utils.outside_all_rewrites():
     logits, loss = toy_model(features, mesh)
 
   # TRAIN mode
   if mode == tf.estimator.ModeKeys.TRAIN:
     var_grads = mtf.gradients([loss],
                               [v.outputs[0] for v in graph.trainable_variables])
-    optimizer = mtf_optimize.AdafactorOptimizer()
+    optimizer = mtf.optimize.AdafactorOptimizer()
     update_ops = []
     for grad, var in zip(var_grads, graph.trainable_variables):
       update_ops.extend(optimizer.apply_grad(grad, var))
@@ -152,7 +146,7 @@ def model_fn(features, labels, mode, params):
   else:
     tf_logits = lowering.export_to_tf_tensor(fully_replicated_logits)
 
-  with mtf_utils.outside_all_rewrites():
+  with mtf.utils.outside_all_rewrites():
     # Copy master variables to slices. Must be called first.
     restore_hook = mtf.MtfRestoreHook(lowering)
     if mode == tf.estimator.ModeKeys.TRAIN:

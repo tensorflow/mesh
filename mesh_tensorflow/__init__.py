@@ -19,13 +19,13 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-from mesh_tensorflow import mtf_beam_search
-from mesh_tensorflow import mtf_layers
-from mesh_tensorflow import mtf_optimize
-from mesh_tensorflow import mtf_utils
+from mesh_tensorflow import beam_search
+from mesh_tensorflow import layers
+from mesh_tensorflow import optimize
 from mesh_tensorflow import placement_mesh_impl
 from mesh_tensorflow import simd_mesh_impl
 from mesh_tensorflow import tpu_variables
+from mesh_tensorflow import utils
 from mesh_tensorflow.ops import *  # pylint: disable=wildcard-import
 
 # TODO(trandustin): Seal module.

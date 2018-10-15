@@ -23,7 +23,7 @@ from functools import reduce  # pylint: disable=redefined-builtin; for py3
 from operator import mul
 import re
 
-from mesh_tensorflow import mtf_utils
+from mesh_tensorflow import utils
 import six
 from six.moves import xrange  # pylint: disable=redefined-builtin
 
@@ -2526,7 +2526,7 @@ class Variable(Operation):
                trainable, **kwargs):
     super(Variable, self).__init__([], mesh, name="name_will_be_set_later")
     self._trainable = trainable
-    with tf.device(mesh.variable_placer_fn), mtf_utils.outside_all_rewrites():
+    with tf.device(mesh.variable_placer_fn), utils.outside_all_rewrites():
       self.master = tf.get_variable(
           name, shape.to_integer_list, dtype=dtype, initializer=initializer,
           **kwargs)
@@ -2538,7 +2538,7 @@ class Variable(Operation):
 
   def lower(self, lowering):
     mesh_impl = lowering.mesh_impl(self)
-    with mtf_utils.outside_all_rewrites():
+    with utils.outside_all_rewrites():
       sv = mesh_impl.LaidOutVariable(self, mesh_impl)
     lowering.variables[self] = sv
     lowering.set_tensor_lowering(self.outputs[0], sv.laid_out_tensor)

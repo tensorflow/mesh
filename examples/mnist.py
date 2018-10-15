@@ -23,11 +23,6 @@ from __future__ import division
 from __future__ import print_function
 
 import mesh_tensorflow as mtf
-
-from mesh_tensorflow import mtf_layers
-from mesh_tensorflow import mtf_optimize
-from mesh_tensorflow import placement_mesh_impl
-
 import mnist_dataset as dataset  # local file import
 import tensorflow as tf
 
@@ -104,20 +99,20 @@ def mnist_model(image, labels, mesh):
   hidden_dim1 = mtf.Dimension("hidden1", FLAGS.hidden_size)
   hidden_dim2 = mtf.Dimension("hidden2", FLAGS.hidden_size)
 
-  h1 = mtf_layers.dense(
+  h1 = mtf.layers.dense(
       x, hidden_dim1,
       reduced_dims=x.shape.dims[-4:],
       activation=mtf.relu, name="hidden1")
-  h2 = mtf_layers.dense(
+  h2 = mtf.layers.dense(
       h1, hidden_dim2,
       activation=mtf.relu, name="hidden2")
-  logits = mtf_layers.dense(h2, classes_dim, name="logits")
+  logits = mtf.layers.dense(h2, classes_dim, name="logits")
   if labels is None:
     loss = None
   else:
     labels = mtf.import_tf_tensor(
         mesh, tf.reshape(labels, [FLAGS.batch_size]), mtf.Shape([batch_dim]))
-    loss = mtf_layers.softmax_cross_entropy_with_logits(
+    loss = mtf.layers.softmax_cross_entropy_with_logits(
         logits, mtf.one_hot(labels, classes_dim), classes_dim)
     loss = mtf.reduce_mean(loss)
   return logits, loss
@@ -135,13 +130,13 @@ def model_fn(features, labels, mode, params):
   layout_rules = mtf.convert_to_layout_rules(FLAGS.layout)
   mesh_size = mesh_shape.size
   mesh_devices = [""] * mesh_size
-  mesh_impl = placement_mesh_impl.PlacementMeshImpl(
+  mesh_impl = mtf.placement_mesh_impl.PlacementMeshImpl(
       mesh_shape, layout_rules, mesh_devices)
 
   if mode == tf.estimator.ModeKeys.TRAIN:
     var_grads = mtf.gradients(
         [loss], [v.outputs[0] for v in graph.trainable_variables])
-    optimizer = mtf_optimize.AdafactorOptimizer()
+    optimizer = mtf.optimize.AdafactorOptimizer()
     update_ops = []
     for grad, var in zip(var_grads, graph.trainable_variables):
       update_ops.extend(optimizer.apply_grad(grad, var))

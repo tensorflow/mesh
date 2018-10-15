@@ -11,7 +11,7 @@ welcome](https://img.shields.io/badge/contributions-welcome-brightgreen.svg)](CO
 
 Transformer for EN-FR WMT with model splitting |  Transformer for EN-FR WMT with data splitting
 :-------------------------:|:-------------------------:
-![model_splitting](./mtf_transformer_model_splitting.png) | ![data_splitting](./mtf_transformer_data_splitting.png)
+![model_splitting](./transformer_model_splitting.png) | ![data_splitting](./transformer_data_splitting.png)
 
 # Introduction
 
@@ -116,7 +116,7 @@ w2 = mtf.get_variable(mesh, "w2", [hidden_dim, classes_dim])
 # einsum is a generalization of matrix multiplication (see numpy.einsum)
 hidden = mtf.relu(mtf.einsum(images, w1, output_shape=[batch_dim, hidden_dim]))
 logits = mtf.einsum(hidden, w2, output_shape=[batch_dim, classes_dim])
-loss = mtf.reduce_mean(mtf_layers.softmax_cross_entropy_with_logits(
+loss = mtf.reduce_mean(mtf.layers.softmax_cross_entropy_with_logits(
     logits, mtf.one_hot(labels, classes_dim), classes_dim))
 w1_grad, w2_grad = mtf.gradients([loss], [w1, w2])
 update_w1_op = mtf.assign(w1, w1 - w1_grad * 0.001)
@@ -132,7 +132,7 @@ computation.
 devices = ["gpu:0", "gpu:1", "gpu:2", "gpu:3"]
 mesh_shape = [("all_processors", 4)]
 layout_rules = [("batch", "all_processors")]
-mesh_impl = placement_mesh_impl.PlacementMeshImpl(
+mesh_impl = mtf.placement_mesh_impl.PlacementMeshImpl(
     mesh_shape, layout_rules, devices)
 lowering = mtf.Lowering(graph, {mesh:mesh_impl})
 tf_update_ops = [lowering.lowered_operation(update_w1_op),
@@ -371,7 +371,7 @@ TPU_NAME=ylc-mtf-donut
 # 2 ways data-parallelism and 4 ways model-parallelism.
 # In this configuration, we split the batch dimension into 2 cores and the
 # hidden dimension into 4 cores.
-python examples/mtf_toy_model_tpu.py \
+python examples/toy_model_tpu.py \
   --tpu=$TPU \
   --model_dir=$MODEL_DIR \
   --io_size=8 \
@@ -381,7 +381,7 @@ python examples/mtf_toy_model_tpu.py \
 
 # 8 ways model-parallelism.
 # In this configuration, We split the hidden dimension into 8 cores.
-python examples/mtf_toy_model_tpu.py \
+python examples/toy_model_tpu.py \
   --tpu=$TPU \
   --model_dir=$MODEL_DIR \
   --io_size=8 \

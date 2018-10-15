@@ -22,8 +22,6 @@ from __future__ import print_function
 from absl.testing import parameterized
 
 import mesh_tensorflow as mtf
-from mesh_tensorflow import placement_mesh_impl
-
 import tensorflow as tf
 
 
@@ -126,7 +124,7 @@ class MeshTensorFlowTest(parameterized.TestCase, tf.test.TestCase):
     mtf_inputs = mtf.import_tf_tensor(mesh,
                                       tf_tensor=inputs,
                                       shape=mtf.Shape([]))
-    mesh_impl = placement_mesh_impl.PlacementMeshImpl(
+    mesh_impl = mtf.placement_mesh_impl.PlacementMeshImpl(
         shape=[], layout={}, devices=[""])
     lowering = mtf.Lowering(graph, {mesh: mesh_impl})
 

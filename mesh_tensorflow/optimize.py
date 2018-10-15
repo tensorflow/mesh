@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Mesh-Tensorflow Optimizers."""
+"""Mesh Tensorflow Optimizers."""
 
 
 from __future__ import absolute_import

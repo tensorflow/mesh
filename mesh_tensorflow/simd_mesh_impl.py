@@ -19,9 +19,9 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-from mesh_tensorflow import mtf_utils
 from mesh_tensorflow import ops as mtf
 from mesh_tensorflow import tpu_variables
+from mesh_tensorflow import utils
 from six.moves import xrange  # pylint: disable=redefined-builtin
 
 import tensorflow as tf
@@ -44,7 +44,7 @@ class SimdMeshImpl(mtf.MeshImpl):
   def pnum_tensor(self):
     if self._pnum_tensor is not None:
       return self._pnum_tensor
-    with mtf_utils.outside_all_rewrites():
+    with utils.outside_all_rewrites():
       tf.logging.info("Create pnum_tensor")
       self._pnum_tensor = tpu_ops.tpu_replicated_input(
           list(range(self.size)), name="pnum_constants")
@@ -116,7 +116,7 @@ class SimdMeshImpl(mtf.MeshImpl):
                   initializer=tf.zeros_initializer()))
       self._laid_out_tensor = mesh_impl.LaidOutTensor(
           [tpu_variables.ReplicatedVariable(base_name, slices)])
-      with tf.device(variable.master.device), mtf_utils.outside_all_rewrites():
+      with tf.device(variable.master.device), utils.outside_all_rewrites():
         self._copy_master_to_slices = self.assign_to_slices(
             mesh_impl.make_slices(variable.master, shape),
             assign_to_tensor_list=slices)
