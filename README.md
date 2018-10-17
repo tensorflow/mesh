@@ -95,7 +95,7 @@ with 10 units (corresponding to the 10 digit classes).
 The code consists of two parts, the first describing the mathematical
 operations, and the second describing the devices and tensor/computation layout.
 For the full example, see [`examples/mnist.py`](
-https://github.com/tensorflow/mesh/tree/master/mesh_tensorflow/examples/mnist.py).
+https://github.com/tensorflow/mesh/blob/master/examples/mnist.py).
 TODO(noam): verify that this code works.
 
 ```Python

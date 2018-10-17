@@ -13,9 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Mnist using mesh-tensorflow and tf.Estimator.
+"""MNIST using Mesh TensorFlow and TF Estimator.
 
-This is an illustration of mesh-tensorflow, not a good model.
+This is an illustration, not a good model.
 """
 
 from __future__ import absolute_import
