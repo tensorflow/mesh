@@ -14,6 +14,10 @@ fi
 
 # First ensure that the base dependencies are sufficient for a full import
 pip install -q -e .
-python -c "import mesh_tensorflow as mtf"
 
+# Then install the test dependencies
 pip install -q -e .[tests]
+
+# Make sure we have the latest version of numpy - avoid problems we were
+# seeing with Python 3
+pip install -q -U numpy
