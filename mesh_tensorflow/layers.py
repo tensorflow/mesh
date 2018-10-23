@@ -242,21 +242,22 @@ def dense_relu_dense(x,
     return mtf.einsum([h, wo])
 
 
-def local_1d_halo_exchange(k, v, num_w_blocks, w_dim, memory_w_dim, mask_right):
+def local_1d_halo_exchange(k, v, num_w_blocks, w_dim, mask_right):
   """Halo exchange for keys and values for Local 1D attention."""
   if num_w_blocks is not None:
     if mask_right:
-      k = mtf.left_halo_exchange(k, num_w_blocks, w_dim, memory_w_dim.size)
-      v = mtf.left_halo_exchange(v, num_w_blocks, w_dim, memory_w_dim.size)
+      k = mtf.left_halo_exchange(k, num_w_blocks, w_dim, w_dim.size)
+      v = mtf.left_halo_exchange(v, num_w_blocks, w_dim, w_dim.size)
     else:
-      k = mtf.halo_exchange(k, num_w_blocks, w_dim, memory_w_dim.size)
-      v = mtf.halo_exchange(v, num_w_blocks, w_dim, memory_w_dim.size)
+      k = mtf.halo_exchange(k, num_w_blocks, w_dim, w_dim.size)
+      v = mtf.halo_exchange(v, num_w_blocks, w_dim, w_dim.size)
   else:
     if mask_right:
-      k = mtf.pad(k, [memory_w_dim, None], w_dim.name)
+      k = mtf.pad(k, [w_dim, None], w_dim.name)
+      v = mtf.pad(v, [w_dim, None], w_dim.name)
     else:
-      k = mtf.pad(k, [memory_w_dim, memory_w_dim], w_dim.name)
-    v = mtf.pad(v, [memory_w_dim, memory_w_dim], w_dim.name)
+      k = mtf.pad(k, [w_dim, w_dim], w_dim.name)
+      v = mtf.pad(v, [w_dim, w_dim], w_dim.name)
   return k, v
 
 
@@ -304,7 +305,8 @@ def local_self_attention_spatial_blocks(
 
     # Rename dimensions for the memory height and width.
     memory_antecedent = mtf.rename_dimension(
-        query_antecedent, w_dim.name, memory_w_dim.name)
+        query_antecedent, w_dim.name, "memory_" + w_dim.name)
+    memory_w_dim = memory_antecedent.shape.dims[-2]
 
     # Call einsum over the query and memory to get query q, keys k and values v.
     q = mtf.einsum(
@@ -312,15 +314,13 @@ def local_self_attention_spatial_blocks(
         mtf.Shape([batch, heads, num_w_blocks, w_dim, kv_channels]))
     k = mtf.einsum(
         [memory_antecedent, k_var],
-        mtf.Shape([batch, heads, num_w_blocks, w_dim, kv_channels]))
+        mtf.Shape([batch, heads, num_w_blocks, memory_w_dim, kv_channels]))
     v = mtf.einsum(
         [memory_antecedent, v_var],
-        mtf.Shape([batch, heads, num_w_blocks, w_dim, kv_channels]))
+        mtf.Shape([batch, heads, num_w_blocks, memory_w_dim, kv_channels]))
 
     # Halo exchange for memory blocks.
-    if memory_w_dim is not None:
-      k, v = local_1d_halo_exchange(
-          k, v, num_w_blocks, w_dim, memory_w_dim, mask_right)
+    k, v = local_1d_halo_exchange(k, v, num_w_blocks, memory_w_dim, mask_right)
 
     # Calculate the causal mask to avoid peeking into the future. We compute
     # this once and reuse it for all blocks since the block_size is known.
@@ -332,8 +332,7 @@ def local_self_attention_spatial_blocks(
     output = dot_product_attention(q, k, v, mask=mask)
 
     return mtf.einsum(
-        [output, o_var],
-        mtf.Shape([batch, num_w_blocks, w_dim, io_channels]))
+        [output, o_var], mtf.Shape([batch, num_w_blocks, w_dim, io_channels]))
 
 
 def masked_local_attention_1d(query_antecedent,
@@ -454,6 +453,112 @@ def masked_local_attention_1d(query_antecedent,
         [batch, heads, query_length, kv_channels]))
     return mtf.einsum([final_output, o_var],
                       mtf.Shape([batch, query_length, io_channels]))
+
+
+def local_2d_halo_exchange(k, v, num_h_blocks, h_dim,
+                           num_w_blocks, w_dim, mask_right):
+  """Halo exchange for keys and values for Local 2D attention."""
+  for blocks_dim, block_size_dim, halo_size in [
+      (num_h_blocks, h_dim, h_dim.size),
+      (num_w_blocks, w_dim, w_dim.size)]:
+    # shape of k is [num_h_blocks, num_w_blocks, h_dim, w_dim, kv_channels]
+    if halo_size > 0:
+      if blocks_dim is not None:
+        if mask_right:
+          k = mtf.left_halo_exchange(k, blocks_dim, block_size_dim, halo_size)
+          v = mtf.left_halo_exchange(v, blocks_dim, block_size_dim, halo_size)
+        else:
+          k = mtf.halo_exchange(k, blocks_dim, block_size_dim, halo_size)
+          v = mtf.halo_exchange(v, blocks_dim, block_size_dim, halo_size)
+      else:
+        if mask_right:
+          k = mtf.pad(k, [halo_size, None], block_size_dim.name)
+          v = mtf.pad(v, [halo_size, None], block_size_dim.name)
+        else:
+          k = mtf.pad(k, [halo_size, halo_size], block_size_dim.name)
+          v = mtf.pad(v, [halo_size, halo_size], block_size_dim.name)
+  return k, v
+
+
+def local_2d_self_attention_spatial_blocks(query_antecedent,
+                                           kv_channels,
+                                           heads,
+                                           memory_h_dim=None,
+                                           memory_w_dim=None,
+                                           mask_right=False,
+                                           name=None):
+  """Attention to the source position and a neighborhood to the left or right.
+
+  The sequence is divided into blocks of length block_size.
+  Attention for a given query position can only see memory positions
+  less than or equal to the query position, in the corresponding block
+  and the previous block.
+
+  Args:
+    query_antecedent: a mtf.Tensor with shape [batch, num_h_blocks,
+      num_w_blocks, h_dim, w_dim, io_channels] must have the same size as
+      query_length, but a different name.
+    kv_channels: a mtf.Dimension (the size of the key and value vectors)
+    heads: a mtf.Dimension (the number of heads)
+    memory_h_dim: mtf Dimension, for the memory height block.
+    memory_w_dim: mtf Dimension, for the memory width block.
+    mask_right: bool, flag specifying whether we mask out attention to the right
+      for the decoder.
+    name: an optional string.
+
+  Returns:
+    a Tensor of shape
+        [batch, num_h_blocks, num_w_blocks, h_dim, w_dim, io_channels]
+
+  Raises:
+    ValueError: if channels or depth don't match.
+  """
+  with tf.variable_scope(
+      name, default_name="multihead_attention", values=[query_antecedent]):
+
+    h_dim, w_dim, io_channels = query_antecedent.shape.dims[-3:]
+    batch, num_h_blocks, num_w_blocks = query_antecedent.shape.dims[:3]
+    q_var, k_var, v_var, o_var = multihead_attention_vars(
+        query_antecedent.mesh, heads, io_channels, kv_channels,
+        query_antecedent.dtype)
+
+    # Rename dimensions for the memory height and width.
+    memory_antecedent = mtf.rename_dimension(query_antecedent, h_dim.name,
+                                             "memory_" + h_dim.name)
+    memory_antecedent = mtf.rename_dimension(memory_antecedent, w_dim.name,
+                                             "memory_" + w_dim.name)
+    memory_h_dim, memory_w_dim = memory_antecedent.shape.dims[-3:-1]
+
+    # Call einsum over the query and memory to get query q, keys k and values v.
+    q = mtf.einsum([query_antecedent, q_var],
+                   mtf.Shape([
+                       batch, heads, num_h_blocks, num_w_blocks, h_dim, w_dim,
+                       kv_channels
+                   ]))
+    k = mtf.einsum([memory_antecedent, k_var],
+                   mtf.Shape([batch, heads, num_h_blocks, num_w_blocks,
+                              memory_h_dim, memory_w_dim, kv_channels]))
+    v = mtf.einsum([memory_antecedent, v_var],
+                   mtf.Shape([batch, heads, num_h_blocks, num_w_blocks,
+                              memory_h_dim, memory_w_dim, kv_channels]))
+
+    # Halo exchange for memory blocks.
+    k, v = local_2d_halo_exchange(k, v, num_h_blocks, memory_h_dim,
+                                  num_w_blocks, memory_w_dim, mask_right)
+
+    # Calculate the causal mask to avoid peeking into the future. We compute
+    # this once and reuse it for all blocks since the block_size is known.
+    mask = None
+    if mask_right:
+      mask = attention_bias_local_2d_block(query_antecedent.mesh, h_dim, w_dim,
+                                           memory_h_dim, memory_w_dim)
+
+    output = dot_product_attention(q, k, v, mask=mask)
+
+    return mtf.einsum(
+        [output, o_var],
+        mtf.Shape(
+            [batch, num_h_blocks, num_w_blocks, h_dim, w_dim, io_channels]))
 
 
 def rename_length_to_memory_length(
@@ -759,6 +864,44 @@ def attention_bias_local_block(mesh, block_length, memory_length,
   mask = mtf.cast(mtf.less(mtf.range(mesh, block_length, dtype=dtype),
                            mtf.range(mesh, memory_length, dtype=dtype)),
                   dtype=dtype)
-  mask = mtf.cast(mtf.concat([memory_mask, mask], memory_length.name),
-                  dtype=tf.float32)  * -1e9
+  mask = mtf.cast(
+      mtf.concat([memory_mask, mask], memory_length.name),
+      dtype=tf.float32) * -1e9
+  return mask
+
+
+def attention_bias_local_2d_block(mesh,
+                                  h_dim,
+                                  w_dim,
+                                  memory_h_dim,
+                                  memory_w_dim,
+                                  dtype=tf.int32):
+  """Bias for attention for local blocks where attention to right is disallowed.
+
+  Create the bias matrix by using two separate masks, one for the memory part
+  which doesn't overlap with the query and second which interacts with the query
+  and should be disallowed to look to the right of the current query position.
+
+  Args:
+    mesh: a MeshTensorflow object
+    h_dim: a mtf.Dimension
+    w_dim: a mtf.Dimension
+    memory_h_dim: a mtf.Dimension
+    memory_w_dim: a mtf.Dimension
+    dtype: a tf.dtype
+
+  Returns:
+    a mtf.Tensor with shape [block_length, memory_length]
+  """
+  memory_height = mtf.Dimension(memory_h_dim.name, h_dim.size)
+  memory_width = mtf.Dimension(memory_w_dim.name, w_dim.size)
+  mask_top_visible = mtf.zeros(mesh, [h_dim, memory_height], dtype=dtype)
+  mask_left_visible = mtf.zeros(mesh, [w_dim, memory_width], dtype=dtype)
+  mask_query = mtf.greater(
+      mtf.range(mesh, memory_height, dtype=tf.int32),
+      mtf.range(mesh, memory_width, dtype=dtype))
+  width_mask = mtf.concat([mask_left_visible, mask_query], memory_width.name)
+  mask = mtf.cast(
+      mtf.concat([mask_top_visible, width_mask], memory_height.name),
+      dtype=tf.float32) * -1e9
   return mask
