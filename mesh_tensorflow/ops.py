@@ -4090,4 +4090,4 @@ def conv2d_with_blocks(
       else:
         conv_input = pad(
             conv_input, [halo_size, halo_size], block_size_dim.name)
-    return conv2d(conv_input, conv_filter, strides, "VALID", name)
+  return conv2d(conv_input, conv_filter, strides, "VALID", name)
