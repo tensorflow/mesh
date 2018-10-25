@@ -1012,7 +1012,16 @@ def convert_args_to_laid_out_tensors(xs):
 class Tensor(object):
   """A Distributed Tensor."""
 
-  def __init__(self, operation, shape, dtype, name=None):
+  def __init__(self, operation, shape, dtype, name=None, index=0):
+    """Create a Tensor.
+
+    Args:
+      operation: the Operation that outputs this tensor
+      shape: a Shape
+      dtype: a tf.DType
+      name: an optional string
+      index: optional integer, the index among operation's output tensors
+    """
     if not isinstance(shape, Shape):
       raise ValueError("shape must be a Shape got %s" % shape.to_string)
     if not isinstance(dtype, tf.DType):
@@ -1022,7 +1031,7 @@ class Tensor(object):
     self._shape = shape
     self._dtype = dtype
     if name is None:
-      name = self.operation.name
+      name = self.operation.name + ":" + str(index)
     self._name = name
     self._mesh.graph.tensors.append(self)
 
@@ -1380,7 +1389,8 @@ class GenericGradOperation(Operation):
         name=name or "generic_grad")
     self._grad_ys = grad_ys
     self._forward_op = forward_op
-    self._outputs = [Tensor(self, x.shape, x.dtype) for x in forward_op.inputs]
+    self._outputs = [Tensor(self, x.shape, x.dtype, index=i)
+                     for i, x in enumerate(forward_op.inputs)]
 
   def lower(self, lowering):
     # lists of lists of tf.Tensor
@@ -1809,7 +1819,8 @@ class SplitOperation(Operation):
 
     self._outputs = [
         Tensor(self, x.shape.resize_dimension(split_dim.name, output_size),
-               x.dtype) for output_size in self._output_sizes]
+               x.dtype, index=i)
+        for i, output_size in enumerate(self._output_sizes)]
 
   def gradient(self, grad_ys):
     return [concat(grad_ys, self._split_dim.name)]
@@ -1898,7 +1909,7 @@ class UnstackOperation(Operation):
     self._axis = x.shape.dims.index(dim)
     output_shape = x.shape - dim
     self._outputs = [
-        Tensor(self, output_shape, x.dtype) for _ in xrange(dim.size)]
+        Tensor(self, output_shape, x.dtype, index=i) for i in xrange(dim.size)]
 
   def gradient(self, grad_ys):
     return [stack(grad_ys, self._dim.name, self._axis)]
@@ -3797,7 +3808,7 @@ class WhileLoopOperation(Operation):
     ops = self.graph.operations
     before = len(ops)
     def make_placeholders(name):
-      return [Tensor(self, t.shape, t.dtype, name="%s_%d" % (name, i))
+      return [Tensor(self, t.shape, t.dtype, name="%s:%d" % (name, i))
               for i, t in enumerate(inputs)]
     self._cond_inputs = make_placeholders("cond_input")
     self._cond_output = self._cond_fn(*self._cond_inputs)
