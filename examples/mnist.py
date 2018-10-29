@@ -23,7 +23,7 @@ from __future__ import division
 from __future__ import print_function
 
 import mesh_tensorflow as mtf
-import .mnist_dataset as dataset  # local file import
+import mnist_dataset as dataset  # local file import
 import tensorflow as tf
 
 
