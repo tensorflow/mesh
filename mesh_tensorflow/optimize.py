@@ -51,7 +51,7 @@ class SgdOptimizer(Optimizer):
     return self._lr
 
   def apply_grad(self, grad, var):
-    return [mtf.assign(var, var.outputs[0] - (grad * self.lr))]
+    return [mtf.assign_sub(var, grad * self.lr)]
 
 
 class AdafactorOptimizer(Optimizer):
@@ -136,6 +136,7 @@ class AdafactorOptimizer(Optimizer):
 
   def apply_grad(self, grad, var):
     # create slots
+    grad = mtf.to_float(grad)
     factored_dims = self._factored_dims(var.shape)
     if factored_dims:
       d0, d1 = factored_dims
@@ -159,7 +160,7 @@ class AdafactorOptimizer(Optimizer):
     with tf.variable_scope(var.name + "/adafactor"):
       grad_squared = mtf.square(grad) + self._epsilon1
       decay_rate = self._decay_rate
-      old_val = var.value
+      old_val = mtf.to_float(var.value)
       if self._multiply_by_parameter_scale:
         update_scale = self._parameter_scale(old_val) * self._learning_rate
       else:
@@ -195,8 +196,7 @@ class AdafactorOptimizer(Optimizer):
                  + subtrahend * tf.constant(1.0 - self._beta1))
         subtrahend = new_m
         updates.append(mtf.assign(m, new_m))
-      new_val = old_val - subtrahend
-      var_update = mtf.assign(var, new_val)
+      var_update = mtf.assign_sub(var, subtrahend)
       updates.append(var_update)
       return updates
 

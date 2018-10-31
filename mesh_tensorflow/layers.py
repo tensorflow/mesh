@@ -25,7 +25,9 @@ import tensorflow as tf
 
 
 def dense(x, output_dim, reduced_dims=None, expert_dims=None,
-          use_bias=True, activation=None, name=None):
+          use_bias=True, activation=None,
+          master_dtype=tf.float32,
+          slice_dtype=tf.float32, name=None):
   """Dense layer doing (kernel*x + bias) computation.
 
   Args:
@@ -37,6 +39,8 @@ def dense(x, output_dim, reduced_dims=None, expert_dims=None,
       experts. Different experts get different weights.
     use_bias: a boolean, whether to add bias.
     activation: an optional function from mtf.Tensor to mtf.Tensor
+    master_dtype: a tf.dtype
+    slice_dtype: a tf.dtype
     name: a string. variable scope.
 
   Returns:
@@ -57,6 +61,8 @@ def dense(x, output_dim, reduced_dims=None, expert_dims=None,
         "kernel",
         w_shape,
         initializer=tf.random_normal_initializer(stddev=stddev),
+        master_dtype=master_dtype,
+        slice_dtype=slice_dtype,
         activation_dtype=x.dtype)
     y = mtf.einsum([x, w], output_shape)
     if use_bias:
@@ -209,7 +215,8 @@ def dense_relu_dense(x,
                      hidden_channels,
                      dropout=0.0,
                      dropout_broadcast_dims=None,
-                     name=None):
+                     master_dtype=tf.float32,
+                     slice_dtype=tf.float32, name=None):
   """Hidden layer with ReLU activation followed by linear projection.
 
   The output has the same number of channels as the input.
@@ -219,6 +226,8 @@ def dense_relu_dense(x,
     hidden_channels: a mtf.Dimension - channels in the hidden layer
     dropout: an optional float
     dropout_broadcast_dims: an optional list of mtf.Dimension
+    master_dtype: a tf.dtype
+    slice_dtype: a tf.dtype
     name: an optional string
 
   Returns:
@@ -226,20 +235,15 @@ def dense_relu_dense(x,
   """
   with tf.variable_scope(name, default_name="dense_relu_dense"):
     io_channels = x.shape.dims[-1]
-    stddev = (hidden_channels.size * io_channels.size) ** -0.25
-    io = mtf.Dimension("io", 2)
-    w = mtf.get_variable(
-        x.mesh,
-        "kernel",
-        mtf.Shape([io, io_channels, hidden_channels]),
-        initializer=tf.random_normal_initializer(stddev=stddev),
-        activation_dtype=x.dtype)
-    wi, wo = mtf.unstack(w, io)
-    h = mtf.relu(mtf.einsum([x, wi]))
+    h = dense(x, hidden_channels,
+              use_bias=False, activation=mtf.relu,
+              master_dtype=master_dtype, slice_dtype=slice_dtype, name="wi")
     if dropout != 0.0:
       h = mtf.dropout(h, 1.0 - dropout,
                       noise_shape=h.shape - dropout_broadcast_dims)
-    return mtf.einsum([h, wo])
+    return dense(h, io_channels, use_bias=False, activation=None,
+                 master_dtype=master_dtype, slice_dtype=slice_dtype,
+                 name="wo")
 
 
 def local_1d_halo_exchange(k, v, num_w_blocks, w_dim, mask_right):
@@ -267,6 +271,8 @@ def local_self_attention_spatial_blocks(
     heads,
     memory_w_dim=None,
     mask_right=False,
+    master_dtype=tf.float32,
+    slice_dtype=tf.float32,
     name=None):
   """Attention to the source position and a neighborhood to the left or right.
 
@@ -284,6 +290,8 @@ def local_self_attention_spatial_blocks(
     memory_w_dim: mtf Dimension, for the memory width block.
     mask_right: bool, flag specifying whether we mask out attention to the right
       for the decoder.
+    master_dtype: a tf.dtype
+    slice_dtype: a tf.dtype
     name: an optional string.
 
   Returns:
@@ -301,7 +309,7 @@ def local_self_attention_spatial_blocks(
     batch, num_w_blocks = query_antecedent.shape.dims[:2]
     q_var, k_var, v_var, o_var = multihead_attention_vars(
         query_antecedent.mesh, heads, io_channels, kv_channels,
-        query_antecedent.dtype)
+        master_dtype, slice_dtype, query_antecedent.dtype)
 
     # Rename dimensions for the memory height and width.
     memory_antecedent = mtf.rename_dimension(
@@ -340,6 +348,8 @@ def masked_local_attention_1d(query_antecedent,
                               kv_channels,
                               heads,
                               block_length=128,
+                              master_dtype=tf.float32,
+                              slice_dtype=tf.float32,
                               name=None):
   """Attention to the source position and a neighborhood to the left of it.
 
@@ -356,6 +366,8 @@ def masked_local_attention_1d(query_antecedent,
     kv_channels: a mtf.Dimension (the size of the key and value vectors)
     heads: a mtf.Dimension (the number of heads)
     block_length: an integer, representing receptive fields for attention.
+    master_dtype: a tf.dtype
+    slice_dtype: a tf.dtype
     name: an optional string.
 
   Returns:
@@ -371,7 +383,7 @@ def masked_local_attention_1d(query_antecedent,
     batch, query_length, io_channels = query_antecedent.shape.dims
     q_var, k_var, v_var, o_var = multihead_attention_vars(
         query_antecedent.mesh, heads, io_channels, kv_channels,
-        query_antecedent.dtype)
+        master_dtype, slice_dtype, query_antecedent.dtype)
 
     if memory_antecedent is None:
       memory_antecedent = rename_length_to_memory_length(
@@ -486,6 +498,8 @@ def local_2d_self_attention_spatial_blocks(query_antecedent,
                                            memory_h_dim=None,
                                            memory_w_dim=None,
                                            mask_right=False,
+                                           master_dtype=tf.float32,
+                                           slice_dtype=tf.float32,
                                            name=None):
   """Attention to the source position and a neighborhood to the left or right.
 
@@ -504,6 +518,8 @@ def local_2d_self_attention_spatial_blocks(query_antecedent,
     memory_w_dim: mtf Dimension, for the memory width block.
     mask_right: bool, flag specifying whether we mask out attention to the right
       for the decoder.
+    master_dtype: a tf.dtype
+    slice_dtype: a tf.dtype
     name: an optional string.
 
   Returns:
@@ -520,7 +536,7 @@ def local_2d_self_attention_spatial_blocks(query_antecedent,
     batch, num_h_blocks, num_w_blocks = query_antecedent.shape.dims[:3]
     q_var, k_var, v_var, o_var = multihead_attention_vars(
         query_antecedent.mesh, heads, io_channels, kv_channels,
-        query_antecedent.dtype)
+        master_dtype, slice_dtype, query_antecedent.dtype)
 
     # Rename dimensions for the memory height and width.
     memory_antecedent = mtf.rename_dimension(query_antecedent, h_dim.name,
@@ -566,8 +582,8 @@ def rename_length_to_memory_length(
   return mtf.rename_dimension(x, length_name, memory_length_name)
 
 
-def multihead_attention_vars(
-    mesh, heads, io_channels, kv_channels, activation_dtype):
+def multihead_attention_vars(mesh, heads, io_channels, kv_channels,
+                             master_dtype, slice_dtype, activation_dtype):
   """Create Parameters for Multihead Attention.
 
   Args:
@@ -575,6 +591,8 @@ def multihead_attention_vars(
     heads: a Dimension
     io_channels: a Dimension
     kv_channels: a Dimension
+    master_dtype: a tf.dtype
+    slice_dtype: a tf.dtype
     activation_dtype: a tf.dtype
 
   Returns:
@@ -593,10 +611,12 @@ def multihead_attention_vars(
                        verify_shape=None):
     del partition_info, verify_shape
     return tf.random_normal(shape, dtype=dtype) * tf.reshape(
-        [qk_stddev, qk_stddev, v_stddev, o_stddev], [4, 1, 1, 1])
+        tf.cast([qk_stddev, qk_stddev, v_stddev, o_stddev],
+                dtype or tf.float32), [4, 1, 1, 1])
   var = mtf.get_variable(
       mesh, "qkvo", mtf.Shape([qkvo, heads, io_channels, kv_channels]),
-      initializer=qkvo_initializer, activation_dtype=activation_dtype)
+      initializer=qkvo_initializer, master_dtype=master_dtype,
+      slice_dtype=slice_dtype, activation_dtype=activation_dtype)
   q_var, k_var, v_var, o_var = mtf.unstack(var, qkvo)
   return q_var, k_var, v_var, o_var
 
@@ -646,6 +666,8 @@ def multihead_attention(query_antecedent,
                         heads,
                         dropout=0.0,
                         dropout_broadcast_dims=None,
+                        master_dtype=tf.float32,
+                        slice_dtype=tf.float32,
                         name="multihead_attention"):
   """Multihead scaled-dot-product attention with input/output transformations.
 
@@ -664,6 +686,8 @@ def multihead_attention(query_antecedent,
     heads: a mtf.Dimension (the number of heads)
     dropout: a floating point value
     dropout_broadcast_dims: an optional list of mtf.Dimension
+    master_dtype: a tf.dtype
+    slice_dtype: a tf.dtype
     name: an optional string.
 
   Returns:
@@ -679,7 +703,7 @@ def multihead_attention(query_antecedent,
                          values=[query_antecedent, memory_antecedent]):
     q_var, k_var, v_var, o_var = multihead_attention_vars(
         query_antecedent.mesh, heads, io_channels, kv_channels,
-        query_antecedent.dtype)
+        master_dtype, slice_dtype, query_antecedent.dtype)
     if memory_antecedent is None:
       memory_antecedent = rename_length_to_memory_length(
           query_antecedent, query_length.name)
@@ -708,6 +732,8 @@ def multihead_self_attention_incremental(query_antecedent,
                                          prev_k,
                                          prev_v,
                                          step_num,
+                                         master_dtype,
+                                         slice_dtype,
                                          name="multihead_attention"):
   """Incremental self-attention (one decode step).
 
@@ -721,6 +747,8 @@ def multihead_self_attention_incremental(query_antecedent,
     prev_k: mtf.Tensor with shape [batch..., heads, memory_length, kv_channels]
     prev_v: mtf.Tensor with shape [batch..., heads, memory_length, kv_channels]
     step_num: mtf Scalar with dtype tf.int32
+    master_dtype: a tf.dtype
+    slice_dtype: a tf.dtype
     name: an optional string.
 
   Returns:
@@ -737,7 +765,7 @@ def multihead_self_attention_incremental(query_antecedent,
   with tf.variable_scope(name, default_name="multihead_attention"):
     q_var, k_var, v_var, o_var = multihead_attention_vars(
         query_antecedent.mesh, heads, io_channels, kv_channels,
-        query_antecedent.dtype)
+        master_dtype, slice_dtype, query_antecedent.dtype)
     memory_antecedent = query_antecedent
     q = mtf.einsum(
         [query_antecedent, q_var],
@@ -749,13 +777,16 @@ def multihead_self_attention_incremental(query_antecedent,
         [memory_antecedent, v_var],
         mtf.Shape(batch_dims + [heads, kv_channels]))
     k = prev_k + mtf.multiply(
-        k, mtf.one_hot(step_num, memory_length), output_shape=prev_k.shape)
+        k, mtf.one_hot(step_num, memory_length, dtype=prev_k.dtype),
+        output_shape=prev_k.shape)
     v = prev_v + mtf.multiply(
-        v, mtf.one_hot(step_num, memory_length), output_shape=prev_v.shape)
+        v, mtf.one_hot(step_num, memory_length, dtype=prev_v.dtype),
+        output_shape=prev_v.shape)
 
-    mask = mtf.to_float(mtf.greater(mtf.range(
-        query_antecedent.mesh, memory_length, dtype=tf.int32), step_num)
-                       ) * -1e9
+    mask = mtf.cast(
+        mtf.greater(mtf.range(
+            query_antecedent.mesh, memory_length, dtype=tf.int32), step_num),
+        q.dtype) * -1e9
     o = dot_product_attention(q, k, v, mask)
     y = mtf.einsum([o, o_var], query_antecedent.shape)
     return y, k, v
@@ -905,3 +936,22 @@ def attention_bias_local_2d_block(mesh,
       mtf.concat([mask_top_visible, width_mask], memory_height.name),
       dtype=tf.float32) * -1e9
   return mask
+
+
+def multiplicative_jitter(x, epsilon=1e-2):
+  """Multiply values by a random number between 1-epsilon and 1+epsilon.
+
+  Makes models more resilient to rounding errors introduced by bfloat16.
+  This seems particularly important for logits.
+
+  Args:
+    x: a mtf.Tensor
+    epsilon: a floating point value
+
+  Returns:
+    a mtf.Tensor with the same type and shape as x.
+  """
+  if epsilon == 0:
+    return x
+  return x * mtf.random_uniform(
+      x.mesh, x.shape, minval=1.0 - epsilon, maxval=1.0+epsilon, dtype=x.dtype)

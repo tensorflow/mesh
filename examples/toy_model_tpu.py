@@ -36,6 +36,11 @@ FLAGS = flags.FLAGS
 tf.flags.DEFINE_integer('batch_size', 64, 'Training batch size.')
 tf.flags.DEFINE_integer('io_size', 2, 'Number of channels per feature.')
 tf.flags.DEFINE_integer('hidden_size', 2, 'Size of each hidden layer.')
+tf.flags.DEFINE_integer('num_hidden_layers', 1, 'Number of layers.')
+tf.flags.DEFINE_string('master_dtype', 'bfloat16', 'dtype for master vars.')
+tf.flags.DEFINE_string('slice_dtype', 'float32', 'dtype for slice vars.')
+tf.flags.DEFINE_string('activation_dtype', 'float32', 'dtype for activations.')
+tf.flags.DEFINE_string('optimizer', 'SGD', 'optimizer (SGD or Adafactor).')
 tf.flags.DEFINE_string('mesh_shape', 'all:8', 'mesh shape')
 tf.flags.DEFINE_string('layout', 'hidden:all', 'layout rules')
 tf.flags.DEFINE_integer('iterations', 100,
@@ -48,6 +53,7 @@ tf.flags.DEFINE_string(
     'model_dir',
     default='',
     help='The directory where the model will be stored.')
+tf.flags.DEFINE_bool('use_tpu', True, 'use TPU')
 
 # Cloud TPU Cluster Resolvers
 tf.flags.DEFINE_string(
@@ -97,14 +103,31 @@ class ToyModelInput(object):
 def toy_model(features, mesh):
   """A toy model implemented by mesh tensorlfow."""
   batch_dim = mtf.Dimension('batch', FLAGS.batch_size)
-  hidden_dim = mtf.Dimension('hidden', FLAGS.hidden_size)
   io_dim = mtf.Dimension('io', FLAGS.io_size)
 
-  x = mtf.import_tf_tensor(mesh, features, mtf.Shape([batch_dim, io_dim]))
-  h = mtf.layers.dense(x, hidden_dim, name='layer1', use_bias=False)
-  y = mtf.layers.dense(h, io_dim, name='layer2', use_bias=False)
+  master_dtype = tf.as_dtype(FLAGS.master_dtype)
+  slice_dtype = tf.as_dtype(FLAGS.slice_dtype)
+  activation_dtype = tf.as_dtype(FLAGS.activation_dtype)
 
-  loss = mtf.reduce_sum(mtf.square(y - x))
+  x = mtf.import_tf_tensor(mesh, features, mtf.Shape([batch_dim, io_dim]))
+  x = mtf.cast(x, activation_dtype)
+  h = x
+  for lnum in xrange(FLAGS.num_hidden_layers + 1):
+    if lnum + 1 == FLAGS.num_hidden_layers + 1:
+      dim = io_dim
+    elif lnum % 2 == 0:
+      dim = mtf.Dimension('hidden_even', FLAGS.hidden_size)
+    else:
+      dim = mtf.Dimension('hidden_odd', FLAGS.hidden_size)
+    h = mtf.layers.dense(
+        h, dim,
+        use_bias=False,
+        master_dtype=master_dtype,
+        slice_dtype=slice_dtype,
+        name='layer_%d' % lnum)
+  y = h
+
+  loss = mtf.reduce_mean(mtf.square(y - x))
   return y, loss
 
 
@@ -113,12 +136,31 @@ def model_fn(features, labels, mode, params):
   del labels
   global_step = tf.train.get_global_step()
   graph = mtf.Graph()
-  mesh = mtf.Mesh(graph, 'my_mesh')
   mesh_shape = mtf.convert_to_shape(FLAGS.mesh_shape)
-  mesh_devices = [''] * mesh_shape.size
-  mesh_impl = mtf.simd_mesh_impl.SimdMeshImpl(
-      mesh_shape, mtf.convert_to_layout_rules(FLAGS.layout),
-      mesh_devices, params['context'].device_assignment)
+  layout_rules = mtf.convert_to_layout_rules(FLAGS.layout)
+  if FLAGS.use_tpu:
+    ctx = params['context']
+    num_hosts = ctx.num_hosts
+    host_placement_fn = ctx.tpu_host_placement_function
+    device_list = [host_placement_fn(host_id=t) for t in range(num_hosts)]
+    tf.logging.info('device_list = %s' % device_list,)
+    # TODO(ylc): Better estimation of replica cache size?
+    replica_cache_size = 300 * 1000000  # 300M per replica
+    # Worker 0 caches all the TPU binaries.
+    worker0_mem = replica_cache_size * ctx.num_replicas
+    devices_memeory_usage = [worker0_mem] + [0] * (num_hosts - 1)
+    var_placer = mtf.utils.BalancedVariablePlacer(device_list,
+                                                  devices_memeory_usage)
+    mesh_devices = [''] * mesh_shape.size
+    mesh_impl = mtf.simd_mesh_impl.SimdMeshImpl(
+        mesh_shape, layout_rules, mesh_devices, ctx.device_assignment)
+  else:
+    var_placer = None
+    mesh_devices = [''] * mesh_shape.size
+    mesh_impl = mtf.placement_mesh_impl.PlacementMeshImpl(
+        mesh_shape, layout_rules, mesh_devices)
+  mesh = mtf.Mesh(graph, 'my_mesh', var_placer)
+
   with mtf.utils.outside_all_rewrites():
     logits, loss = toy_model(features, mesh)
 
@@ -126,7 +168,11 @@ def model_fn(features, labels, mode, params):
   if mode == tf.estimator.ModeKeys.TRAIN:
     var_grads = mtf.gradients([loss],
                               [v.outputs[0] for v in graph.trainable_variables])
-    optimizer = mtf.optimize.AdafactorOptimizer()
+    if FLAGS.optimizer == 'Adafactor':
+      optimizer = mtf.optimize.AdafactorOptimizer()
+    else:
+      assert FLAGS.optimizer == 'SGD'
+      optimizer = mtf.optimize.SgdOptimizer(lr=1e-4)
     update_ops = []
     for grad, var in zip(var_grads, graph.trainable_variables):
       update_ops.extend(optimizer.apply_grad(grad, var))
@@ -136,7 +182,7 @@ def model_fn(features, labels, mode, params):
 
   lowering = mtf.Lowering(graph, {mesh: mesh_impl})
 
-  tf_loss = lowering.export_to_tf_tensor(loss)
+  tf_loss = tf.to_float(lowering.export_to_tf_tensor(loss))
 
   if mode == tf.estimator.ModeKeys.TRAIN:
     tf_update_ops = [lowering.lowered_operation(op) for op in update_ops]
@@ -173,8 +219,8 @@ def model_fn(features, labels, mode, params):
     elif mode == tf.estimator.ModeKeys.EVAL:
 
       def metric_fn(tf_logits):
-        mean_logitss = tf.metrics.mean(tf_logits)
-        return {'mean_logitss': mean_logitss}
+        mean_logits = tf.metrics.mean(tf_logits)
+        return {'mean_logits': mean_logits}
 
       eval_metrics = (metric_fn, [tf_logits])
 

@@ -95,7 +95,8 @@ def beam_search(logits_fn,
                 eos_id=EOS_ID,
                 stop_early=True,
                 decode_length=None,
-                use_tpu=True):
+                use_tpu=True,
+                dtype=tf.float32):
   """Beam search with length penalties.
 
   Requires a function that can take the currently decoded symbols and return
@@ -128,7 +129,7 @@ def beam_search(logits_fn,
           step_num - mtf Scalar
           ids - mtf Tensor with shape [batch, beam, length]
         Should return:
-          logits - [batch, beam, vocab_size]
+          logits - [batch, beam, vocab_size], dtype=dtype
     initial_ids: a mtf.Tensor with shape [batch_dim, beam_dim, length_dim])
     alpha: alpha for length penalty.
     states: list of mtf.Tensor
@@ -136,6 +137,7 @@ def beam_search(logits_fn,
     stop_early: a boolean - stop once best sequence is provably determined.
     decode_length: a mtf Scalar of dtype tf.int32 - maximum length of decodes
     use_tpu: a boolean
+    dtype: a tf.dtype
   Returns:
     Tuple of
     (decoded beams [batch, beam, length]
@@ -150,7 +152,8 @@ def beam_search(logits_fn,
           mtf.constant(mesh, 0, dtype=tf.int32),
           beam_dim,
           on_value=0.0,
-          off_value=-INF),
+          off_value=-INF,
+          dtype=dtype),
       batch_by_beam)
 
   length_scalar = mtf.constant(mesh, length_dim.size, dtype=tf.int32)
@@ -166,7 +169,7 @@ def beam_search(logits_fn,
   # Finished log probs will be negative infinity in the beginning
   # finished_flags will keep track of booleans
   finished_seq = initial_ids
-  finished_scores = mtf.constant(mesh, -INF, batch_by_beam)
+  finished_scores = mtf.constant(mesh, -INF, batch_by_beam, dtype=dtype)
 
   # Setting the scores of the initial to negative infinity.
   finished_flags = mtf.constant(mesh, False, batch_by_beam, tf.bool)
@@ -197,7 +200,7 @@ def beam_search(logits_fn,
 
     # Set the scores of the unfinished seq in curr_seq to large negative
     # values
-    curr_scores += (1. - mtf.to_float(curr_finished)) * -INF
+    curr_scores += (1. - mtf.cast(curr_finished, curr_scores.dtype)) * -INF
     unused_batch_dim, beam_dim, unused_length_dim = finished_seq.shape.dims
     # concatenating the sequences and scores along beam axis
     def _my_concat(a, b):
@@ -232,7 +235,7 @@ def beam_search(logits_fn,
     """
     # Set the scores of the finished seq in curr_seq to large negative
     # values
-    curr_scores += mtf.to_float(curr_finished) * -INF
+    curr_scores += mtf.cast(curr_finished, curr_scores.dtype) * -INF
     return compute_topk_scores_and_seq(curr_seq, curr_scores, curr_log_probs,
                                        curr_finished, beam_dim,
                                        "grow_alive", states)
@@ -273,7 +276,7 @@ def beam_search(logits_fn,
     # (batch_size, beam_size, vocab_size) + (batch_size, beam_size, 1)
     log_probs = candidate_log_probs + alive_log_probs
 
-    length_penalty = mtf.pow(((5. + mtf.to_float(i + 1)) / 6.), alpha)
+    length_penalty = mtf.pow(((5. + mtf.cast(i + 1, logits.dtype)) / 6.), alpha)
 
     curr_scores = log_probs / length_penalty
 
@@ -401,7 +404,7 @@ def beam_search(logits_fn,
     if not stop_early:
       return mtf.less(i, decode_length)
     max_length_penalty = mtf.pow(
-        ((5. + mtf.to_float(decode_length)) / 6.), alpha)
+        ((5. + mtf.cast(decode_length, finished_scores.dtype)) / 6.), alpha)
     # The best possible score of the most likely alive sequence.
     lower_bound_alive_scores = mtf.gather(
         alive_log_probs, mtf.constant(mesh, 0, dtype=tf.int32),
@@ -412,7 +415,7 @@ def beam_search(logits_fn,
     # scores are all -ve, taking the min will give us the score of the lowest
     # finished item.
     lowest_score_of_finished_in_finished = mtf.reduce_min(
-        finished_scores * mtf.to_float(finished_in_finished),
+        finished_scores * mtf.cast(finished_in_finished, finished_scores.dtype),
         reduced_dim=beam_dim)
 
     # If none of the sequences have finished, then the min will be 0 and
@@ -420,8 +423,9 @@ def beam_search(logits_fn,
     # will be much higher than -ve INF and the termination condition will not
     # be met.
     lowest_score_of_finished_in_finished += (
-        (1. - mtf.to_float(mtf.reduce_any(
-            finished_in_finished, reduced_dim=beam_dim))) * -INF)
+        (1. - mtf.cast(mtf.reduce_any(
+            finished_in_finished, reduced_dim=beam_dim),
+                       finished_scores.dtype)) * -INF)
 
     bound_is_met = mtf.reduce_all(
         mtf.greater(lowest_score_of_finished_in_finished,

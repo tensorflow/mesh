@@ -74,35 +74,58 @@ class PlacementMeshImpl(mtf.MeshImpl):
       self._variable = variable
       self._mesh_impl = mesh_impl
       shape = variable.outputs[0].shape
-      dtype = variable.outputs[0].dtype
       slice_shape = mesh_impl.slice_shape(shape)
       base_name = variable.name
-      slices = []
-      for pnum in xrange(mesh_impl.size):
-        with tf.device(mesh_impl.devices[pnum]):
-          slices.append(tf.get_variable(
-              base_name + "_slice_%d" % pnum,
-              slice_shape,
-              dtype=dtype, collections=[]))
-      self._laid_out_tensor = mesh_impl.LaidOutTensor(slices)
-      self._copy_master_to_slices = self.assign_to_slices(
-          mesh_impl.make_slices(variable.master, shape))
-      self._copy_slices_to_master = tf.assign(
-          variable.master,
-          mesh_impl.combine_slices(self._laid_out_tensor.all_slices, shape))
+      if self.slice_is_master:
+        tf.logging.info(
+            "Single slice is indentical to master - avoid creating extra vars.")
+        slices = [variable.master]
+        self._laid_out_tensor = mesh_impl.LaidOutTensor(slices)
+        self._copy_slices_to_master = tf.group([])
+        self._copy_master_to_slices = tf.group([])
+      else:
+        slices = []
+        slices_with_master_dtype = []
+        for pnum in xrange(mesh_impl.size):
+          with tf.device(mesh_impl.devices[pnum]):
+            slices.append(tf.get_variable(
+                base_name + "_slice_%d" % pnum,
+                slice_shape,
+                dtype=variable.slice_dtype, collections=[]))
+            slices_with_master_dtype.append(
+                tf.cast(slices[-1], variable.master_dtype))
+        self._laid_out_tensor = mesh_impl.LaidOutTensor(slices)
+        self._copy_master_to_slices = self.assign_to_slices(
+            mtf.assign_slice, mesh_impl.make_slices(variable.master, shape))
+        self._copy_slices_to_master = tf.assign(
+            variable.master,
+            mesh_impl.combine_slices(slices_with_master_dtype, shape))
 
-    def assign_to_slices(self, slices):
+    @property
+    def slice_is_master(self):
+      """Should we avoid creating a slice variable and just use the master."""
+      if self._mesh_impl.size != 1:
+        return False
+      if self._variable.master_dtype != self._variable.slice_dtype:
+        return False
+      master_device = self._variable.master.device
+      slice_device = self._mesh_impl.devices[0]
+      return slice_device == master_device or not slice_device
+
+    def assign_to_slices(self, assign_fn, values):
       """Assign to the slice variables.
 
       Args:
-        slices: a list of tf.Tensor
+        assign_fn: a function from
+          (mtf.Variable, tf.Variable, tf.Tensor) -> tf.Operation
+        values: a list of tf.Tensor
 
       Returns:
         a tf.operation
       """
       return tf.group(mtf.parallel(
-          self._mesh_impl.devices, tf.assign,
-          self.laid_out_tensor.all_slices, slices))
+          self._mesh_impl.devices, assign_fn, [self._variable] * len(values),
+          self.laid_out_tensor.all_slices, values))
 
     @property
     def laid_out_tensor(self):

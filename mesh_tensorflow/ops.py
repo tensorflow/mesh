@@ -141,9 +141,9 @@ class Shape(object):
     return _cumprod(self.to_integer_list)[:-1]
 
   def cumprod_to_tensor_axis(self, cumprod):
-    """Tensor axis i such that self.cumprod[i] == cumprod, or None."""
+    """Maximum tensor axis i such that self.cumprod[i] == cumprod, or None."""
     try:
-      return self.cumprod.index(cumprod)
+      return len(self) - 1 - self.cumprod[::-1].index(cumprod)
     except ValueError:
       return None
 
@@ -830,6 +830,27 @@ class MeshImpl(object):
       return (pnum // divisor) % modulus
     return self.slicewise(my_fn, self.laid_out_pnum())
 
+  def laid_out_slice_num(self, tensor_shape):
+    """A LaidOutTensor with an int32 scalar, identical for identical slices.
+
+    This is useful for synchronizing random operations.
+
+    Args:
+      tensor_shape: a TensorShape
+    Returns:
+      a LaidOutTensor where each slice is an integer scalar.
+    """
+    ret = self.slicewise(lambda: tf.to_int32(0))
+    tensor_layout = self.tensor_layout(tensor_shape)
+    for mesh_axis in tensor_layout.tensor_axis_to_mesh_axis:
+      if mesh_axis is not None:
+        def my_fn(x, pcoord, mesh_dim_size):
+          return x * mesh_dim_size + pcoord
+        ret = self.slicewise(
+            my_fn, ret, self.laid_out_pcoord(mesh_axis),
+            self.shape[mesh_axis].size)
+    return ret
+
   def broadcast_impl(self, old_slices, old_shape, new_shape):
     """Implementation of a broadcast operation.
 
@@ -1456,7 +1477,8 @@ class BinaryOpWithBroadcasting(Operation):
     if x1.dtype != x2.dtype:
       # If there is ever a binary operation with different operand types, then
       # we should add an argument allow_different_operand_dtypes=False.
-      raise ValueError("Dtypes must be equal.")
+      raise ValueError("Dtypes must be equal- got %s and %s"
+                       % (x1.dtype, x2.dtype))
     assert isinstance(output_dtype, tf.DType)
     self._outputs = [Tensor(self, output_shape, output_dtype)]
     self._tf_fn = tf_fn
@@ -2020,7 +2042,8 @@ class EinsumOperation(Operation):
       raise ValueError("Einsum needs at least one input")
     for x in inputs:
       if x.dtype != inputs[0].dtype:
-        raise ValueError("Input dtypes must be equal")
+        raise ValueError("Input dtypes must be equal got %s"
+                         % ([y.dtype for y in inputs],))
     self._outputs = [Tensor(self, output_shape, inputs[0].dtype)]
 
   def gradient(self, grad_ys):
@@ -2530,19 +2553,42 @@ def import_fully_replicated(mesh, tf_tensor, shape, name=None):
       mesh, tf_tensor, anonymous_shape(shape), name), shape)
 
 
+class LazyLaidOutTensor(object):
+  """Comutes a function later to create a LaidOutTensor.
+
+  The given to_laid_out_tensor_fn() is called every time
+  the to_laid_out_tensor() method is called.  Really, we should not need this
+  class, since XLA rematerilization should do it all for us.
+  """
+
+  def __init__(self, to_laid_out_tensor_fn, slice_shape):
+    self._to_laid_out_tensor_fn = to_laid_out_tensor_fn
+    self._slice_shape = slice_shape
+
+  def to_laid_out_tensor(self):
+    return self._to_laid_out_tensor_fn()
+
+  @property
+  def slice_shape(self):
+    return self._slice_shape
+
+
 class Variable(Operation):
   """Variable."""
 
-  def __init__(self, mesh, name, shape, dtype, initializer,
-               trainable, **kwargs):
+  def __init__(self, mesh, name, shape, master_dtype, slice_dtype,
+               activation_dtype, initializer, trainable, **kwargs):
     super(Variable, self).__init__([], mesh, name="name_will_be_set_later")
+    self._master_dtype = master_dtype
+    self._slice_dtype = slice_dtype
+    self._activation_dtype = activation_dtype
     self._trainable = trainable
     with tf.device(mesh.variable_placer_fn), utils.outside_all_rewrites():
       self.master = tf.get_variable(
-          name, shape.to_integer_list, dtype=dtype, initializer=initializer,
-          **kwargs)
+          name, shape.to_integer_list, dtype=master_dtype,
+          initializer=initializer, **kwargs)
     self._name = self.master.name[:self.master.name.find(":")]
-    self._outputs = [Tensor(self, shape, dtype)]
+    self._outputs = [Tensor(self, shape, activation_dtype)]
     self.graph.all_variables.append(self)
     if trainable:
       self.graph.trainable_variables.append(self)
@@ -2552,7 +2598,15 @@ class Variable(Operation):
     with utils.outside_all_rewrites():
       sv = mesh_impl.LaidOutVariable(self, mesh_impl)
     lowering.variables[self] = sv
-    lowering.set_tensor_lowering(self.outputs[0], sv.laid_out_tensor)
+    # Encourage re-decoding every time the slices are read.
+    # XLA should really be able to rematerilize without this.
+    def to_laid_out_tensor_fn():
+      return mesh_impl.slicewise(
+          tf.cast, sv.laid_out_tensor, self.activation_dtype)
+    lowering.set_tensor_lowering(
+        self.outputs[0],
+        LazyLaidOutTensor(to_laid_out_tensor_fn,
+                          mesh_impl.slice_shape(self.shape)))
     if self._trainable:
       lowering.add_counter("variables/trainable", self.outputs[0].size)
     else:
@@ -2567,40 +2621,87 @@ class Variable(Operation):
     return self.value.shape
 
   @property
-  def dtype(self):
-    return self.value.dtype
+  def master_dtype(self):
+    return self._master_dtype
+
+  @property
+  def slice_dtype(self):
+    return self._slice_dtype
+
+  @property
+  def activation_dtype(self):
+    return self._activation_dtype
+
+
+class ReadVariable(Operation):
+  """Read a variable."""
+
+  def __init__(self, var, name=None):
+    super(ReadVariable, self).__init__(
+        var.outputs, name=name or "read_variable")
+    self._var = var
+    self._outputs = [Tensor(self, var.shape, var.activation_dtype)]
+
+  def gradient(self, grad_ys):
+    return grad_ys
+
+  def lower(self, lowering):
+    mesh_impl = lowering.mesh_impl(self)
+    sv = lowering.variables[self._var]
+    lowering.set_tensor_lowering(
+        self.outputs[0], mesh_impl.slicewise(
+            tf.cast, sv.laid_out_tensor, self._var.activation_dtype))
 
 
 def get_variable(mesh, name, shape, dtype=tf.float32,
+                 master_dtype=None, slice_dtype=None, activation_dtype=None,
                  initializer=None, trainable=True,
-                 activation_dtype=None, **kwargs):
-  ret = Variable(
-      mesh, name, convert_to_shape(shape), dtype, initializer,
-      trainable, **kwargs).outputs[0]
-  if activation_dtype and activation_dtype != dtype:
-    ret = cast(ret, activation_dtype)
-  return ret
+                 **kwargs):
+  return Variable(
+      mesh, name, convert_to_shape(shape), master_dtype or dtype,
+      slice_dtype or dtype, activation_dtype or dtype,
+      initializer, trainable, **kwargs).outputs[0]
+
+
+def read_variable(var):
+  return ReadVariable(var).outputs[0]
+
+
+def assign_slice(variable, slice_var, val):
+  return tf.assign(slice_var, tf.cast(val, variable.slice_dtype))
+
+
+def assign_add_slice(variable, slice_var, val):
+  return tf.assign(slice_var, slice_var + tf.cast(val, variable.slice_dtype))
+
+
+def assign_sub_slice(variable, slice_var, val):
+  return tf.assign(slice_var, slice_var - tf.cast(val, variable.slice_dtype))
 
 
 class Assign(Operation):
   """Assign to a variable."""
 
-  def __init__(self, var, new_val, name=None):
+  def __init__(self, var, new_val, assign_fn=assign_slice, name=None):
     super(Assign, self).__init__([new_val], var.mesh, name=name or "assign")
     self._var = var
+    self._assign_fn = assign_fn
     self._outputs = []
 
   def lower(self, lowering):
     lowering.operations[self] = lowering.variables[self._var].assign_to_slices(
+        self._assign_fn,
         lowering.tensors[self.inputs[0]].to_laid_out_tensor().all_slices)
 
 
-def assign(var, new_val):
+def assign(var, new_val, assign_fn=assign_slice):
   """Assign a new value to a variable.
 
   Args:
     var: either a Variable operation or its output Tensor.
     new_val: a Tensor
+    assign_fn: a function from
+        (mtf.Variable, tf.Variable, tf.Tensor) -> tf.Operation
   Returns:
     an Operation
   Raises:
@@ -2610,7 +2711,15 @@ def assign(var, new_val):
     var = var.operation
   if not isinstance(var, Variable):
     raise ValueError("var must be a mtf.Variable or its output Tensor.")
-  return Assign(var, new_val)
+  return Assign(var, new_val, assign_fn=assign_fn)
+
+
+def assign_add(var, new_val):
+  return assign(var, new_val, assign_fn=assign_add_slice)
+
+
+def assign_sub(var, new_val):
+  return assign(var, new_val, assign_fn=assign_sub_slice)
 
 
 class Depend(Operation):
@@ -3108,7 +3217,7 @@ def top_k(x, reduced_dim, new_dim, dtype=tf.int32, name=None):
       indices.append(max_index)
       values.append(max_val)
       if i + 1 < k:
-        x += one_hot(max_index, reduced_dim, on_value=-1e9)
+        x += one_hot(max_index, reduced_dim, on_value=-1e9, dtype=x.dtype)
   axis = x.shape.dims.index(reduced_dim)
   return stack(indices, new_dim.name, axis), stack(values, new_dim.name, axis)
 
@@ -3616,7 +3725,7 @@ def parallel(devices, fn, *args, **kwargs):
     if not isinstance(x, list) or len(x) != len(devices):
       raise ValueError(
           "Argument not a list with same length as devices "
-          "arg=%s devices=%s %s %s" % (x, devices, len(x), len(devices)))
+          "arg=%s devices=%s" % (x, devices))
   ret = []
   for i, device in enumerate(devices):
     with tf.device(device):

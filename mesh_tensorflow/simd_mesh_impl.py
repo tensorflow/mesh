@@ -96,10 +96,10 @@ class SimdMeshImpl(mtf.MeshImpl):
       self._variable = variable
       self._mesh_impl = mesh_impl
       shape = variable.outputs[0].shape
-      dtype = variable.outputs[0].dtype
       slice_shape = mesh_impl.slice_shape(shape)
       base_name = variable.name
       slices = []
+      slices_with_master_dtype = []
       for pnum in xrange(mesh_impl.size):
         slice_var_name = base_name + "_slice_%d" % pnum
         tpu_device = mesh_impl.device_assignment.tpu_device(replica=pnum)
@@ -111,25 +111,30 @@ class SimdMeshImpl(mtf.MeshImpl):
               tf.get_variable(
                   slice_var_name,
                   slice_shape,
-                  dtype=dtype,
+                  dtype=variable.slice_dtype,
                   collections=[],
                   initializer=tf.zeros_initializer()))
       self._laid_out_tensor = mesh_impl.LaidOutTensor(
           [tpu_variables.ReplicatedVariable(base_name, slices)])
       with tf.device(variable.master.device), utils.outside_all_rewrites():
         self._copy_master_to_slices = self.assign_to_slices(
+            mtf.assign_slice,
             mesh_impl.make_slices(variable.master, shape),
             assign_to_tensor_list=slices)
+        slices_with_master_dtype = [
+            tf.cast(s, variable.master_dtype) for s in slices]
         self._copy_slices_to_master = tf.assign(
             variable.master,
-            mesh_impl.combine_slices(slices, shape,
+            mesh_impl.combine_slices(slices_with_master_dtype, shape,
                                      device=variable.master.device))
 
-    def assign_to_slices(self, slice_values, assign_to_tensor_list=None):
+    def assign_to_slices(self, assign_fn, values, assign_to_tensor_list=None):
       """Assign to the slice variables.
 
       Args:
-        slice_values: a list of tf.Tensor
+        assign_fn: a function from
+          (mtf.Variable, tf.Variable, tf.Tensor) -> tf.Operation
+        values: a list of tf.Tensor
         assign_to_tensor_list: an optional list of tf.Variable
 
       Returns:
@@ -138,12 +143,13 @@ class SimdMeshImpl(mtf.MeshImpl):
       if assign_to_tensor_list is None:
         assign_to_tensor_list = self._laid_out_tensor.all_slices
       # Handle both N -> 1 and N -> N cases.
-      num_slices = min(
-          len(assign_to_tensor_list), len(slice_values))
+      num_slices = min(len(assign_to_tensor_list), len(values))
       devices = [""] * num_slices
       return tf.group(
-          mtf.parallel(devices, tf.assign, assign_to_tensor_list[:num_slices],
-                       slice_values[:num_slices]))
+          mtf.parallel(devices, assign_fn,
+                       [self._variable] * len(devices),
+                       assign_to_tensor_list[:num_slices],
+                       values[:num_slices]))
 
     @property
     def laid_out_tensor(self):
@@ -196,8 +202,15 @@ class SimdMeshImpl(mtf.MeshImpl):
     x = x.to_laid_out_tensor()
     if reduction_fn_string == "SUM":
       group_assignment = self._create_group_assignment(mesh_axes)
-      return self.LaidOutTensor(
-          [tpu_ops.cross_replica_sum(x.one_slice, group_assignment)])
+      tf_in = x.one_slice
+      dtype = tf_in.dtype
+      if not (dtype == tf.float32 or dtype == tf.bfloat16):
+        tf.logging.info("Casting %s to float32 for allreduce" % tf_in.dtype)
+        tf_in = tf.cast(tf_in, tf.float32)
+      tf_out = tpu_ops.cross_replica_sum(tf_in, group_assignment)
+      if tf_out.dtype != dtype:
+        tf_out = tf.cast(tf_out, dtype)
+      return self.LaidOutTensor([tf_out])
     else:
       for axis in mesh_axes:
         x = self.allconcat(x, axis, 0, stack=True)
@@ -248,12 +261,19 @@ class SimdMeshImpl(mtf.MeshImpl):
     x = x.to_laid_out_tensor()
     t = x.one_slice
     group_assignment = self._create_group_assignment([mesh_axis])
+    dtype = t.dtype
+    if dtype == tf.float32:
+      # There seems to be a bug with float32 alltoall.
+      # Do it in bfloat16 until the bug is fixed.
+      # TODO(noam): file a bug
+      t = tf.to_bfloat16(t)
     t = tpu_ops.all_to_all(
         t,
         concat_dimension=concat_axis,
         split_dimension=split_axis,
         split_count=len(group_assignment[0]),
         group_assignment=group_assignment)
+    t = tf.cast(t, dtype)
     x = self.LaidOutTensor([t])
     return x
 
