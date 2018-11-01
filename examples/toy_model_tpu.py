@@ -34,15 +34,15 @@ from tensorflow.python.platform import tf_logging as logging
 FLAGS = flags.FLAGS
 
 tf.flags.DEFINE_integer('batch_size', 64, 'Training batch size.')
-tf.flags.DEFINE_integer('io_size', 2, 'Number of channels per feature.')
-tf.flags.DEFINE_integer('hidden_size', 2, 'Size of each hidden layer.')
+tf.flags.DEFINE_integer('io_size', 16, 'Number of channels per feature.')
+tf.flags.DEFINE_integer('hidden_size', 16, 'Size of each hidden layer.')
 tf.flags.DEFINE_integer('num_hidden_layers', 1, 'Number of layers.')
 tf.flags.DEFINE_string('master_dtype', 'bfloat16', 'dtype for master vars.')
 tf.flags.DEFINE_string('slice_dtype', 'float32', 'dtype for slice vars.')
 tf.flags.DEFINE_string('activation_dtype', 'float32', 'dtype for activations.')
 tf.flags.DEFINE_string('optimizer', 'SGD', 'optimizer (SGD or Adafactor).')
 tf.flags.DEFINE_string('mesh_shape', 'all:8', 'mesh shape')
-tf.flags.DEFINE_string('layout', 'hidden:all', 'layout rules')
+tf.flags.DEFINE_string('layout', 'hidden_odd:all', 'layout rules')
 tf.flags.DEFINE_integer('iterations', 100,
                         'Number of iterations per training loop.')
 tf.flags.DEFINE_integer('train_steps', 10000, 'max steps')
@@ -112,8 +112,9 @@ def toy_model(features, mesh):
   x = mtf.import_tf_tensor(mesh, features, mtf.Shape([batch_dim, io_dim]))
   x = mtf.cast(x, activation_dtype)
   h = x
-  for lnum in xrange(FLAGS.num_hidden_layers + 1):
-    if lnum + 1 == FLAGS.num_hidden_layers + 1:
+  for lnum in xrange(1, FLAGS.num_hidden_layers + 2):
+    if lnum + 1 == FLAGS.num_hidden_layers + 2:
+      # output layer
       dim = io_dim
     elif lnum % 2 == 0:
       dim = mtf.Dimension('hidden_even', FLAGS.hidden_size)
