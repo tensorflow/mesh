@@ -350,6 +350,8 @@ class Graph(object):
     self._tensors = []
     self._trainable_variables = []
     self._all_variables = []
+    # Maps a name used in the graph to the next id to use for that name.
+    self._names_in_use = {}
 
   def __repr__(self):
     return self.to_string
@@ -373,6 +375,37 @@ class Graph(object):
   @property
   def to_string(self):
     return "\n".join([op.to_string for op in self.operations])
+
+  def unique_name(self, name, mark_as_used=True):
+    """Like tf.Graph.unique_name, returns a unique operation name for `name`.
+
+    Args:
+      name: The name for an operation.
+      mark_as_used: whether to mark this name as being used.
+
+    Returns:
+      A string to use as the name for the operation.
+    """
+    scope_name = tf.get_variable_scope().name
+    if scope_name:
+      name = scope_name + "/" + name
+
+    # As in TensorFlow, treat names as case insensitive when deciding whether
+    # they are in use.
+    name_key = name.lower()
+    i = self._names_in_use.get(name_key, 0)
+    if mark_as_used:
+      self._names_in_use[name_key] = i + 1
+    if i > 0:
+      base_name_key = name_key
+      while name_key in self._names_in_use:
+        name_key = "%s_%d" % (base_name_key, i)
+        i += 1
+      if mark_as_used:
+        self._names_in_use[name_key] = 1
+      name = "%s_%d" % (name, i-1)
+
+    return name
 
 
 class Lowering(object):
@@ -1143,10 +1176,7 @@ class Operation(object):
     self._outputs = []
     self._mesh = mesh
     assert name is not None
-    scope_name = tf.get_variable_scope().name
-    if scope_name:
-      name = scope_name + "/" + name
-    self._name = name
+    self._name = mesh.graph.unique_name(name)
     mesh.graph.operations.append(self)
 
   @property

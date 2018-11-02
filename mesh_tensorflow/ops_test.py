@@ -116,6 +116,29 @@ class MeshTensorFlowTest(parameterized.TestCase, tf.test.TestCase):
     self.assertLen(graph.trainable_variables, 1)
     self.assertLen(graph.all_variables, 2)
 
+  def testGraphNames(self):
+    # Standard Usage.
+    graph = mtf.Graph()
+    self.assertEqual(graph.unique_name("a"), "a")
+    self.assertEqual(graph.unique_name("a"), "a_1")
+    self.assertEqual(graph.unique_name("a"), "a_2")
+
+    # Edge cases, the user may choose the name "a_1".
+    graph = mtf.Graph()
+    self.assertEqual(graph.unique_name("a"), "a")
+    self.assertEqual(graph.unique_name("a"), "a_1")
+    self.assertEqual(graph.unique_name("a_1"), "a_1_1")
+
+    graph = mtf.Graph()
+    self.assertEqual(graph.unique_name("a"), "a")
+    self.assertEqual(graph.unique_name("a_1"), "a_1")
+    self.assertEqual(graph.unique_name("a"), "a_2")
+
+    # Case insensitive.
+    graph = mtf.Graph()
+    self.assertEqual(graph.unique_name("a"), "a")
+    self.assertEqual(graph.unique_name("A"), "A_1")
+
   @tf.contrib.eager.run_test_in_graph_and_eager_modes()
   def testLowering(self):
     graph = mtf.Graph()
