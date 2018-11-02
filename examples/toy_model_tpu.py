@@ -26,9 +26,9 @@ import tensorflow as tf
 from tensorflow.contrib.tpu.python.tpu import tpu_config
 from tensorflow.contrib.tpu.python.tpu import tpu_estimator
 from tensorflow.python.data.ops.dataset_ops import Dataset
-from tensorflow.python.estimator import estimator as estimator_lib
 from tensorflow.python.platform import flags
 from tensorflow.python.platform import tf_logging as logging
+from tensorflow_estimator.python.estimator import estimator as estimator_lib
 
 
 FLAGS = flags.FLAGS
