@@ -343,128 +343,142 @@ def local_self_attention_spatial_blocks(
         [output, o_var], mtf.Shape([batch, num_w_blocks, w_dim, io_channels]))
 
 
-def masked_local_attention_1d(query_antecedent,
-                              memory_antecedent,
+def masked_local_attention_1d(x,
                               kv_channels,
                               heads,
-                              block_length=128,
+                              window_size=128,
                               master_dtype=tf.float32,
                               slice_dtype=tf.float32,
+                              length_per_split=None,
                               name=None):
   """Attention to the source position and a neighborhood to the left of it.
 
-  The sequence is divided into blocks of length block_size.
-  Attention for a given query position can only see memory positions
-  less than or equal to the query position, in the corresponding block
-  and the previous block.
+  Attention for a given query position p can only see memory positions
+  in the range (p - window_size, p].
 
   Args:
-    query_antecedent: a mtf.Tensor with shape [batch, query_length, io_channels]
-    memory_antecedent: a mtf.Tensor with shape
-      [batch, memory_length, io_channels] (optional). Currently, memory_length
-      must have the same size as query_length, but a different name.
+    x: a mtf.Tensor with shape batch_dims + [length, io_channels]
     kv_channels: a mtf.Dimension (the size of the key and value vectors)
     heads: a mtf.Dimension (the number of heads)
-    block_length: an integer, representing receptive fields for attention.
+    window_size: an integer
     master_dtype: a tf.dtype
     slice_dtype: a tf.dtype
+    length_per_split: an optional integer indicating the part of the length
+      dimension per processor.  You can omit if the length dimension is not
+      split.
     name: an optional string.
 
   Returns:
-    a Tensor of shape [batch, query_length, io_channels]
+    a Tensor with the same shape as x
 
   Raises:
     ValueError: if channels or depth don't match.
   """
   with tf.variable_scope(
-      name, default_name="multihead_attention",
-      values=[query_antecedent, memory_antecedent]):
+      name, default_name="masked_local_attention_1d", values=[x]):
 
-    batch, query_length, io_channels = query_antecedent.shape.dims
+    batch_dims = x.shape.dims[:-2]
+    length, io_channels = x.shape.dims[-2:]
     q_var, k_var, v_var, o_var = multihead_attention_vars(
-        query_antecedent.mesh, heads, io_channels, kv_channels,
-        master_dtype, slice_dtype, query_antecedent.dtype)
-
-    if memory_antecedent is None:
-      memory_antecedent = rename_length_to_memory_length(
-          query_antecedent, query_length.name)
-    memory_batch, memory_length, memory_channels = memory_antecedent.shape.dims
-    if memory_batch != batch:
-      raise ValueError("memory batch must equal query batch")
-    if memory_channels != io_channels:
-      raise ValueError("memory channels must equal query channels")
+        x.mesh, heads, io_channels, kv_channels,
+        master_dtype, slice_dtype, x.dtype)
 
     # Get query q, keys k and values v.
-    q = mtf.einsum(
-        [query_antecedent, q_var],
-        mtf.Shape([batch, heads, query_length, kv_channels]))
-    k = mtf.einsum(
-        [memory_antecedent, k_var],
-        mtf.Shape([batch, heads, memory_length, kv_channels]))
-    v = mtf.einsum(
-        [memory_antecedent, v_var],
-        mtf.Shape([batch, heads, memory_length, kv_channels]))
+    qkv_shape = mtf.Shape(batch_dims + [heads, length, kv_channels])
+    q = mtf.einsum([x, q_var], qkv_shape)
+    k = mtf.einsum([x, k_var], qkv_shape)
+    v = mtf.einsum([x, v_var], qkv_shape)
 
-    # Let's assume for now we don't have padding and the block length equally
-    # divides the memory length.
-    block_length = (query_length.size
-                    if query_length.size < block_length * 2 else block_length)
-    blength = mtf.Dimension("block_length", block_length)
-    mlength = mtf.Dimension("mem_block_length", block_length)
-    num_blocks = mtf.Dimension("num_blocks", query_length.size // block_length)
+    # Choose a suitable block size.
+    # We choose the greatest divisor of length_per_split less than or equal
+    # to max(window_size, 128)
+    if length_per_split is None:
+      length_per_split = length.size
+    block_length = max(window_size, 128)
+    while length_per_split % block_length != 0:
+      block_length -= 1
 
-    q = mtf.reshape(
-        q, mtf.Shape([batch, heads, num_blocks, blength, kv_channels]))
-    k = mtf.reshape(
-        k, mtf.Shape([batch, heads, num_blocks, mlength, kv_channels]))
-    v = mtf.reshape(
-        v, mtf.Shape([batch, heads, num_blocks, mlength, kv_channels]))
+    query_block_length = mtf.Dimension("query_block_length", block_length)
+    memory_block_length = mtf.Dimension("memory_block_length", block_length)
+    # The num_blocks dimension gets the same name as the length dimension,
+    # so it will be split in the same way.
+    num_blocks = mtf.Dimension(length.name, length.size // block_length)
+    q_shape = batch_dims + [heads, num_blocks, query_block_length, kv_channels]
+    kv_shape = batch_dims + [
+        heads, num_blocks, memory_block_length, kv_channels]
+    q = mtf.reshape(q, q_shape)
+    k = mtf.reshape(k, kv_shape)
+    v = mtf.reshape(v, kv_shape)
+    # augment the keys and values for each block with keys and values for
+    # the previous window_size timesteps.
+    k = mtf.left_halo_exchange(k, num_blocks, memory_block_length, window_size)
+    v = mtf.left_halo_exchange(v, num_blocks, memory_block_length, window_size)
+    padded_memory_block_length = mtf.Dimension(
+        "memory_block_length", window_size + block_length)
+    mpos = mtf.range(x.mesh, padded_memory_block_length, tf.float32)
+    qpos = mtf.range(x.mesh, query_block_length, tf.float32) + window_size
+    # prevent looking forward
+    mask = mtf.cast(mtf.greater(mpos, qpos), x.dtype) * -1e9
+    # prevent looking >=block_length timesteps backward
+    mask += mtf.cast(mtf.less_equal(mpos, qpos - block_length), x.dtype) * -1e9
+    # Note: The first window_size-1 positions can see back into pre-time
+    # where all the keys and values are zero.  We could mask this out, but we
+    # don't.
+    o = dot_product_attention(q, k, v, mask=mask)
+    o = mtf.reshape(o, batch_dims + [heads, length, kv_channels])
+    return mtf.einsum([o, o_var], mtf.Shape(batch_dims + [length, io_channels]))
 
-    # compute attention for the first query block.
-    def first_block_attention():
-      """Compute attention for the first block."""
-      first_q = mtf.slice(q, 0, 1, num_blocks.name)
-      first_k = mtf.slice(k, 0, 1, num_blocks.name)
-      first_v = mtf.slice(v, 0, 1, num_blocks.name)
-      first_output = dot_product_attention(first_q,
-                                           first_k,
-                                           first_v,
-                                           mask=None)
-      return first_output
 
-    # Attention for first block, since query_length = key_length.
-    first_output = first_block_attention()
+def masked_local_attention_1d_incremental(x,
+                                          prev_k,
+                                          prev_v,
+                                          step_num,
+                                          master_dtype,
+                                          slice_dtype,
+                                          name=None):
+  """Incremental local self-attention (one decode step).
 
-    # Concatenate two adjacent blocks to compute the overlapping memory block.
-    def local(x):
-      """Helper function to get memory blocks."""
-      prev_block = mtf.slice(x, 0, num_blocks.size-1, num_blocks.name)
-      cur_block = mtf.slice(x, 1, num_blocks.size-1, num_blocks.name)
-      local_block = mtf.concat([prev_block, cur_block], mlength.name)
-      return local_block
+  Incremental version of masked_local_attention_1d()
 
-    local_k = local(k)
-    local_v = local(v)
-    # Calculate the causal mask to avoid peeking into the future. We compute
-    # this once and reuse it for all blocks since the block_size is known.
-    mlength = local_k.shape.dims[3]
-    mask = attention_bias_local_block(query_antecedent.mesh,
-                                      blength, mlength)
+  Args:
+    x: a mtf.Tensor with shape [batch..., io_channels]
+    prev_k: mtf.Tensor with shape
+       [batch..., heads, window_length, kv_channels]
+    prev_v: mtf.Tensor with shape
+       [batch..., heads, window_length, kv_channels]
+    step_num: mtf Scalar with dtype tf.int32
+    master_dtype: a tf.dtype
+    slice_dtype: a tf.dtype
+    name: an optional string.
 
-    # Remove the first block from q since we already computed that.
-    tail_q = mtf.slice(q, 1, num_blocks.size-1, num_blocks.name)
+  Returns:
+    y: A mtf.Tensor with shape [batch..., io_channels]
+    new_k: mtf.Tensor with shape
+       [batch..., heads, window_length, kv_channels]
+    new_v: mtf.Tensor with shape
+       [batch..., heads, window_length, kv_channels]
 
-    tail_output = dot_product_attention(tail_q,
-                                        local_k,
-                                        local_v,
-                                        mask=mask)
-
-    # Now concatenate the first and rest of the blocks.
-    final_output = mtf.concat([first_output, tail_output], num_blocks.name)
-    final_output = mtf.reshape(final_output, mtf.Shape(
-        [batch, heads, query_length, kv_channels]))
-    return mtf.einsum([final_output, o_var],
-                      mtf.Shape([batch, query_length, io_channels]))
+  Raises:
+    ValueError: if the dimensions do not match.
+  """
+  batch_dims = x.shape.dims[:-1]
+  io_channels = x.shape.dims[-1]
+  heads, window_length, kv_channels = prev_k.shape.dims[-3:]
+  with tf.variable_scope(name, default_name="multihead_attention"):
+    q_var, k_var, v_var, o_var = multihead_attention_vars(
+        x.mesh, heads, io_channels, kv_channels,
+        master_dtype, slice_dtype, x.dtype)
+    q = mtf.einsum([x, q_var], mtf.Shape(batch_dims + [heads, kv_channels]))
+    k = mtf.einsum([x, k_var], mtf.Shape(batch_dims + [heads, kv_channels]))
+    v = mtf.einsum([x, v_var], mtf.Shape(batch_dims + [heads, kv_channels]))
+    current_position = mtf.equal(
+        mtf.range(x.mesh, window_length, dtype=tf.int32),
+        mtf.mod(step_num, window_length.size))
+    k = mtf.where(current_position, k, prev_k, output_shape=prev_k.shape)
+    v = mtf.where(current_position, v, prev_v, output_shape=prev_v.shape)
+    o = dot_product_attention(q, k, v, mask=None)
+    y = mtf.einsum([o, o_var], x.shape)
+    return y, k, v
 
 
 def local_2d_halo_exchange(k, v, num_h_blocks, h_dim,

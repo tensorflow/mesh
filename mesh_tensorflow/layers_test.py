@@ -156,17 +156,14 @@ class LayersTest(parameterized.TestCase, tf.test.TestCase):
       (1, 8, 5, 3, 1, 4),
   )
   def testMaskedLocalAttention1D(self, batch, length, io_channels, kv_channels,
-                                 heads, block_length):
+                                 heads, window_size):
     length_q = length
-    length_m = length
     query = tf.random_normal([batch, length_q, io_channels])
-    memory = tf.random_normal([batch, length_m, io_channels])
 
     graph = mtf.Graph()
     mesh = mtf.Mesh(graph, "my_mesh")
     batch_dim = mtf.Dimension("batch", batch)
     length_q_dim = mtf.Dimension("length_q", length_q)
-    length_m_dim = mtf.Dimension("length_m", length_m)
     io_channels_dim = mtf.Dimension("io_channels", io_channels)
     kv_channels_dim = mtf.Dimension("kv_channels", kv_channels)
     heads_dim = mtf.Dimension("heads", heads)
@@ -174,15 +171,11 @@ class LayersTest(parameterized.TestCase, tf.test.TestCase):
     mtf_query = mtf.import_tf_tensor(
         mesh, query,
         shape=mtf.Shape([batch_dim, length_q_dim, io_channels_dim]))
-    mtf_memory = mtf.import_tf_tensor(
-        mesh, memory,
-        shape=mtf.Shape([batch_dim, length_m_dim, io_channels_dim]))
     mtf_outputs = mtf.layers.masked_local_attention_1d(
         mtf_query,
-        mtf_memory,
         kv_channels=kv_channels_dim,
         heads=heads_dim,
-        block_length=block_length)
+        window_size=window_size)
     mesh_impl = mtf.placement_mesh_impl.PlacementMeshImpl(
         shape=[], layout={}, devices=[""])
     lowering = mtf.Lowering(graph, {mesh: mesh_impl})

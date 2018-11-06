@@ -3283,6 +3283,10 @@ def add(x1, x2, output_shape=None, name=None):
             x1.shape, x2.shape, output_shape)).outputs[0]
 
 
+def add_n(xs):
+  return reduce(add, xs)
+
+
 def sub(x1, x2, output_shape=None, name=None):
   """Binary subtraction with broadcsting.
 
@@ -4048,11 +4052,12 @@ def while_loop(cond_fn, body_fn, inputs, num_loop_vars=None, **kwargs):
       my_cond_fn, my_body_fn, inputs, kwargs).outputs
 
 
-def where(condition, if_true, if_false):
+def where(condition, if_true, if_false, output_shape=None):
   dtype = if_true.dtype
   return (
-      if_true * cast(condition, dtype) +
-      if_false * cast(logical_not(condition), dtype))
+      multiply(if_true, cast(condition, dtype), output_shape=output_shape) +
+      multiply(if_false,
+               cast(logical_not(condition), dtype), output_shape=output_shape))
 
 
 def _shape_union(shapes):
@@ -4241,3 +4246,32 @@ def conv2d_with_blocks(
         conv_input = pad(
             conv_input, [halo_size, halo_size], block_size_dim.name)
   return conv2d(conv_input, conv_filter, strides, "VALID", name)
+
+
+def tensor_dim_to_mesh_dim_size(layout, mesh_shape, tensor_dim):
+  """How many ways does a tensor dimension get split.
+
+  This is used to "cheat" when building the mtf graph and peek at how a
+  tensor dimension will be split.  Returns 1 if the tensor dimension is not
+  split.
+
+  Args:
+    layout: an input to convert_to_layout_rules
+    mesh_shape: an in put to convert_to_shape
+    tensor_dim: a Dimension
+
+  Returns:
+    an integer
+  """
+  layout_rules = convert_to_layout_rules(layout)
+  mesh_shape = convert_to_shape(mesh_shape)
+  mesh_axis = layout_rules.tensor_dimension_to_mesh_axis(tensor_dim, mesh_shape)
+  if mesh_axis is None:
+    return 1
+  else:
+    return mesh_shape.dims[mesh_axis].size
+
+
+def tensor_dim_to_size_per_split(layout, mesh_shape, tensor_dim):
+  return tensor_dim.size // tensor_dim_to_mesh_dim_size(
+      layout, mesh_shape, tensor_dim)
