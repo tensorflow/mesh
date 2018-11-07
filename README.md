@@ -389,3 +389,19 @@ python examples/toy_model_tpu.py \
   --mesh_shape='all:8' \
   --layout='hidden:all'
 ```
+
+## References
+
+> N. Shazeer, Y. Cheng, N. Parmar, D. Tran, A. Vaswani, P. Koanantakool,
+> P. Hawkins, H. Lee, M. Hong, C. Young, R. Sepassi, and B. Hechtman.
+> [Mesh-TensorFlow: Deep learning for supercomputers.](https://arxiv.org/abs/1811.02084)
+> In _Neural Information Processing Systems_, 2018.
+
+```none
+@inproceedings{shazeer2018mesh,
+  author = {Noam Shazeer and Youlong Cheng and Niki Parmar and Dustin Tran and Ashish Vaswani and Penporn Koanantakool and Peter Hawkins and HyoukJoong Lee and Mingsheng Hong and Cliff Young and Ryan Sepassi and Blake Hechtman},
+  title = {{Mesh-TensorFlow}: Deep Learning for Supercomputers},
+  booktitle = {Neural Information Processing Systems},
+  year = {2018},
+}
+```
