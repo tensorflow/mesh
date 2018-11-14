@@ -328,6 +328,11 @@ pip install --user .
 ```
 
 ## Run the Transfomer model with Tensor2Tensor config
+```sh
+git clone https://github.com/tensorflow/tensor2tensor.git
+cd tensor2tensor/
+pip install --user  .
+```
 
 Before run the model, you need to prepare the training data and bucket for
 storing checkpoints. Refer to the
