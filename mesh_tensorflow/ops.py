@@ -2254,7 +2254,7 @@ def conv2d_backprop_input(input_shape,
 
 
 class Conv2dBackpropFilterOperation(Operation):
-  """like tf.nn.conv2d_backprop_input"""
+  """Like tf.nn.conv2d_backprop_filter."""
 
   def __init__(self, conv_input, filter_shape, dy, strides, padding, name=None):
     super(Conv2dBackpropFilterOperation, self).__init__(
@@ -2505,7 +2505,7 @@ class PadOperation(Operation):
 
 
 class OneHotOperation(Operation):
-  """one_hot.
+  """Like tf.one_hot.
   """
 
   def __init__(self, indices, output_dim, on_value, off_value, dtype,
@@ -2584,11 +2584,11 @@ def import_fully_replicated(mesh, tf_tensor, shape, name=None):
 
 
 class LazyLaidOutTensor(object):
-  """Comutes a function later to create a LaidOutTensor.
+  """Computes a function later to create a LaidOutTensor.
 
   The given to_laid_out_tensor_fn() is called every time
   the to_laid_out_tensor() method is called.  Really, we should not need this
-  class, since XLA rematerilization should do it all for us.
+  class, since XLA rematerialization should do it all for us.
   """
 
   def __init__(self, to_laid_out_tensor_fn, slice_shape):
@@ -2779,7 +2779,7 @@ class Depend(Operation):
 
 
 def depend(x, dependencies):
-  """Identity of Tensor x that dependes on operations dependencies.
+  """Identity of Tensor x that depends on operation dependencies.
 
   Args:
     x: a Tensor
@@ -2845,7 +2845,7 @@ def stop_gradient(x):
 
 
 class PrintOperation(Operation):
-  """Similar to tf.stop_gradient."""
+  """Similar to tf.Print."""
 
   def __init__(self, x, data, message, name=None, **kwargs):
     super(PrintOperation, self).__init__(
@@ -3938,7 +3938,7 @@ def log_variable_sizes(var_list, tag, verbose=True):
 
 
 class WhileLoopOperation(Operation):
-  """While loop."""
+  """While loop, like tf.while_loop."""
 
   def __init__(self, cond_fn, body_fn, inputs,
                tf_kwargs=None, name="while_loop"):
