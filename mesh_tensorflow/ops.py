@@ -19,8 +19,8 @@ from __future__ import division
 from __future__ import print_function
 
 import collections
-from functools import reduce  # pylint: disable=redefined-builtin; for py3
-from operator import mul
+import functools
+import operator
 import re
 
 from mesh_tensorflow import utils
@@ -2003,15 +2003,16 @@ def cumsum(x, dim, exclusive=False):
   Returns:
     a Tensor with the same shape as x.
   """
-  new_name = "tmp_dim_cumsum"
-  new_dim = Dimension(new_name, dim.size)
-  new_shape = x.shape.rename_dimension(dim.name, new_name)
-  comparator = less if exclusive else less_equal
-  m = cast(
-      comparator(range(x.mesh, dim, dtype=tf.float32),
-                 range(x.mesh, new_dim, dtype=tf.float32)), x.dtype)
-  ret = einsum([x, m], output_shape=new_shape)
-  return reshape(ret, x.shape)
+  with tf.variable_scope("cumsum"):
+    new_name = "tmp_dim_cumsum"
+    new_dim = Dimension(new_name, dim.size)
+    new_shape = x.shape.rename_dimension(dim.name, new_name)
+    comparator = less if exclusive else less_equal
+    m = cast(
+        comparator(range(x.mesh, dim, dtype=tf.float32),
+                   range(x.mesh, new_dim, dtype=tf.float32)), x.dtype)
+    ret = einsum([x, m], output_shape=new_shape)
+    return reshape(ret, x.shape)
 
 
 def _einsum_helper(input_shapes, output_shape, mesh_impl):
@@ -2038,7 +2039,7 @@ def _einsum_helper(input_shapes, output_shape, mesh_impl):
   def einsum_slice_fn_naive(*slices):
     # naive einsum implementation where we broadcst all inputs to the full
     # shape, multiply componentwise, then reduce.
-    return reduce_slice_fn(reduce(tf.multiply, [
+    return reduce_slice_fn(functools.reduce(tf.multiply, [
         _expand_dims(x, input_shape, full_shape)
         for x, input_shape in zip(slices, input_shapes)]))
   if full_shapes:
@@ -2549,6 +2550,10 @@ class ImportOperation(Operation):
 
   def __init__(self, mesh, tf_tensor, shape, name=None):
     super(ImportOperation, self).__init__([], mesh=mesh, name=name or "import")
+    tf_tensor = tf.convert_to_tensor(tf_tensor)
+    if not tf_tensor.shape.is_compatible_with(shape.to_integer_list):
+      raise ValueError("Incompatible Shape - trying to import %s with shape %s"
+                       % (tf_tensor, shape))
     self._outputs = [Tensor(self, shape, tf_tensor.dtype)]
     self._tf_tensor = tf_tensor
 
@@ -2886,6 +2891,9 @@ class ReshapeOperation(Operation):
 
   def __init__(self, x, new_shape, name=None):
     super(ReshapeOperation, self).__init__([x], x.mesh, name=name or "reshape")
+    if x.shape.size != new_shape.size:
+      raise ValueError("Cannot reshape Tensor %s to shape %s - sizes differ."
+                       % (x, new_shape))
     self._outputs = [Tensor(self, new_shape, x.dtype)]
 
   def lower(self, lowering):
@@ -2904,7 +2912,6 @@ class ReshapeOperation(Operation):
     new_shape = self.outputs[0].shape
     mesh_impl = lowering.mesh_impl(self)
     slices = lowering.tensors[self.inputs[0]]
-
     mesh_axis_to_cumprod_old = mesh_impl.mesh_axis_to_cumprod(old_shape)
     mesh_axis_to_cumprod_new = mesh_impl.mesh_axis_to_cumprod(new_shape)
     # Figure out what needs to be done for different mesh-axes
@@ -2997,36 +3004,72 @@ def rename_dimension(x, old_name, new_name):
   return reshape(x, x.shape.rename_dimension(old_name, new_name))
 
 
-def einsum(xs, output_shape=None, name=None):
+def einsum(xs, output_shape=None, reduced_dims=None, name=None):
   """Einstein summation.
 
-  If output_shape is not specified and there are two inputs, reduce over
-  all common dimensions and default the output shape to the unique dimensions
-  of the first input followed by the unique dimensions of the second input.
+  einsum(xs, output_shape) is equivalent to broadcasting all inputs
+  to the union of all of their shapes, multiplying them componentwise,
+  and finally reduce_summing down to output_shape.
+
+  One common case of this is matrix multiplication:
+      x has shape [a, b]
+      y has shape [b, c]
+      matmul(x, y) == einsum([x, y], output_shape=[a, c])
+
+  We provide a few options for specifying the output shape:
+
+  If neither output_shape nor reduced_dims is specified, then the output
+  shape is set to the contain all dimensions that appear exactly once in the
+  inputs, in order of appearance.
+
+  If output_shape is not specifed, then the output shape is set to the contain
+  all dimensions that appear in xs but not in reduced_dims, in the order
+  that they appear in xs.  If reduced_dims is also not specified, then
+  reduced_dims is set to the set of all dimensions that appear at least twice in
+  xs.
+
+  If both output_shape and reduced_dims are specified, then we check that
+  reduced_dims matches the set of dimensions present in xs but not in
+  output_shape, and throw an exception if it does not.  This helps to reduce
+  bugs.
 
   Args:
     xs: a list of Tensors
     output_shape: an optional Shape.
+    reduced_dims: an optional list of Dimensions.
     name: an optional string
   Returns:
     a Tensor
   Raises:
-    ValueError: if the output shape cannot be inferred
+    ValueError: if reduced_dims contradicts output_shape
   """
   output_shape = convert_to_shape(output_shape)
+  input_dim_count = collections.defaultdict(int)
+  input_dims = []
+  for x in xs:
+    for d in x.shape.dims:
+      if d not in input_dim_count:
+        input_dims.append(d)
+      input_dim_count[d] += 1
   if output_shape is None:
-    if len(xs) == 2:
-      output_shape = Shape(
-          [d for d in xs[0].shape.dims if d not in xs[1].shape.dims] +
-          [d for d in xs[1].shape.dims if d not in xs[0].shape.dims])
-    else:
-      raise ValueError("could not infer einsum output_shape for inputs %s" %
-                       [x.to_string for x in xs])
+    if reduced_dims is None:
+      reduced_dims = [d for d, c in six.iteritems(input_dim_count) if c > 1]
+    output_shape = Shape([d for d in input_dims if d not in reduced_dims])
+  elif reduced_dims is not None:
+    computed_reduced_dims = [
+        d for d in input_dims if d not in output_shape.dims]
+    if set(computed_reduced_dims) != set(reduced_dims):
+      raise ValueError(
+          "Specified reduced_dims and output_shape do not match."
+          " xs=%s output_shape=%s reduced_dims=%s " % (
+              xs, output_shape, reduced_dims))
   return EinsumOperation(xs, output_shape, name=name).outputs[0]
 
 
-def matmul(a, b, output_shape=None, name=None):
-  return einsum([a, b], output_shape=output_shape, name=name)
+def matmul(a, b, output_shape=None, reduced_dims=None, name=None):
+  """Alias for einsum([a, b])."""
+  return einsum(
+      [a, b], output_shape=output_shape, reduced_dims=reduced_dims, name=name)
 
 
 def _reduction_output_shape(x, output_shape, reduced_dim):
@@ -3039,10 +3082,13 @@ def _reduction_output_shape(x, output_shape, reduced_dim):
         raise ValueError(
             "reduced_dim=%s not in x.shape.dims=%s" % (reduced_dim, x.shape))
       return x.shape - reduced_dim
-  elif reduced_dim is not None:
-    raise ValueError("do not specify both reduced_dim and output_shape")
-  else:
-    return output_shape
+  if reduced_dim is not None:
+    if [reduced_dim] != [d for d in x.shape.dims if d not in output_shape.dims]:
+      raise ValueError(
+          "reduced_dim contradicts output_shape:"
+          "x=%s output_shape=%s reduced_dim=%s" %
+          (x, output_shape, reduced_dim))
+  return output_shape
 
 
 def reduce_sum(x,
@@ -3284,7 +3330,7 @@ def add(x1, x2, output_shape=None, name=None):
 
 
 def add_n(xs):
-  return reduce(add, xs)
+  return functools.reduce(add, xs)
 
 
 def sub(x1, x2, output_shape=None, name=None):
@@ -3380,6 +3426,11 @@ def pad(x, paddings, dim_name, name=None):
 def one_hot(indices, output_dim, on_value=1.0,
             off_value=0.0, dtype=tf.float32, name=None):
   """One hot operation.
+
+  TODO(noam): Is there a good reason we need a special mtf.Operation here?
+  We could just use some code like this:
+  cast(equal(indices, range(indices.mesh, output_dim, dtype=indices.dtype)),
+       dtype)
 
   Args:
     indices: a Tensor
@@ -3637,34 +3688,59 @@ def processor_groups(mesh_shape, group_dims):
 
 
 def list_product(l):
-  return reduce(mul, l, 1)
+  return functools.reduce(operator.mul, l, 1)
 
 
-def log_softmax(x, reduced_dim, name=None):
+def reduce_logsumexp(x, reduced_dim, extra_logit=None, name=None):
+  """Numerically stable version of log(reduce_sum(exp(x))).
+
+  Unlike other reductions, the output has the same shape as the input.
+  Note: with a minor change, we could allow multiple reduced dimensions.
+
+  Args:
+    x: a Tensor
+    reduced_dim: a dimension in x
+    extra_logit: an optional Tensor broadcastable to (x.shape - reduced_dim)
+    name: an optional string
+  Returns:
+    a Tensor with the same shape and dtype as x.
+  """
+  reduced_dim = convert_to_dimension(reduced_dim)
+  with tf.variable_scope(name, default_name="reduce_logsumexp"):
+    reduced_shape = x.shape - reduced_dim
+    max_logit = reduce_max(stop_gradient(x), output_shape=reduced_shape)
+    if extra_logit is not None:
+      max_logit = maximum(
+          max_logit,
+          stop_gradient(extra_logit) if isinstance(extra_logit, Tensor)
+          else extra_logit)
+    x -= max_logit
+    exp_x = exp(x)
+    sum_exp_x = reduce_sum(exp_x, output_shape=reduced_shape)
+    if extra_logit is not None:
+      sum_exp_x += exp(extra_logit - max_logit)
+    return log(sum_exp_x) + max_logit
+
+
+def log_softmax(x, reduced_dim, extra_logit=None, name=None):
   """log(softmax(x)).
 
   Args:
     x: a Tensor whose shape contains vocab_dim
     reduced_dim: a Dimension
+    extra_logit: an optional Tensor broadcastable to (x.shape - reduced_dim)
     name: an optional string
 
   Returns:
     a Tensor with the same shape as x
   """
-  reduced_dim = convert_to_dimension(reduced_dim)
-  with tf.variable_scope(name, default_name="log_softmax"):
-    reduced_shape = x.shape - reduced_dim
-    max_logit = reduce_max(stop_gradient(x), output_shape=reduced_shape)
-    x -= max_logit
-    exp_x = exp(x)
-    sum_exp_x = reduce_sum(exp_x, output_shape=reduced_shape)
-    log_denom = log(sum_exp_x)
-    return x - log_denom
+  return x - reduce_logsumexp(
+      x, reduced_dim, extra_logit=extra_logit, name=name)
 
 
-def softmax(x, reduced_dim, name=None):
+def softmax(x, reduced_dim, extra_logit=None, name=None):
   with tf.variable_scope(name, default_name="softmax"):
-    return exp(log_softmax(x, reduced_dim))
+    return exp(log_softmax(x, reduced_dim, extra_logit=extra_logit))
 
 
 def range(mesh, dim, dtype, name=None):  # pylint: disable=redefined-builtin
@@ -3681,8 +3757,13 @@ def range(mesh, dim, dtype, name=None):  # pylint: disable=redefined-builtin
   """
   dim = convert_to_dimension(dim)
   with tf.variable_scope(name, default_name="range"):
-    return import_tf_tensor(
-        mesh, tf.range(dim.size, dtype=dtype), shape=Shape([dim]))
+    if dtype == tf.bfloat16:
+      # tf.range(dtype=bfloat16) gives the wrong shape.
+      # TODO(noam): report the bug.
+      tf_range = tf.cast(tf.range(dim.size), tf.bfloat16)
+    else:
+      tf_range = tf.range(dim.size, dtype=dtype)
+    return import_tf_tensor(mesh, tf_range, shape=Shape([dim]))
 
 
 def pretty_print_counters(counters):

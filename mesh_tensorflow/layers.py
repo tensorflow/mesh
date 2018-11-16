@@ -640,7 +640,8 @@ def dot_product_attention(q,
                           v,
                           mask,
                           dropout=0.0,
-                          dropout_broadcast_dims=None):
+                          dropout_broadcast_dims=None,
+                          extra_logit=None):
   """Dot-product attention.
 
   Args:
@@ -653,6 +654,7 @@ def dot_product_attention(q,
     mask: mask Tensor (see attention_mask())
     dropout: a float.
     dropout_broadcast_dims: an optional list of mtf.Dimension
+    extra_logit: an optional scalar or tensor
 
   Returns:
     Tensor with shape [..., length_q, depth_v].
@@ -662,7 +664,7 @@ def dot_product_attention(q,
   logits = mtf.einsum([q, k], logits_shape)
   if mask is not None:
     logits += mask
-  weights = mtf.softmax(logits, length_kv)
+  weights = mtf.softmax(logits, length_kv, extra_logit=extra_logit)
   if dropout != 0.0:
     weights = mtf.dropout(
         weights, 1.0 - dropout,
@@ -969,3 +971,94 @@ def multiplicative_jitter(x, epsilon=1e-2):
     return x
   return x * mtf.random_uniform(
       x.mesh, x.shape, minval=1.0 - epsilon, maxval=1.0+epsilon, dtype=x.dtype)
+
+
+def multihead_self_attention_memory_compressed(x,
+                                               mask_right,
+                                               compression_factor,
+                                               kv_channels,
+                                               heads,
+                                               dropout=0.0,
+                                               dropout_broadcast_dims=None,
+                                               master_dtype=tf.float32,
+                                               slice_dtype=tf.float32,
+                                               name="multihead_attention"):
+  """Memory-compressed self-attention.
+
+  The memory is first average-pooled (strided) to make it shorter by
+  a factor of compression_factor.
+
+  Args:
+    x: a mtf.Tensor with shape
+      [<batch_dims>, query_length, io_channels]
+    mask_right: a boolean
+    compression_factor: an integer
+    kv_channels: a mtf.Dimension (the size of the key and value vectors)
+    heads: a mtf.Dimension (the number of heads)
+    dropout: a floating point value
+    dropout_broadcast_dims: an optional list of mtf.Dimension
+    master_dtype: a tf.dtype
+    slice_dtype: a tf.dtype
+    name: an optional string.
+
+  Returns:
+    A mtf.Tensor with shape [batch, query_length, io_channels]
+
+  Raises:
+    ValueError: if the dimensions do not match.
+  """
+  batch_dims = x.shape.dims[:-2]
+  length, io_channels = x.shape.dims[-2:]
+  with tf.variable_scope(name,
+                         default_name="compressed_attention",
+                         values=[x]):
+    q_var, k_var, v_var, o_var = multihead_attention_vars(
+        x.mesh, heads, io_channels, kv_channels,
+        master_dtype, slice_dtype, x.dtype)
+    memory_antecedent = compress_mean(x, length, compression_factor)
+    memory_antecedent = rename_length_to_memory_length(memory_antecedent)
+    memory_length = memory_antecedent.shape.dims[-2]
+    q = mtf.einsum(
+        [x, q_var],
+        mtf.Shape(batch_dims + [heads, length, kv_channels]))
+    k = mtf.einsum(
+        [memory_antecedent, k_var],
+        mtf.Shape(batch_dims + [heads, memory_length, kv_channels]))
+    v = mtf.einsum(
+        [memory_antecedent, v_var],
+        mtf.Shape(batch_dims + [heads, memory_length, kv_channels]))
+    if mask_right:
+      query_pos = mtf.range(x.mesh, length, dtype=tf.int32)
+      memory_pos = (
+          mtf.range(x.mesh, memory_length, dtype=tf.int32) * compression_factor
+          + (compression_factor - 1))
+      mask = mtf.cast(mtf.greater(memory_pos, query_pos), x.dtype) * -1e9
+    else:
+      mask = None
+    o = dot_product_attention(
+        q, k, v, mask, dropout, dropout_broadcast_dims, extra_logit=0.0)
+    return mtf.einsum(
+        [o, o_var], mtf.Shape(batch_dims + [length, io_channels]))
+
+
+def compress_mean(x, dim, compression_factor):
+  """Compress by taking group means.
+
+  Args:
+    x: a Tensor
+    dim: a dimension in x.shape
+    compression_factor: an integer
+
+  Returns:
+    a Tensor
+  """
+  dims = x.shape.dims
+  pos = dims.index(dim)
+  compressed_dim = mtf.Dimension(dim.name, dim.size // compression_factor)
+  compression_factor_dim = mtf.Dimension(
+      "compression_factor", compression_factor)
+  new_shape = (
+      dims[:pos] + [compressed_dim, compression_factor_dim] + dims[pos + 1:])
+  x = mtf.reshape(x, new_shape)
+  x = mtf.reduce_mean(x, reduced_dim=compression_factor_dim)
+  return x

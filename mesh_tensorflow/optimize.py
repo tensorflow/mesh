@@ -51,6 +51,9 @@ class SgdOptimizer(Optimizer):
     return self._lr
 
   def apply_grad(self, grad, var):
+    if grad is None:
+      tf.logging.warning("Gradient is None for variable %s" % var)
+      return []
     return [mtf.assign_sub(var, grad * self.lr)]
 
 
@@ -135,6 +138,9 @@ class AdafactorOptimizer(Optimizer):
     return mtf.maximum(reduce_rms(var), self._epsilon2)
 
   def apply_grad(self, grad, var):
+    if grad is None:
+      tf.logging.warning("Gradient is None for variable %s" % var)
+      return []
     # create slots
     grad = mtf.to_float(grad)
     factored_dims = self._factored_dims(var.shape)
