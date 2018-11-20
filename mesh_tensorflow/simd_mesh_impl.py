@@ -100,20 +100,20 @@ class SimdMeshImpl(mtf.MeshImpl):
       base_name = variable.name
       slices = []
       slices_with_master_dtype = []
+      with tf.device(variable.master.device), utils.outside_all_rewrites():
+        zero_tensor = tf.zeros(slice_shape)
+
       for pnum in xrange(mesh_impl.size):
         slice_var_name = base_name + "_slice_%d" % pnum
         tpu_device = mesh_impl.device_assignment.tpu_device(replica=pnum)
-        # The initializer is unimportant, since the slice variables will be
-        # overwritten.  zeros_initializer() is here to avoid the default
-        # initialization which adds lots of useless operations to the TF graph.
+        # Use tf.Variable instead of tf.get_variable since latter adds lots of
+        # useless operations to the TF graph.
         with ops.device(tpu_device):
-          slices.append(
-              tf.get_variable(
-                  slice_var_name,
-                  slice_shape,
-                  dtype=variable.slice_dtype,
-                  collections=[],
-                  initializer=tf.zeros_initializer()))
+          slices.append(tf.Variable(
+              initial_value=zero_tensor,
+              trainable=True, collections=[], dtype=variable.slice_dtype,
+              name=slice_var_name, expected_shape=slice_shape))
+
       self._laid_out_tensor = mesh_impl.LaidOutTensor(
           [tpu_variables.ReplicatedVariable(base_name, slices)])
       with tf.device(variable.master.device), utils.outside_all_rewrites():
