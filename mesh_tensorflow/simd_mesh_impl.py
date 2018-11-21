@@ -117,16 +117,41 @@ class SimdMeshImpl(mtf.MeshImpl):
       self._laid_out_tensor = mesh_impl.LaidOutTensor(
           [tpu_variables.ReplicatedVariable(base_name, slices)])
       with tf.device(variable.master.device), utils.outside_all_rewrites():
-        self._copy_master_to_slices = self.assign_to_slices(
-            mtf.assign_slice,
-            mesh_impl.make_slices(variable.master, shape),
-            assign_to_tensor_list=slices)
+        self._copy_master_to_slices = self._generate_copy_master_to_slices_op(
+            variable.master, shape, slices, slice_shape)
         slices_with_master_dtype = [
             tf.cast(s, variable.master_dtype) for s in slices]
         self._copy_slices_to_master = tf.assign(
             variable.master,
             mesh_impl.combine_slices(slices_with_master_dtype, shape,
                                      device=variable.master.device))
+
+    def _generate_copy_master_to_slices_op(self, master_varible, master_shape,
+                                           slices, slice_shape):
+      """Generate ops which slices master and assign to slices.
+
+      Args:
+        master_varible: The master variable.
+        master_shape: The shape of master variable.
+        slices: The list of sliced varialbes.
+        slice_shape: The shape of the slice variable.
+      Returns:
+        A grouped tf.assign ops.
+      """
+      master_layout = self._mesh_impl.tensor_layout(master_shape)
+      # For handling case: master is float32 and slices are bfloat16.
+      if master_varible.dtype != slices[0].dtype:
+        master_varible = tf.cast(master_varible, slices[0].dtype)
+
+      if master_layout.is_fully_replicated:
+        assign_ops = [tf.assign(t, master_varible) for t in slices]
+      else:
+        for pnum in xrange(len(slices)):
+          slice_begin = self._mesh_impl.slice_begin(master_shape, pnum)
+          assign_ops.append(
+              tf.assign(slices[pnum],
+                        tf.slice(master_varible, slice_begin, slice_shape)))
+      return tf.group(assign_ops)
 
     def assign_to_slices(self, assign_fn, values, assign_to_tensor_list=None):
       """Assign to the slice variables.
