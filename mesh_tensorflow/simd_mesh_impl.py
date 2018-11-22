@@ -142,7 +142,7 @@ class SimdMeshImpl(mtf.MeshImpl):
       # For handling case: master is float32 and slices are bfloat16.
       if master_varible.dtype != slices[0].dtype:
         master_varible = tf.cast(master_varible, slices[0].dtype)
-
+      assign_ops = []
       if master_layout.is_fully_replicated:
         assign_ops = [tf.assign(t, master_varible) for t in slices]
       else:
