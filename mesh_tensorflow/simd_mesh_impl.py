@@ -126,12 +126,12 @@ class SimdMeshImpl(mtf.MeshImpl):
             mesh_impl.combine_slices(slices_with_master_dtype, shape,
                                      device=variable.master.device))
 
-    def _generate_copy_master_to_slices_op(self, master_varible, master_shape,
+    def _generate_copy_master_to_slices_op(self, master_variable, master_shape,
                                            slices, slice_shape):
       """Generate ops which slices master and assign to slices.
 
       Args:
-        master_varible: The master variable.
+        master_variable: The master variable.
         master_shape: The shape of master variable.
         slices: The list of sliced varialbes.
         slice_shape: The shape of the slice variable.
@@ -140,17 +140,22 @@ class SimdMeshImpl(mtf.MeshImpl):
       """
       master_layout = self._mesh_impl.tensor_layout(master_shape)
       # For handling case: master is float32 and slices are bfloat16.
-      if master_varible.dtype != slices[0].dtype:
-        master_varible = tf.cast(master_varible, slices[0].dtype)
+      if master_variable.dtype != slices[0].dtype:
+        master_variable = tf.cast(master_variable, slices[0].dtype)
       assign_ops = []
       if master_layout.is_fully_replicated:
-        assign_ops = [tf.assign(t, master_varible) for t in slices]
+        assign_ops = [tf.assign(t, master_variable) for t in slices]
       else:
+        slice_dict = {}
         for pnum in xrange(len(slices)):
           slice_begin = self._mesh_impl.slice_begin(master_shape, pnum)
+          slice_begin_tuple = tuple(slice_begin)
+          # Reuse the same slice if slice_begin doesn't change.
+          if slice_begin_tuple not in slice_dict:
+            slice_dict[slice_begin_tuple] = tf.slice(master_variable,
+                                                     slice_begin, slice_shape)
           assign_ops.append(
-              tf.assign(slices[pnum],
-                        tf.slice(master_varible, slice_begin, slice_shape)))
+              tf.assign(slices[pnum], slice_dict[slice_begin_tuple]))
       return tf.group(assign_ops)
 
     def assign_to_slices(self, assign_fn, values, assign_to_tensor_list=None):

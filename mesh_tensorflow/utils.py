@@ -52,7 +52,7 @@ class BalancedVariablePlacer(object):
       The device for placing the var.
     """
     if var.type not in ('Variable', 'VariableV2', 'VarHandleOp'):
-      tf.logging.info('Place {} on last device: {}.'.format(
+      tf.logging.debug('Place {} on last device: {}.'.format(
           var.name, self._last_device))
       return self._last_device
 
