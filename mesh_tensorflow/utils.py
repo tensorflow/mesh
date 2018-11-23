@@ -63,7 +63,7 @@ class BalancedVariablePlacer(object):
     mem, device = heapq.heappop(self._mem_device_heap)
     mem += shape.num_elements() * size
     heapq.heappush(self._mem_device_heap, (mem, device))
-    tf.logging.info('Place variable {} on {} and consumes {} Bytes.'.format(
+    tf.logging.debug('Place variable {} on {} and consumes {} Bytes.'.format(
         var.name, device, mem))
     self._last_device = device
 
