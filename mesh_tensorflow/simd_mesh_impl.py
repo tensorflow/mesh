@@ -39,6 +39,7 @@ class SimdMeshImpl(mtf.MeshImpl):
     self._device_assignment = device_assignment
     tf.logging.info("SimdMeshImpl init: {0} {1}".format(shape, layout))
     self._pnum_tensor = None
+    self.graph_device_function_stacks = []
 
   @property
   def pnum_tensor(self):
@@ -103,16 +104,37 @@ class SimdMeshImpl(mtf.MeshImpl):
       with tf.device(variable.master.device), utils.outside_all_rewrites():
         zero_tensor = tf.zeros(slice_shape)
 
+      # pylint: disable=protected-access
+      init_device_stack = tf.get_default_graph()._device_function_stack
+
+      if not mesh_impl.graph_device_function_stacks:
+        for pnum in xrange(mesh_impl.size):
+          tpu_device = mesh_impl.device_assignment.tpu_device(replica=pnum)
+          with ops.device(tpu_device):
+            mesh_impl.graph_device_function_stacks.append(
+                tf.get_default_graph()._device_function_stack.copy())
+
       for pnum in xrange(mesh_impl.size):
         slice_var_name = base_name + "_slice_%d" % pnum
-        tpu_device = mesh_impl.device_assignment.tpu_device(replica=pnum)
         # Use tf.Variable instead of tf.get_variable since latter adds lots of
         # useless operations to the TF graph.
-        with ops.device(tpu_device):
-          slices.append(tf.Variable(
-              initial_value=zero_tensor,
-              trainable=True, collections=[], dtype=variable.slice_dtype,
-              name=slice_var_name, expected_shape=slice_shape))
+        # Note: Repeatedly 'with tf.device():' slows down the graph
+        # construction. Therefore we directly use the cached device_stack here.
+        tf.get_default_graph(
+        )._device_function_stack = mesh_impl.graph_device_function_stacks[pnum]
+
+        slices.append(
+            tf.Variable(
+                initial_value=zero_tensor,
+                trainable=True,
+                collections=[],
+                dtype=variable.slice_dtype,
+                name=slice_var_name,
+                expected_shape=slice_shape))
+
+      # Restore the initial stack
+      tf.get_default_graph()._device_function_stack = init_device_stack
+      # pylint: enable=protected-access
 
       self._laid_out_tensor = mesh_impl.LaidOutTensor(
           [tpu_variables.ReplicatedVariable(base_name, slices)])
