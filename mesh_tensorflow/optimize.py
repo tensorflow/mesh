@@ -34,14 +34,14 @@ def make_optimizer(hparams, lr):
 
 
 class Optimizer(object):
-  """Base optmizer class."""
+  """Base optimizer class."""
 
   def apply_grad(self, grad, var):
     raise ValueError("Apply_Grad not implemented %s %s" % (grad, var))
 
 
 class SgdOptimizer(Optimizer):
-  """oOptimizer implementing SGD."""
+  """Optimizer implementing SGD."""
 
   def __init__(self, lr):
     self._lr = lr
