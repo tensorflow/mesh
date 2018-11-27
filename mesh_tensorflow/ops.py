@@ -347,7 +347,6 @@ class Graph(object):
 
   def __init__(self):
     self._operations = []
-    self._tensors = []
     self._trainable_variables = []
     self._all_variables = []
     # Maps a name used in the graph to the next id to use for that name.
@@ -359,10 +358,6 @@ class Graph(object):
   @property
   def operations(self):
     return self._operations
-
-  @property
-  def tensors(self):
-    return self._tensors
 
   @property
   def trainable_variables(self):
@@ -406,6 +401,91 @@ class Graph(object):
       name = "%s_%d" % (name, i-1)
 
     return name
+
+  def rewrite_stack_variables(self, max_combined_size=2 ** 30):
+    """Rewrite the current graph to combine variables.
+
+    This helps speed up graph construction times in the case of large meshes
+    and large numbers of variables.
+
+    This function should be called after the forward pass, (before any variable
+    assignemnts). Some similar variables are stacked to form larger variables.
+
+    Variables created prior to this call are checkpointed as separate variables,
+    even though they are combined internally.   So the checkpoints are
+    compatible for inference purposes with/without this call.  However, the
+    optimizer accumulators, which are created after this call are checkpointed
+    as combined variables.
+
+    When we find a set of variables with the same shape/dtype/etc, we replace
+    them with one StackedVariable and an "unstack" operation.  The
+    StackedVariable has multiple master variables (so as to maintain
+    checkpiont compatibility), but only one slice variable per device.  We
+    point the inputs of later operations to the outputs of the
+    "unstack" operations, instead of the outputs of the defunct single
+    variables.
+
+    TODO(noam, ylc): Rewrite assignments as well, so that this can be applied at
+    the end of graph construction and be fully checkpoint-compatible.
+    Alternatively, find another solution for speeding up graph construction.
+
+    Args:
+      max_combined_size: an integer - maximum size for combined variables.
+    """
+    all_variables = self._all_variables
+    operations = self._operations
+    self._operations = []
+    self._all_variables = []
+    self._trainable_variables = []
+    def var_key(v):
+      return str([v.shape,
+                  v.master_dtype,
+                  v.slice_dtype,
+                  v.activation_dtype,
+                  v.trainable])
+    key_to_vars = collections.defaultdict(list)
+    for v in all_variables:
+      key_to_vars[var_key(v)].append(v)
+    deleted_vars = set()
+    # We need to point the inputs of other operations at the outputs of unstack
+    # instead of the outputs of the deleted Variables.  We construct this
+    # mapping from old input tensors to new input tensors.
+    tensor_mapping = {}
+    for op in operations:
+      if isinstance(op, Assign):
+        raise ValueError("stack_variables() should be called before any "
+                         "variable assignment.")
+      if isinstance(op, StackedVariable):
+        raise ValueError("stack_variables() should not be called twice.")
+      if isinstance(op, Variable):
+        if op in deleted_vars:
+          continue
+        similar_vars = key_to_vars[var_key(op)]
+        num_to_stack = max(1, min(
+            len(similar_vars),
+            max_combined_size // op.shape.size))
+        to_stack = similar_vars[:num_to_stack]
+        key_to_vars[var_key(op)] = similar_vars[num_to_stack:]
+        if num_to_stack > 1:
+          stacked_var = StackedVariable(to_stack)
+          stack_dim = stacked_var.shape.dims[0]
+          deleted_vars.update(to_stack)
+          unstacked = unstack(stacked_var.outputs[0], stack_dim)
+          for v, t in zip(to_stack, unstacked):
+            tensor_mapping[v.outputs[0]] = t
+        else:
+          self._operations.append(op)
+          self._all_variables.append(op)
+          if op.trainable:
+            self.trainable_variables.append(op)
+      else:
+        self._operations.append(op)
+        # Point inputs of other operations to the outputs of unstack.
+        # pylint: disable=protected-access
+        for i in xrange(len(op._inputs)):
+          if op._inputs[i] in tensor_mapping:
+            op._inputs[i] = tensor_mapping[op._inputs[i]]
+        # pylint: enable=protected-access
 
 
 class Lowering(object):
@@ -1087,7 +1167,6 @@ class Tensor(object):
     if name is None:
       name = self.operation.name + ":" + str(index)
     self._name = name
-    self._mesh.graph.tensors.append(self)
 
   @property
   def shape(self):
@@ -2204,7 +2283,7 @@ def conv2d(conv_input, conv_filter, strides, padding, name=None):
 
 
 class Conv2dBackpropInputOperation(Operation):
-  """like tf.nn.conv2d_backprop_input"""
+  """like tf.nn.conv2d_backprop_input."""
 
   def __init__(self, input_shape, conv_filter, dy, strides, padding, name=None):
     super(Conv2dBackpropInputOperation, self).__init__(
@@ -2618,11 +2697,12 @@ class Variable(Operation):
     self._slice_dtype = slice_dtype
     self._activation_dtype = activation_dtype
     self._trainable = trainable
-    with tf.device(mesh.variable_placer_fn), utils.outside_all_rewrites():
-      self.master = tf.get_variable(
-          name, shape.to_integer_list, dtype=master_dtype,
-          initializer=initializer, **kwargs)
-    self._name = self.master.name[:self.master.name.find(":")]
+    if not isinstance(self, StackedVariable):
+      with tf.device(mesh.variable_placer_fn), utils.outside_all_rewrites():
+        self._master = tf.get_variable(
+            name, shape.to_integer_list, dtype=master_dtype,
+            initializer=initializer, **kwargs)
+      self._name = self._master.name[:self._master.name.find(":")]
     self._outputs = [Tensor(self, shape, activation_dtype)]
     self.graph.all_variables.append(self)
     if trainable:
@@ -2666,6 +2746,61 @@ class Variable(Operation):
   @property
   def activation_dtype(self):
     return self._activation_dtype
+
+  @property
+  def trainable(self):
+    return self._trainable
+
+  @property
+  def master_device(self):
+    return self._master.device
+
+  def get_master(self):
+    return self._master
+
+  def assign_to_master(self, val):
+    return tf.assign(self._master, val)
+
+
+class StackedVariable(Variable):
+  """A Variable which combines many variables into one.
+
+  This is a performance optimization to reduce the time associated with large
+  numbers of slice variables.  See Graph.rewrite_stack_variables() for usage.
+  """
+
+  def __init__(self, vs):
+    """Create a StackedVariable.
+
+    Args:
+      vs: a list of Variables
+    """
+    shape = Shape([Dimension("stacked", len(vs))] + vs[0].shape.dims)
+    name = "stacked/" + vs[0].name
+    # TODO(noam): verify that vs are the same shape, etc.
+    super(StackedVariable, self).__init__(
+        vs[0].mesh, name, shape, vs[0].master_dtype, vs[0].slice_dtype,
+        vs[0].activation_dtype, None, vs[0].trainable)
+    self._name = name
+    self._masters = [v.get_master() for v in vs]
+    self._original_names = [v.name for v in vs]
+
+  @property
+  def original_names(self):
+    return self._original_names
+
+  @property
+  def master_device(self):
+    return self._masters[0].device
+
+  def get_master(self):
+    with tf.device(self.master_device):
+      return tf.stack(self._masters)
+
+  def assign_to_master(self, val):
+    return tf.group([
+        tf.assign(var_slice, val_slice) for var_slice, val_slice
+        in zip(self._masters, tf.unstack(val))])
 
 
 class ReadVariable(Operation):
@@ -4014,6 +4149,9 @@ def log_variable_sizes(var_list, tag, verbose=True):
       tf.logging.info("Weight    %s\tshape    %s\tsize    %d",
                       v.name.ljust(80),
                       str(v.shape).ljust(30), v_size)
+      if isinstance(v, StackedVariable):
+        for n in v.original_names:
+          tf.logging.info("    " + n)
     total_size += v_size
   tf.logging.info("%s Total size: %d", tag, total_size)
 

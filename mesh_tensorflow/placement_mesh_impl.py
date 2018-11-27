@@ -79,7 +79,7 @@ class PlacementMeshImpl(mtf.MeshImpl):
       if self.slice_is_master:
         tf.logging.info(
             "Single slice is indentical to master - avoid creating extra vars.")
-        slices = [variable.master]
+        slices = [variable.get_master()]
         self._laid_out_tensor = mesh_impl.LaidOutTensor(slices)
         self._copy_slices_to_master = tf.group([])
         self._copy_master_to_slices = tf.group([])
@@ -96,9 +96,9 @@ class PlacementMeshImpl(mtf.MeshImpl):
                 tf.cast(slices[-1], variable.master_dtype))
         self._laid_out_tensor = mesh_impl.LaidOutTensor(slices)
         self._copy_master_to_slices = self.assign_to_slices(
-            mtf.assign_slice, mesh_impl.make_slices(variable.master, shape))
-        self._copy_slices_to_master = tf.assign(
-            variable.master,
+            mtf.assign_slice, mesh_impl.make_slices(
+                variable.get_master(), shape))
+        self._copy_slices_to_master = variable.assign_to_master(
             mesh_impl.combine_slices(slices_with_master_dtype, shape))
 
     @property
@@ -108,7 +108,9 @@ class PlacementMeshImpl(mtf.MeshImpl):
         return False
       if self._variable.master_dtype != self._variable.slice_dtype:
         return False
-      master_device = self._variable.master.device
+      if isinstance(self._variable, mtf.StackedVariable):
+        return False
+      master_device = self._variable.master_device
       slice_device = self._mesh_impl.devices[0]
       return slice_device == master_device or not slice_device
 

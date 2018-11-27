@@ -101,7 +101,7 @@ class SimdMeshImpl(mtf.MeshImpl):
       base_name = variable.name
       slices = []
       slices_with_master_dtype = []
-      with tf.device(variable.master.device), utils.outside_all_rewrites():
+      with tf.device(variable.master_device), utils.outside_all_rewrites():
         zero_tensor = tf.zeros(slice_shape)
 
       # pylint: disable=protected-access
@@ -138,15 +138,14 @@ class SimdMeshImpl(mtf.MeshImpl):
 
       self._laid_out_tensor = mesh_impl.LaidOutTensor(
           [tpu_variables.ReplicatedVariable(base_name, slices)])
-      with tf.device(variable.master.device), utils.outside_all_rewrites():
+      with tf.device(variable.master_device), utils.outside_all_rewrites():
         self._copy_master_to_slices = self._generate_copy_master_to_slices_op(
-            variable.master, shape, slices, slice_shape)
+            variable.get_master(), shape, slices, slice_shape)
         slices_with_master_dtype = [
             tf.cast(s, variable.master_dtype) for s in slices]
-        self._copy_slices_to_master = tf.assign(
-            variable.master,
+        self._copy_slices_to_master = variable.assign_to_master(
             mesh_impl.combine_slices(slices_with_master_dtype, shape,
-                                     device=variable.master.device))
+                                     device=variable.master_device))
 
     def _generate_copy_master_to_slices_op(self, master_variable, master_shape,
                                            slices, slice_shape):
