@@ -137,9 +137,7 @@ def model_fn(features, labels, mode, params):
     var_grads = mtf.gradients(
         [loss], [v.outputs[0] for v in graph.trainable_variables])
     optimizer = mtf.optimize.AdafactorOptimizer()
-    update_ops = []
-    for grad, var in zip(var_grads, graph.trainable_variables):
-      update_ops.extend(optimizer.apply_grad(grad, var))
+    update_ops = optimizer.apply_grads(var_grads, graph.trainable_variables)
 
   lowering = mtf.Lowering(graph, {mesh: mesh_impl})
   restore_hook = mtf.MtfRestoreHook(lowering)

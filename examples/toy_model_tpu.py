@@ -173,9 +173,7 @@ def model_fn(features, labels, mode, params):
     else:
       assert FLAGS.optimizer == 'SGD'
       optimizer = mtf.optimize.SgdOptimizer(lr=1e-4)
-    update_ops = []
-    for grad, var in zip(var_grads, graph.trainable_variables):
-      update_ops.extend(optimizer.apply_grad(grad, var))
+    update_ops = optimizer.apply_grads(var_grads, graph.trainable_variables)
   else:
     # for now, we can only export fully-replicated tensors.
     fully_replicated_logits = mtf.anonymize(logits)

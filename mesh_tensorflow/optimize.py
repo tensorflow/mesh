@@ -36,8 +36,36 @@ def make_optimizer(hparams, lr):
 class Optimizer(object):
   """Base optimizer class."""
 
+  def apply_grads(self, grads, variables):
+    """Apply gradients to variables.
+
+    Call this function externally instead of apply_grad().  This causes the
+    operations to be combined, which is necessary for stacking variables
+    see mtf.rewrite_stack_variables().
+
+    Args:
+      grads: a list of Tensor
+      variables: a list of Variables
+    Returns:
+      a list of Operations
+    """
+    ops = []
+    for grad, var in zip(grads, variables):
+      ops.extend(self.apply_grad(grad, var))
+    if not ops:
+      return ops
+    return variables[0].graph.combine_assignments(ops)
+
   def apply_grad(self, grad, var):
-    raise ValueError("Apply_Grad not implemented %s %s" % (grad, var))
+    """Update variable and accumulators.
+
+    Args:
+      grad: a Tensor
+      var: a Variablle
+    Returns:
+      a list of Operations
+    """
+    raise ValueError("apply_grad not implemented %s %s" % (grad, var))
 
 
 class SgdOptimizer(Optimizer):
@@ -54,6 +82,9 @@ class SgdOptimizer(Optimizer):
     if grad is None:
       tf.logging.warning("Gradient is None for variable %s" % var)
       return []
+    # It is critical to use assign_sub instead of mtf.assign(var - ...)
+    #  for the case of bfloat16 activations, so as to avoid repeatedly rounding
+    #  the slice value, which results in poor quality.
     return [mtf.assign_sub(var, grad * self.lr)]
 
 
@@ -202,6 +233,9 @@ class AdafactorOptimizer(Optimizer):
                  + subtrahend * tf.constant(1.0 - self._beta1))
         subtrahend = new_m
         updates.append(mtf.assign(m, new_m))
+      # It is critical to use assign_sub instead of mtf.assign(var - subtrahend)
+      #  for the case of bfloat16 activations, so as to avoid repeatedly
+      #  rounding the slice value, which results in poor quality.
       var_update = mtf.assign_sub(var, subtrahend)
       updates.append(var_update)
       return updates

@@ -402,90 +402,165 @@ class Graph(object):
 
     return name
 
-  def rewrite_stack_variables(self, max_combined_size=2 ** 30):
+  def rewrite_stack_variables(self,
+                              max_combined_variable_size=2 ** 30,
+                              max_combined_slice_size=2 ** 27,
+                              mesh_to_impl=None):
     """Rewrite the current graph to combine variables.
 
     This helps speed up graph construction times in the case of large meshes
     and large numbers of variables.
 
-    This function should be called after the forward pass, (before any variable
-    assignemnts). Some similar variables are stacked to form larger variables.
-
-    Variables created prior to this call are checkpointed as separate variables,
-    even though they are combined internally.   So the checkpoints are
-    compatible for inference purposes with/without this call.  However, the
-    optimizer accumulators, which are created after this call are checkpointed
-    as combined variables.
+    This function should be called after graph construction  (it is called by
+    default in the Lowering constuctor).
 
     When we find a set of variables with the same shape/dtype/etc, we replace
     them with one StackedVariable and an "unstack" operation.  The
-    StackedVariable has multiple master variables (so as to maintain
-    checkpiont compatibility), but only one slice variable per device.  We
-    point the inputs of later operations to the outputs of the
-    "unstack" operations, instead of the outputs of the defunct single
-    variables.
+    StackedVariable has multiple master variables (so as to maintain checkpiont
+    compatibility), but only one slice variable per device.  We point the inputs
+    of later operations to the outputs of the "unstack" operations, instead of
+    the outputs of the defunct single variables.
 
-    TODO(noam, ylc): Rewrite assignments as well, so that this can be applied at
-    the end of graph construction and be fully checkpoint-compatible.
-    Alternatively, find another solution for speeding up graph construction.
+    In order for variables to be combinable, they must be set in the same Assign
+    operation(s) - so it is necessary to call mtf.grouped_assign() from the
+    optimizer instead of many separate calls to mtf.assign().  The assign
+    operations get rewritten to set the appropriate stacked variables.
+
+    TODO(noam): Combining to larger sizes seems to cause errors on TPU.
+      debug this.  Perhaps we should try to keep the combined master variables
+      on the same device.
 
     Args:
-      max_combined_size: an integer - maximum size for combined variables.
+      max_combined_variable_size: an integer
+      max_combined_slice_size: an integer
+      mesh_to_impl: an optional dictionary from Mesh to MeshImpl
     """
+    # pylint: disable=protected-access
     all_variables = self._all_variables
     operations = self._operations
     self._operations = []
     self._all_variables = []
     self._trainable_variables = []
+    # We can only stack varaibles which share the same set of assignment
+    # operations.
+    var_to_assign_ops = collections.defaultdict(str)
+    for op in operations:
+      if isinstance(op, Assign):
+        for v in op._variables:
+          var_to_assign_ops[v.name] += op.name + ", "
+    # Two variables with the same "key" can be stacked together.
     def var_key(v):
-      return str([v.shape,
+      return str([v.mesh,
+                  v.shape,
                   v.master_dtype,
                   v.slice_dtype,
                   v.activation_dtype,
-                  v.trainable])
-    key_to_vars = collections.defaultdict(list)
+                  v.trainable,
+                  var_to_assign_ops[v]])
+    key_to_vars = collections.defaultdict(collections.deque)
     for v in all_variables:
       key_to_vars[var_key(v)].append(v)
-    deleted_vars = set()
     # We need to point the inputs of other operations at the outputs of unstack
     # instead of the outputs of the deleted Variables.  We construct this
     # mapping from old input tensors to new input tensors.
     tensor_mapping = {}
+    # maps from old variable name to (stacked_variable, position)
+    individual_to_stacked = {}
     for op in operations:
-      if isinstance(op, Assign):
-        raise ValueError("stack_variables() should be called before any "
-                         "variable assignment.")
       if isinstance(op, StackedVariable):
         raise ValueError("stack_variables() should not be called twice.")
-      if isinstance(op, Variable):
-        if op in deleted_vars:
+      elif isinstance(op, Variable):
+        if op.name in individual_to_stacked:
           continue
         similar_vars = key_to_vars[var_key(op)]
-        num_to_stack = max(1, min(
-            len(similar_vars),
-            max_combined_size // op.shape.size))
-        to_stack = similar_vars[:num_to_stack]
-        key_to_vars[var_key(op)] = similar_vars[num_to_stack:]
+        num_to_stack = len(similar_vars)
+        if max_combined_variable_size is not None:
+          num_to_stack = min(
+              num_to_stack, max_combined_variable_size // op.shape.size)
+        if mesh_to_impl is not None:
+          mesh_impl = mesh_to_impl[op.mesh]
+          if mesh_impl.size == 1:
+            num_to_stack = 1  # no point in stacking for single processors.
+          slice_size = mesh_impl.slice_size(op.shape)
+          num_to_stack = min(
+              num_to_stack, max_combined_slice_size // slice_size)
+        num_to_stack = max(1, num_to_stack)
+        to_stack = [similar_vars.popleft() for _ in xrange(num_to_stack)]
         if num_to_stack > 1:
           stacked_var = StackedVariable(to_stack)
           stack_dim = stacked_var.shape.dims[0]
-          deleted_vars.update(to_stack)
           unstacked = unstack(stacked_var.outputs[0], stack_dim)
           for v, t in zip(to_stack, unstacked):
             tensor_mapping[v.outputs[0]] = t
+          for idx, v in enumerate(to_stack):
+            individual_to_stacked[v.name] = stacked_var, idx
         else:
+          assert op == to_stack[0]
           self._operations.append(op)
           self._all_variables.append(op)
           if op.trainable:
-            self.trainable_variables.append(op)
+            self._trainable_variables.append(op)
       else:
-        self._operations.append(op)
         # Point inputs of other operations to the outputs of unstack.
-        # pylint: disable=protected-access
         for i in xrange(len(op._inputs)):
           if op._inputs[i] in tensor_mapping:
             op._inputs[i] = tensor_mapping[op._inputs[i]]
-        # pylint: enable=protected-access
+        if isinstance(op, Assign):
+          # Rewrite the grouped assignment to stack up the values and then
+          # assign to the stacked variables.
+          new_variables = []
+          new_values = []
+          var_to_val = dict(zip([v.name for v in op._variables], op._inputs))
+          for var, val in zip(op._variables, op._inputs):
+            if var.name in individual_to_stacked:
+              stacked_var, pos = individual_to_stacked[var.name]
+              if pos == 0:
+                vals = [var_to_val[n] for n in stacked_var.original_names]
+                new_variables.append(stacked_var)
+                new_values.append(
+                    stack(vals, stacked_var.shape.dims[0].name, 0))
+            else:
+              new_variables.append(var)
+              new_values.append(val)
+          op._variables = new_variables
+          op._inputs = new_values
+        self._operations.append(op)
+    # pylint: enable=protected-access
+
+  def combine_assignments(self, assignments):
+    """Rewrite the current graph to combine "Assign" operations.
+
+    Combine similar Assign operations into grouped Assign operations.
+    This is useful when using the rewrite_stack_variables() optimization,
+    since variables can only be stacked if they are present in the same set
+    of Assign operations.
+
+    This function takes a list of Assign operations and returns a possibly
+    shorter list of Assign operations.  The input Assignment operations
+    are removed from the graph and become invalid.
+
+    Args:
+      assignments: a list of Assign objects
+    Returns:
+      a list of Assign objects
+    """
+    group_by_fn = collections.defaultdict(list)
+    for a in assignments:
+      if not isinstance(a, Assign):
+        raise ValueError("ops should be instances of mtf.Assign")
+      group_by_fn[a.assign_fn].append(a)
+    assignments_set = set(assignments)
+    self._operations = [
+        op for op in self._operations if op not in assignments_set]
+    ret = []
+    for fn, ops in six.iteritems(group_by_fn):
+      variables = []
+      values = []
+      for a in ops:
+        variables.extend(a.variables)
+        values.extend(a.inputs)
+      ret.append(Assign(variables, values, fn))
+    return ret
 
 
 class Lowering(object):
@@ -512,7 +587,7 @@ class Lowering(object):
   ```
   """
 
-  def __init__(self, graph, mesh_to_impl):
+  def __init__(self, graph, mesh_to_impl, autostack=True):
     """Creates a Lowering of a Graph.
 
     Args:
@@ -520,10 +595,15 @@ class Lowering(object):
       mesh_to_impl: {Mesh: MeshImpl}. Keys are the Mesh's in the graph and
         their values are MeshImpl's, which map Tensor Dimension names to
         Mesh Dimension names.
+      autostack: a boolean.  If True, then the graph gets rewritten to
+        reduce the number of variables (see rewrite_stack_variables()).
+        This is a helpful performance optimization for large meshes.
     """
     # tf.logging.info("LOWERING GRAPH:\n%s" % graph.to_string)
     self.mesh_to_impl = mesh_to_impl   # {Mesh: MeshImpl}
     self.graph = graph
+    if autostack:
+      self.autostack()
     self._counters = []
     self.tensors = {}                  # {Tensor: Mesh.LaidOutTensor}
     self.operations = {}               # {Operation: tf.Operation}
@@ -537,7 +617,11 @@ class Lowering(object):
             "output/%s" % type(op).__name__, self.laid_out_size(out))
         self.add_counter("output_unique/%s" % type(op).__name__, out.size)
     log_variable_sizes(
-        graph.trainable_variables, "Trainable Variables", verbose=True)
+        graph.trainable_variables, "Trainable Variables", verbose=True,
+        mesh_to_impl=self.mesh_to_impl)
+    log_variable_sizes(
+        graph.all_variables, "All Variables", verbose=False,
+        mesh_to_impl=self.mesh_to_impl)
     tf.logging.info("Counters:\n" + pretty_print_counters(self._counters))
 
   def mesh_impl(self, m):
@@ -600,6 +684,10 @@ class Lowering(object):
       raise ValueError(
           "Wrong slice shape: correct_shape = %s actual shape = %s"
           % (correct_shape, actual_shape))
+
+  def autostack(self):
+    """Rewrite graph to stack similar variables (performance optimization)."""
+    self.graph.rewrite_stack_variables(mesh_to_impl=self.mesh_to_impl)
 
 
 class Mesh(object):
@@ -765,6 +853,9 @@ class MeshImpl(object):
         ret.append(
             dim_size // self.shape[mesh_axis].size * coordinates[mesh_axis])
     return ret
+
+  def slice_size(self, tensor_shape):
+    return list_product(self.slice_shape(tensor_shape))
 
   def laid_out_size(self, tensor_shape):
     """Total size of all slices.
@@ -2850,18 +2941,30 @@ def assign_sub_slice(variable, slice_var, val):
 
 
 class Assign(Operation):
-  """Assign to a variable."""
+  """Assign to one or more variables."""
 
-  def __init__(self, var, new_val, assign_fn=assign_slice, name=None):
-    super(Assign, self).__init__([new_val], var.mesh, name=name or "assign")
-    self._var = var
+  def __init__(self, variables, new_values, assign_fn=assign_slice, name=None):
+    super(Assign, self).__init__(
+        new_values, variables[0].mesh, name=name or "assign")
+    self._variables = variables
     self._assign_fn = assign_fn
     self._outputs = []
 
   def lower(self, lowering):
-    lowering.operations[self] = lowering.variables[self._var].assign_to_slices(
-        self._assign_fn,
-        lowering.tensors[self.inputs[0]].to_laid_out_tensor().all_slices)
+    ops = []
+    for var, val in zip(self._variables, self.inputs):
+      ops.append(lowering.variables[var].assign_to_slices(
+          self._assign_fn,
+          lowering.tensors[val].to_laid_out_tensor().all_slices))
+    lowering.operations[self] = tf.group(ops)
+
+  @property
+  def assign_fn(self):
+    return self._assign_fn
+
+  @property
+  def variables(self):
+    return self._variables
 
 
 def assign(var, new_val, assign_fn=assign_slice):
@@ -2881,7 +2984,7 @@ def assign(var, new_val, assign_fn=assign_slice):
     var = var.operation
   if not isinstance(var, Variable):
     raise ValueError("var must be a mtf.Variable or its output Tensor.")
-  return Assign(var, new_val, assign_fn=assign_fn)
+  return Assign([var], [new_val], assign_fn=assign_fn)
 
 
 def assign_add(var, new_val):
@@ -4129,31 +4232,44 @@ def _cumprod(l):
   return ret
 
 
-def log_variable_sizes(var_list, tag, verbose=True):
+def log_variable_sizes(var_list, tag, verbose=True, mesh_to_impl=None):
   """Log the sizes and shapes of variables, and the total size.
 
   Args:
     var_list: a list of variables; defaults to trainable_variables
     tag: a string; defaults to "Trainable Variables"
     verbose: bool, if True, log every weight; otherwise, log total size only.
+    mesh_to_impl: an optional map from Mesh to MeshImpl
   """
   if not var_list:
     return
 
   name_to_var = {v.name: v for v in var_list}
   total_size = 0
+  total_slice_size = 0
   for v_name in sorted(list(name_to_var)):
     v = name_to_var[v_name]
     v_size = v.shape.size
+    if mesh_to_impl is not None:
+      slice_size = mesh_to_impl[v.mesh].slice_size(v.shape)
+    else:
+      slice_size = 0
+    total_slice_size += slice_size
     if verbose:
-      tf.logging.info("Weight    %s\tshape    %s\tsize    %d",
-                      v.name.ljust(80),
-                      str(v.shape).ljust(30), v_size)
+      tf.logging.info(
+          "Variable %s size %s slice_size %s %s",
+          v.name.ljust(60),
+          str(v_size).ljust(12),
+          str(slice_size).ljust(12),
+          str(v.shape).ljust(60))
       if isinstance(v, StackedVariable):
         for n in v.original_names:
           tf.logging.info("    " + n)
     total_size += v_size
-  tf.logging.info("%s Total size: %d", tag, total_size)
+  tf.logging.info("%s count: %s  Total size: %s  Total slice_size: %s",
+                  tag.ljust(30), str(len(var_list)).ljust(6),
+                  str(total_size).ljust(15),
+                  str(total_slice_size).ljust(15))
 
 
 class WhileLoopOperation(Operation):
