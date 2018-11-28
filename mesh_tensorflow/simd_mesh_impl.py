@@ -154,7 +154,7 @@ class SimdMeshImpl(mtf.MeshImpl):
       Args:
         master_variable: The master variable.
         master_shape: The shape of master variable.
-        slices: The list of sliced varialbes.
+        slices: The list of sliced variables.
         slice_shape: The shape of the slice variable.
       Returns:
         A grouped tf.assign ops.
@@ -365,7 +365,7 @@ class SimdMeshImpl(mtf.MeshImpl):
     return tpu_ops.collective_permute(t, source_target_pairs)
 
   def slice(self, tf_tensor, tensor_shape):
-    """"Slice out the correspoding part of tensor given the pnum variable."""
+    """"Slice out the corresponding part of tensor given the pnum variable."""
     tensor_layout = self.tensor_layout(tensor_shape)
 
     if tensor_layout.is_fully_replicated:

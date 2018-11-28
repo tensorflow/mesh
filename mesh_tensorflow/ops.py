@@ -3157,7 +3157,7 @@ def einsum(xs, output_shape=None, reduced_dims=None, name=None):
   shape is set to the contain all dimensions that appear exactly once in the
   inputs, in order of appearance.
 
-  If output_shape is not specifed, then the output shape is set to the contain
+  If output_shape is not specified, then the output shape is set to the contain
   all dimensions that appear in xs but not in reduced_dims, in the order
   that they appear in xs.  If reduced_dims is also not specified, then
   reduced_dims is set to the set of all dimensions that appear at least twice in
@@ -3488,7 +3488,7 @@ def sub(x1, x2, output_shape=None, name=None):
 
 
 def multiply(x1, x2, output_shape=None, name=None):
-  """Binary multiplication with broadcsting.
+  """Binary multiplication with broadcasting.
 
   Args:
     x1: a Tensor
@@ -3509,7 +3509,7 @@ def multiply(x1, x2, output_shape=None, name=None):
 
 
 def divide(x1, x2, output_shape=None, name=None):
-  """Binary division with broadcsting.
+  """Binary division with broadcasting.
 
   Args:
     x1: a Tensor

@@ -78,7 +78,7 @@ class PlacementMeshImpl(mtf.MeshImpl):
       base_name = variable.name
       if self.slice_is_master:
         tf.logging.info(
-            "Single slice is indentical to master - avoid creating extra vars.")
+            "Single slice is identical to master - avoid creating extra vars.")
         slices = [variable.get_master()]
         self._laid_out_tensor = mesh_impl.LaidOutTensor(slices)
         self._copy_slices_to_master = tf.group([])

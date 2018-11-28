@@ -33,7 +33,7 @@ def outside_all_rewrites():
 
 
 class BalancedVariablePlacer(object):
-  """Place the variable on different device and blance the memory usage."""
+  """Place the variable on different device and balance the memory usage."""
 
   def __init__(self, devices, init_usage=None):
     init_usage = init_usage if init_usage else [0] * len(devices)

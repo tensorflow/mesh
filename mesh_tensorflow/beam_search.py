@@ -125,7 +125,7 @@ def beam_search(logits_fn,
 
   Args:
     logits_fn: Interface to the model, to provide logits.
-        Shoud take:
+        Should take:
           step_num - mtf Scalar
           ids - mtf Tensor with shape [batch, beam, length]
         Should return:
