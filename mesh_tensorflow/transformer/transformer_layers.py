@@ -153,9 +153,7 @@ class LocalSelfAttention(transformer.TransformerLayer):
     if context.mode == "incremental":
       prev_k, prev_v = context.next_states(2)
       y, new_k, new_v = mtf.layers.masked_local_attention_1d_incremental(
-          x, prev_k, prev_v,
-          context.position, context.master_dtype, context.slice_dtype,
-          params=params)
+          x, prev_k, prev_v, context.position, params=params)
       context.new_states.extend([new_k, new_v])
       return y
     else:

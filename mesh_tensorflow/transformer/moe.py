@@ -62,6 +62,13 @@ class MoE1D(transformer.TransformerLayer):
 
   def call(self, context, x, losses=None):
     """Call the layer."""
+    has_length_dim = context.length_dim in x.shape.dims
+    if not has_length_dim:
+      x_shape = x.shape
+      shape_with_length = mtf.Shape(
+          x_shape.dims[:-1] + [mtf.Dimension("length", 1)]
+          + x_shape.dims[-1:])
+      x = mtf.reshape(x, shape_with_length)
     y, loss = transformer_moe_layer_v1(
         x,
         context.model_dim,
@@ -70,6 +77,8 @@ class MoE1D(transformer.TransformerLayer):
         context.variable_dtype)
     if context.losses is not None:
       context.losses.append(loss)
+    if not has_length_dim:
+      y = mtf.reshape(y, x_shape)
     return y
 
 
@@ -111,6 +120,13 @@ class MoE2D(transformer.TransformerLayer):
 
   def call(self, context, x, losses=None):
     """Call the layer."""
+    has_length_dim = context.length_dim in x.shape.dims
+    if not has_length_dim:
+      x_shape = x.shape
+      shape_with_length = mtf.Shape(
+          x_shape.dims[:-1] + [mtf.Dimension("length", 1)]
+          + x_shape.dims[-1:])
+      x = mtf.reshape(x, shape_with_length)
     y, loss = transformer_moe_layer_v2(
         x,
         context.model_dim,
@@ -119,6 +135,8 @@ class MoE2D(transformer.TransformerLayer):
         context.variable_dtype)
     if context.losses is not None:
       context.losses.append(loss)
+    if not has_length_dim:
+      y = mtf.reshape(y, x_shape)
     return y
 
 
