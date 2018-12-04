@@ -351,6 +351,7 @@ class Graph(object):
     self._all_variables = []
     # Maps a name used in the graph to the next id to use for that name.
     self._names_in_use = {}
+    self.name_to_variable = {}
 
   def __repr__(self):
     return self.to_string
@@ -452,9 +453,7 @@ class Graph(object):
     def var_key(v):
       return str([v.mesh,
                   v.shape,
-                  v.master_dtype,
-                  v.slice_dtype,
-                  v.activation_dtype,
+                  str(v.dtype.__dict__),
                   v.trainable,
                   var_to_assign_ops[v]])
     key_to_vars = collections.defaultdict(collections.deque)
@@ -2515,7 +2514,13 @@ class ShiftOperation(Operation):
     axis = self._axis
     dim = self._dim
     lowered_x = lowering.tensors[inputs]
+    if not self._wrap and abs(self._offset) >= dim.size:
+      lowering.set_tensor_lowering(
+          self.outputs[0],
+          mesh_impl.slicewise(tf.zeros_like, lowered_x))
+      return
     def my_slice(x, start, size):
+      assert size >= 0
       begin = [0] * axis + [start] + [0] * (ndims - axis - 1)
       size = [-1] * axis + [size] + [-1] * (ndims - axis - 1)
       return tf.slice(x, begin, size)
@@ -2778,23 +2783,68 @@ class LazyLaidOutTensor(object):
     return self._slice_shape
 
 
+class VariableDType(object):
+  """Class containing datatype information for a variable.
+
+  A variable has three datatypes.
+
+  master_dtype:
+    the datatype used for storing the variable to checkpoints
+
+  slice_dtype:
+    the datatype used for maintaining and updating the value during training
+
+  activation_dtype:
+    the datatype used for computation.  Calls to get_variable return a Tensor
+    with this datatype.
+
+  If slice_dtype=tf.bfloat16 during training, then repeated roundoff errors
+  interfere with model quality - use tf.float32 instead.  Otherwise, tf.bfloat16
+  can help reduce memory usage and checkpoint size.  It is necessary to keep
+  master_dtype the same between training/inference/evaluation in order to read
+  and write checkpoints.
+
+  We will later extend this functionality to allow for custom quantization code.
+  """
+
+  def __init__(self,
+               master_dtype=tf.float32,
+               slice_dtype=None,
+               activation_dtype=None):
+    self._master_dtype = master_dtype
+    self._slice_dtype = slice_dtype or master_dtype
+    self._activation_dtype = activation_dtype or master_dtype
+
+  @property
+  def master_dtype(self):
+    return self._master_dtype
+
+  @property
+  def slice_dtype(self):
+    return self._slice_dtype
+
+  @property
+  def activation_dtype(self):
+    return self._activation_dtype
+
+
 class Variable(Operation):
   """Variable."""
 
-  def __init__(self, mesh, name, shape, master_dtype, slice_dtype,
-               activation_dtype, initializer, trainable, **kwargs):
+  def __init__(
+      self, mesh, name, shape, dtype, initializer, trainable, **kwargs):
     super(Variable, self).__init__([], mesh, name="name_will_be_set_later")
-    self._master_dtype = master_dtype
-    self._slice_dtype = slice_dtype
-    self._activation_dtype = activation_dtype
+    if not isinstance(dtype, VariableDType):
+      raise ValueError("dtype must be a VariableDType got %s" % dtype)
+    self._dtype = dtype
     self._trainable = trainable
     if not isinstance(self, StackedVariable):
       with tf.device(mesh.variable_placer_fn), utils.outside_all_rewrites():
         self._master = tf.get_variable(
-            name, shape.to_integer_list, dtype=master_dtype,
+            name, shape.to_integer_list, dtype=self.master_dtype,
             initializer=initializer, **kwargs)
       self._name = self._master.name[:self._master.name.find(":")]
-    self._outputs = [Tensor(self, shape, activation_dtype)]
+    self._outputs = [Tensor(self, shape, dtype.activation_dtype)]
     self.graph.all_variables.append(self)
     if trainable:
       self.graph.trainable_variables.append(self)
@@ -2827,16 +2877,20 @@ class Variable(Operation):
     return self.value.shape
 
   @property
+  def dtype(self):
+    return self._dtype
+
+  @property
   def master_dtype(self):
-    return self._master_dtype
+    return self._dtype.master_dtype
 
   @property
   def slice_dtype(self):
-    return self._slice_dtype
+    return self._dtype.slice_dtype
 
   @property
   def activation_dtype(self):
-    return self._activation_dtype
+    return self._dtype.activation_dtype
 
   @property
   def trainable(self):
@@ -2870,8 +2924,7 @@ class StackedVariable(Variable):
     name = "stacked/" + vs[0].name
     # TODO(noam): verify that vs are the same shape, etc.
     super(StackedVariable, self).__init__(
-        vs[0].mesh, name, shape, vs[0].master_dtype, vs[0].slice_dtype,
-        vs[0].activation_dtype, None, vs[0].trainable)
+        vs[0].mesh, name, shape, vs[0].dtype, None, vs[0].trainable)
     self._name = name
     self._masters = [v.get_master() for v in vs]
     self._original_names = [v.name for v in vs]
@@ -2918,10 +2971,46 @@ def get_variable(mesh, name, shape, dtype=tf.float32,
                  master_dtype=None, slice_dtype=None, activation_dtype=None,
                  initializer=None, trainable=True,
                  **kwargs):
-  return Variable(
-      mesh, name, convert_to_shape(shape), master_dtype or dtype,
-      slice_dtype or dtype, activation_dtype or dtype,
-      initializer, trainable, **kwargs).outputs[0]
+  """Create a new variable or retrieve an already-created one.
+
+  Args:
+    mesh: a Mesh
+    name: a string (uses the existing tf.variable_scope())
+    shape: a Shape
+    dtype: a VariableDType or a tf.DType
+    master_dtype: an optional tf.DType (deprecated - use dtype arg)
+    slice_dtype: an optional tf.DType (deprecated - use dtype arg)
+    activation_dtype: an optional tf.DType (deprecated - use dtype arg)
+    initializer: an optional tf initializer function
+    trainable: a boolean
+    **kwargs: additional keyword arguments to tf.get_variable
+
+  Returns:
+    a Tensor with the given shape and dtype equal to dtype.activation_dtype
+  """
+  if dtype is None:
+    dtype = VariableDType(master_dtype, slice_dtype, activation_dtype)
+  elif isinstance(dtype, tf.DType):
+    dtype = VariableDType(
+        master_dtype or dtype, slice_dtype or dtype, activation_dtype or dtype)
+  elif not isinstance(dtype, VariableDType):
+    raise ValueError("dtype should be a tf.dtype or a mtf.VariableDType")
+  scope_name = tf.get_variable_scope().name
+  if scope_name:
+    full_name = scope_name + "/" + name
+  else:
+    full_name = name
+  if full_name in mesh.graph.name_to_variable:
+    var = mesh.graph.name_to_variable[full_name]
+  else:
+    var = Variable(
+        mesh, name, convert_to_shape(shape), dtype, initializer, trainable,
+        **kwargs)
+    if var.name != full_name:
+      raise ValueError(
+          "Expected var.name == full_name.  %s vs %s" % (var.name, full_name))
+    mesh.graph.name_to_variable[full_name] = var
+  return var.outputs[0]
 
 
 def read_variable(var):
@@ -3685,7 +3774,7 @@ def one_hot(indices, output_dim, on_value=1.0,
 
 
 def gather(weights, indices, dim, output_shape=None):
-  """Shorthand for einsum([one_hot(indices, dim)], weights).
+  """Shorthand for einsum([one_hot(indices, dim)], weights, reduced_dims=[dim]).
 
   Args:
     weights: a Tensor
@@ -3700,7 +3789,7 @@ def gather(weights, indices, dim, output_shape=None):
   if weights.dtype == tf.bool:
     return cast(gather(to_float(weights), indices, dim, output_shape), tf.bool)
   return einsum([one_hot(indices, dim, dtype=weights.dtype), weights],
-                output_shape=output_shape)
+                reduced_dims=[dim], output_shape=output_shape)
 
 
 def gradients(ys, xs, grad_ys=None):
@@ -4592,7 +4681,7 @@ def tensor_dim_to_mesh_dim_size(layout, mesh_shape, tensor_dim):
 
   Args:
     layout: an input to convert_to_layout_rules
-    mesh_shape: an in put to convert_to_shape
+    mesh_shape: an input to convert_to_shape
     tensor_dim: a Dimension
 
   Returns:

@@ -27,7 +27,9 @@ import tensorflow as tf
 def dense(x, output_dim, reduced_dims=None, expert_dims=None,
           use_bias=True, activation=None,
           master_dtype=tf.float32,
-          slice_dtype=tf.float32, name=None):
+          slice_dtype=tf.float32,
+          variable_dtype=None,
+          name=None):
   """Dense layer doing (kernel*x + bias) computation.
 
   Args:
@@ -39,13 +41,19 @@ def dense(x, output_dim, reduced_dims=None, expert_dims=None,
       experts. Different experts get different weights.
     use_bias: a boolean, whether to add bias.
     activation: an optional function from mtf.Tensor to mtf.Tensor
-    master_dtype: a tf.dtype
-    slice_dtype: a tf.dtype
+    master_dtype: a tf.dtype (deprecated - use variable_dtype)
+    slice_dtype: a tf.dtype (deprecated - use variable_dtype)
+    variable_dtype: a mtf.VariableDType
     name: a string. variable scope.
 
   Returns:
     a mtf.Tensor of shape [..., output_dim].
   """
+  if variable_dtype is None:
+    variable_dtype = mtf.VariableDType(master_dtype, slice_dtype, x.dtype)
+  if variable_dtype.activation_dtype != x.dtype:
+    raise ValueError("variable_dtype.activation_dtype must match x.dtype "
+                     "variable_dtype=%s x=%s" % (variable_dtype, x))
   if expert_dims is None:
     expert_dims = []
   if reduced_dims is None:
@@ -61,9 +69,7 @@ def dense(x, output_dim, reduced_dims=None, expert_dims=None,
         "kernel",
         w_shape,
         initializer=tf.random_normal_initializer(stddev=stddev),
-        master_dtype=master_dtype,
-        slice_dtype=slice_dtype,
-        activation_dtype=x.dtype)
+        dtype=variable_dtype)
     y = mtf.einsum([x, w], output_shape)
     if use_bias:
       b = mtf.get_variable(
@@ -71,7 +77,7 @@ def dense(x, output_dim, reduced_dims=None, expert_dims=None,
           "bias",
           mtf.Shape(expert_dims + [output_dim]),
           initializer=tf.zeros_initializer(),
-          activation_dtype=x.dtype)
+          dtype=variable_dtype)
       y += b
     if activation is not None:
       y = activation(y)
@@ -307,7 +313,7 @@ def local_self_attention_spatial_blocks(
 
     w_dim, io_channels = query_antecedent.shape.dims[-2:]
     batch, num_w_blocks = query_antecedent.shape.dims[:2]
-    q_var, k_var, v_var, o_var = multihead_attention_vars(
+    wq, wk, wv, wo = multihead_attention_vars(
         query_antecedent.mesh, heads, io_channels, kv_channels,
         master_dtype, slice_dtype, query_antecedent.dtype)
 
@@ -318,13 +324,13 @@ def local_self_attention_spatial_blocks(
 
     # Call einsum over the query and memory to get query q, keys k and values v.
     q = mtf.einsum(
-        [query_antecedent, q_var],
+        [query_antecedent, wq],
         mtf.Shape([batch, heads, num_w_blocks, w_dim, kv_channels]))
     k = mtf.einsum(
-        [memory_antecedent, k_var],
+        [memory_antecedent, wk],
         mtf.Shape([batch, heads, num_w_blocks, memory_w_dim, kv_channels]))
     v = mtf.einsum(
-        [memory_antecedent, v_var],
+        [memory_antecedent, wv],
         mtf.Shape([batch, heads, num_w_blocks, memory_w_dim, kv_channels]))
 
     # Halo exchange for memory blocks.
@@ -340,7 +346,7 @@ def local_self_attention_spatial_blocks(
     output = dot_product_attention(q, k, v, mask=mask)
 
     return mtf.einsum(
-        [output, o_var], mtf.Shape([batch, num_w_blocks, w_dim, io_channels]))
+        [output, wo], mtf.Shape([batch, num_w_blocks, w_dim, io_channels]))
 
 
 def masked_local_attention_1d(x,
@@ -350,6 +356,8 @@ def masked_local_attention_1d(x,
                               master_dtype=tf.float32,
                               slice_dtype=tf.float32,
                               length_per_split=None,
+                              return_kv=None,
+                              params=None,
                               name=None):
   """Attention to the source position and a neighborhood to the left of it.
 
@@ -361,11 +369,13 @@ def masked_local_attention_1d(x,
     kv_channels: a mtf.Dimension (the size of the key and value vectors)
     heads: a mtf.Dimension (the number of heads)
     window_size: an integer
-    master_dtype: a tf.dtype
-    slice_dtype: a tf.dtype
+    master_dtype: a tf.dtype (deprecated - use params arg)
+    slice_dtype: a tf.dtype (deprecated - use params arg)
     length_per_split: an optional integer indicating the part of the length
       dimension per processor.  You can omit if the length dimension is not
       split.
+    return_kv: an optional list onto which to append the computed k and v.
+    params: an optional quadruple of Tensors (see multihead_attention_params())
     name: an optional string.
 
   Returns:
@@ -379,15 +389,20 @@ def masked_local_attention_1d(x,
 
     batch_dims = x.shape.dims[:-2]
     length, io_channels = x.shape.dims[-2:]
-    q_var, k_var, v_var, o_var = multihead_attention_vars(
-        x.mesh, heads, io_channels, kv_channels,
-        master_dtype, slice_dtype, x.dtype)
+    if params is None:
+      wq, wk, wv, wo = multihead_attention_vars(
+          x.mesh, heads, io_channels, kv_channels,
+          master_dtype, slice_dtype, x.dtype)
+    else:
+      wq, wk, wv, wo = params
 
     # Get query q, keys k and values v.
     qkv_shape = mtf.Shape(batch_dims + [heads, length, kv_channels])
-    q = mtf.einsum([x, q_var], qkv_shape)
-    k = mtf.einsum([x, k_var], qkv_shape)
-    v = mtf.einsum([x, v_var], qkv_shape)
+    q = mtf.einsum([x, wq], qkv_shape)
+    k = mtf.einsum([x, wk], qkv_shape)
+    v = mtf.einsum([x, wv], qkv_shape)
+    if return_kv is not None:
+      return_kv.extend([k, v])
 
     # Choose a suitable block size.
     # We choose the greatest divisor of length_per_split less than or equal
@@ -426,15 +441,16 @@ def masked_local_attention_1d(x,
     # don't.
     o = dot_product_attention(q, k, v, mask=mask)
     o = mtf.reshape(o, batch_dims + [heads, length, kv_channels])
-    return mtf.einsum([o, o_var], mtf.Shape(batch_dims + [length, io_channels]))
+    return mtf.einsum([o, wo], mtf.Shape(batch_dims + [length, io_channels]))
 
 
 def masked_local_attention_1d_incremental(x,
                                           prev_k,
                                           prev_v,
                                           step_num,
-                                          master_dtype,
-                                          slice_dtype,
+                                          master_dtype=None,
+                                          slice_dtype=None,
+                                          params=None,
                                           name=None):
   """Incremental local self-attention (one decode step).
 
@@ -447,8 +463,9 @@ def masked_local_attention_1d_incremental(x,
     prev_v: mtf.Tensor with shape
        [batch..., heads, window_length, kv_channels]
     step_num: mtf Scalar with dtype tf.int32
-    master_dtype: a tf.dtype
-    slice_dtype: a tf.dtype
+    master_dtype: a tf.dtype (deprecated)
+    slice_dtype: a tf.dtype (deprecated)
+    params: a quadruple of Tensors (see multihead_attention_params())
     name: an optional string.
 
   Returns:
@@ -464,20 +481,23 @@ def masked_local_attention_1d_incremental(x,
   batch_dims = x.shape.dims[:-1]
   io_channels = x.shape.dims[-1]
   heads, window_length, kv_channels = prev_k.shape.dims[-3:]
-  with tf.variable_scope(name, default_name="multihead_attention"):
-    q_var, k_var, v_var, o_var = multihead_attention_vars(
-        x.mesh, heads, io_channels, kv_channels,
-        master_dtype, slice_dtype, x.dtype)
-    q = mtf.einsum([x, q_var], mtf.Shape(batch_dims + [heads, kv_channels]))
-    k = mtf.einsum([x, k_var], mtf.Shape(batch_dims + [heads, kv_channels]))
-    v = mtf.einsum([x, v_var], mtf.Shape(batch_dims + [heads, kv_channels]))
+  with tf.variable_scope(name, default_name="masked_local_attention_1d"):
+    if params is None:
+      wq, wk, wv, wo = multihead_attention_vars(
+          x.mesh, heads, io_channels, kv_channels,
+          master_dtype, slice_dtype, x.dtype)
+    else:
+      wq, wk, wv, wo = params
+    q = mtf.einsum([x, wq], mtf.Shape(batch_dims + [heads, kv_channels]))
+    k = mtf.einsum([x, wk], mtf.Shape(batch_dims + [heads, kv_channels]))
+    v = mtf.einsum([x, wv], mtf.Shape(batch_dims + [heads, kv_channels]))
     current_position = mtf.equal(
         mtf.range(x.mesh, window_length, dtype=tf.int32),
         mtf.mod(step_num, window_length.size))
     k = mtf.where(current_position, k, prev_k, output_shape=prev_k.shape)
     v = mtf.where(current_position, v, prev_v, output_shape=prev_v.shape)
     o = dot_product_attention(q, k, v, mask=None)
-    y = mtf.einsum([o, o_var], x.shape)
+    y = mtf.einsum([o, wo], x.shape)
     return y, k, v
 
 
@@ -548,7 +568,7 @@ def local_2d_self_attention_spatial_blocks(query_antecedent,
 
     h_dim, w_dim, io_channels = query_antecedent.shape.dims[-3:]
     batch, num_h_blocks, num_w_blocks = query_antecedent.shape.dims[:3]
-    q_var, k_var, v_var, o_var = multihead_attention_vars(
+    wq, wk, wv, wo = multihead_attention_vars(
         query_antecedent.mesh, heads, io_channels, kv_channels,
         master_dtype, slice_dtype, query_antecedent.dtype)
 
@@ -560,15 +580,15 @@ def local_2d_self_attention_spatial_blocks(query_antecedent,
     memory_h_dim, memory_w_dim = memory_antecedent.shape.dims[-3:-1]
 
     # Call einsum over the query and memory to get query q, keys k and values v.
-    q = mtf.einsum([query_antecedent, q_var],
+    q = mtf.einsum([query_antecedent, wq],
                    mtf.Shape([
                        batch, heads, num_h_blocks, num_w_blocks, h_dim, w_dim,
                        kv_channels
                    ]))
-    k = mtf.einsum([memory_antecedent, k_var],
+    k = mtf.einsum([memory_antecedent, wk],
                    mtf.Shape([batch, heads, num_h_blocks, num_w_blocks,
                               memory_h_dim, memory_w_dim, kv_channels]))
-    v = mtf.einsum([memory_antecedent, v_var],
+    v = mtf.einsum([memory_antecedent, wv],
                    mtf.Shape([batch, heads, num_h_blocks, num_w_blocks,
                               memory_h_dim, memory_w_dim, kv_channels]))
 
@@ -586,7 +606,7 @@ def local_2d_self_attention_spatial_blocks(query_antecedent,
     output = dot_product_attention(q, k, v, mask=mask)
 
     return mtf.einsum(
-        [output, o_var],
+        [output, wo],
         mtf.Shape(
             [batch, num_h_blocks, num_w_blocks, h_dim, w_dim, io_channels]))
 
@@ -596,43 +616,116 @@ def rename_length_to_memory_length(
   return mtf.rename_dimension(x, length_name, memory_length_name)
 
 
-def multihead_attention_vars(mesh, heads, io_channels, kv_channels,
-                             master_dtype, slice_dtype, activation_dtype):
+def multihead_attention_vars(
+    mesh, heads, io_channels, kv_channels,
+    master_dtype, slice_dtype, activation_dtype):
+  """Deprecated version of multihead_attention_params with combine=True."""
+  return multihead_attention_params(
+      mesh, heads, io_channels, kv_channels,
+      mtf.VariableDType(master_dtype, slice_dtype, activation_dtype),
+      combine=True)
+
+
+def multihead_attention_params(mesh, heads, io_channels, kv_channels,
+                               variable_dtype, combine=False):
   """Create Parameters for Multihead Attention.
+
+  If the combine flag is set to True, then we create only one variable
+  which stacks together all of the parameters.  Otherwise, we create four
+  separate variables.
 
   Args:
     mesh: a Mesh
     heads: a Dimension
     io_channels: a Dimension
     kv_channels: a Dimension
-    master_dtype: a tf.dtype
-    slice_dtype: a tf.dtype
-    activation_dtype: a tf.dtype
+    variable_dtype: a mtf.VariableDType
+    combine: a boolean
 
   Returns:
-    q_var: a Tensor with shape [heads, io_channels, kv_channels]
-    k_var: a Tensor with shape [heads, io_channels, kv_channels]
-    v_var: a Tensor with shape [heads, io_channels, kv_channels]
-    o_var: a Tensor with shape [heads, io_channels, kv_channels]
+    wq: a Tensor with shape [heads, io_channels, kv_channels]
+    wk: a Tensor with shape [heads, io_channels, kv_channels]
+    wv: a Tensor with shape [heads, io_channels, kv_channels]
+    wo: a Tensor with shape [heads, io_channels, kv_channels]
   """
   qkvo = mtf.Dimension("qkvo", 4)
   qk_stddev = (io_channels.size ** -0.5) * (kv_channels.size ** -0.25)
   v_stddev = io_channels.size ** -0.5
   o_stddev = (io_channels.size * heads.size) ** -0.5
-  def qkvo_initializer(shape,
-                       dtype=None,
-                       partition_info=None,
-                       verify_shape=None):
-    del partition_info, verify_shape
-    return tf.random_normal(shape, dtype=dtype) * tf.reshape(
-        tf.cast([qk_stddev, qk_stddev, v_stddev, o_stddev],
-                dtype or tf.float32), [4, 1, 1, 1])
-  var = mtf.get_variable(
-      mesh, "qkvo", mtf.Shape([qkvo, heads, io_channels, kv_channels]),
-      initializer=qkvo_initializer, master_dtype=master_dtype,
-      slice_dtype=slice_dtype, activation_dtype=activation_dtype)
-  q_var, k_var, v_var, o_var = mtf.unstack(var, qkvo)
-  return q_var, k_var, v_var, o_var
+  if combine:
+    def qkvo_initializer(shape,
+                         dtype=None,
+                         partition_info=None,
+                         verify_shape=None):
+      del partition_info, verify_shape
+      return tf.random_normal(shape, dtype=dtype) * tf.reshape(
+          tf.cast([qk_stddev, qk_stddev, v_stddev, o_stddev],
+                  dtype or tf.float32), [4, 1, 1, 1])
+    var = mtf.get_variable(
+        mesh, "qkvo", mtf.Shape([qkvo, heads, io_channels, kv_channels]),
+        initializer=qkvo_initializer, dtype=variable_dtype)
+    return mtf.unstack(var, qkvo)
+  else:
+    return [mtf.get_variable(
+        mesh, name, mtf.Shape([heads, io_channels, kv_channels]),
+        initializer=tf.random_normal_initializer(stddev=stddev),
+        dtype=variable_dtype) for name, stddev in zip(
+            ["q", "k", "v", "o"],
+            [qk_stddev, qk_stddev, v_stddev, o_stddev])]
+
+
+def dot_product_attention_v2(q,
+                             k,
+                             v,
+                             memory_length_dim,
+                             k_dim,
+                             v_dim,
+                             mask=None,
+                             dropout=0.0,
+                             dropout_broadcast_dims=None,
+                             extra_logit=None):
+  """Dot-product attention - doesn't use positional dimensions.
+
+  k_dim is a Dimension representing the channels in the queries and keys
+  v_dim is a Dimension representing the channels in values
+  memory_length_dim is a Dimension representing the different key/value pairs.
+
+  Dimensions of q: other_query_dims + {k_dim}
+  Dimensions of k: other_memory_dims + {memory_length_dim, k_dim}
+  Dimensions of v: other_memory_dims + {memory_length_dim, v_dim}
+  other_memory_dims is a subset of other_query_dims
+
+  Typically, other_query_dims={batch, heads, length}
+  Typically, other_memory_dims={batch, heads}
+
+  Args:
+    q: a Tensor
+    k: a Tensor
+    v: a Tensor
+    memory_length_dim: a Dimension
+    k_dim: a Dimension
+    v_dim: a Dimension
+    mask: mask Tensor (see attention_mask())
+    dropout: a float.
+    dropout_broadcast_dims: an optional list of mtf.Dimension
+    extra_logit: an optional scalar or tensor
+
+  Returns:
+    Tensor with shape q.shape - k_dim + v_dim
+  """
+  logits_shape = q.shape - k_dim + memory_length_dim
+  logits = mtf.einsum([q, k], logits_shape, reduced_dims=[k_dim])
+  if mask is not None:
+    logits += mask
+  weights = mtf.softmax(logits, memory_length_dim, extra_logit=extra_logit)
+  if dropout != 0.0:
+    weights = mtf.dropout(
+        weights, 1.0 - dropout,
+        noise_shape=weights.shape - dropout_broadcast_dims)
+  outputs_shape = q.shape - k_dim + v_dim
+  outputs = mtf.einsum(
+      [weights, v], outputs_shape, reduced_dims=[memory_length_dim])
+  return outputs
 
 
 def dot_product_attention(q,
@@ -717,7 +810,7 @@ def multihead_attention(query_antecedent,
   with tf.variable_scope(name,
                          default_name="multihead_attention",
                          values=[query_antecedent, memory_antecedent]):
-    q_var, k_var, v_var, o_var = multihead_attention_vars(
+    wq, wk, wv, wo = multihead_attention_vars(
         query_antecedent.mesh, heads, io_channels, kv_channels,
         master_dtype, slice_dtype, query_antecedent.dtype)
     if memory_antecedent is None:
@@ -730,18 +823,18 @@ def multihead_attention(query_antecedent,
     if memory_channels != io_channels:
       raise ValueError("memory channels must equal query channels")
     q = mtf.einsum(
-        [query_antecedent, q_var],
+        [query_antecedent, wq],
         mtf.Shape(batch_dims + [heads, query_length, kv_channels]))
     k = mtf.einsum(
-        [memory_antecedent, k_var],
+        [memory_antecedent, wk],
         mtf.Shape(batch_dims + [heads, memory_length, kv_channels]))
     v = mtf.einsum(
-        [memory_antecedent, v_var],
+        [memory_antecedent, wv],
         mtf.Shape(batch_dims + [heads, memory_length, kv_channels]))
     o = dot_product_attention(
         q, k, v, mask, dropout, dropout_broadcast_dims)
     return mtf.einsum(
-        [o, o_var], mtf.Shape(batch_dims + [query_length, io_channels]))
+        [o, wo], mtf.Shape(batch_dims + [query_length, io_channels]))
 
 
 def multihead_self_attention_incremental(query_antecedent,
@@ -779,18 +872,18 @@ def multihead_self_attention_incremental(query_antecedent,
   io_channels = query_antecedent.shape.dims[-1]
   heads, memory_length, kv_channels = prev_k.shape.dims[-3:]
   with tf.variable_scope(name, default_name="multihead_attention"):
-    q_var, k_var, v_var, o_var = multihead_attention_vars(
+    wq, wk, wv, wo = multihead_attention_vars(
         query_antecedent.mesh, heads, io_channels, kv_channels,
         master_dtype, slice_dtype, query_antecedent.dtype)
     memory_antecedent = query_antecedent
     q = mtf.einsum(
-        [query_antecedent, q_var],
+        [query_antecedent, wq],
         mtf.Shape(batch_dims + [heads, kv_channels]))
     k = mtf.einsum(
-        [memory_antecedent, k_var],
+        [memory_antecedent, wk],
         mtf.Shape(batch_dims + [heads, kv_channels]))
     v = mtf.einsum(
-        [memory_antecedent, v_var],
+        [memory_antecedent, wv],
         mtf.Shape(batch_dims + [heads, kv_channels]))
     k = prev_k + mtf.multiply(
         k, mtf.one_hot(step_num, memory_length, dtype=prev_k.dtype),
@@ -804,12 +897,12 @@ def multihead_self_attention_incremental(query_antecedent,
             query_antecedent.mesh, memory_length, dtype=tf.int32), step_num),
         q.dtype) * -1e9
     o = dot_product_attention(q, k, v, mask)
-    y = mtf.einsum([o, o_var], query_antecedent.shape)
+    y = mtf.einsum([o, wo], query_antecedent.shape)
     return y, k, v
 
 
 def multihead_encdec_attention_incremental(query_antecedent,
-                                           q_var, o_var, k, v,
+                                           wq, wo, k, v,
                                            mask,
                                            name="multihead_attention"):
   """Incremental attention over encoder (one decode step).
@@ -823,8 +916,8 @@ def multihead_encdec_attention_incremental(query_antecedent,
 
   Args:
     query_antecedent: a mtf.Tensor with shape query_dims + [io_channels]
-    q_var: a mtf.Tensor with shape [heads, io_channels, kv_channels]
-    o_var: a mtf.Tensor with shape [heads, io_channels, kv_channels]
+    wq: a mtf.Tensor with shape [heads, io_channels, kv_channels]
+    wo: a mtf.Tensor with shape [heads, io_channels, kv_channels]
     k: memory_dims + [heads, memory_length, kv_channels]
     v: memory_dims + [heads, memory_length, kv_channels]
     mask: mask Tensor (see attention_mask())
@@ -837,10 +930,10 @@ def multihead_encdec_attention_incremental(query_antecedent,
   query_dims = query_antecedent.shape.dims[:-1]
   with tf.variable_scope(name, default_name="multihead_attention"):
     q = mtf.einsum(
-        [query_antecedent, q_var],
+        [query_antecedent, wq],
         mtf.Shape(query_dims + [heads, kv_channels]))
     o = dot_product_attention(q, k, v, mask)
-    return mtf.einsum([o, o_var], query_antecedent.shape)
+    return mtf.einsum([o, wo], query_antecedent.shape)
 
 
 def attention_mask_ignore_padding(inputs, dtype=tf.float32):
@@ -1012,20 +1105,20 @@ def multihead_self_attention_memory_compressed(x,
   with tf.variable_scope(name,
                          default_name="compressed_attention",
                          values=[x]):
-    q_var, k_var, v_var, o_var = multihead_attention_vars(
+    wq, wk, wv, wo = multihead_attention_vars(
         x.mesh, heads, io_channels, kv_channels,
         master_dtype, slice_dtype, x.dtype)
     memory_antecedent = compress_mean(x, length, compression_factor)
     memory_antecedent = rename_length_to_memory_length(memory_antecedent)
     memory_length = memory_antecedent.shape.dims[-2]
     q = mtf.einsum(
-        [x, q_var],
+        [x, wq],
         mtf.Shape(batch_dims + [heads, length, kv_channels]))
     k = mtf.einsum(
-        [memory_antecedent, k_var],
+        [memory_antecedent, wk],
         mtf.Shape(batch_dims + [heads, memory_length, kv_channels]))
     v = mtf.einsum(
-        [memory_antecedent, v_var],
+        [memory_antecedent, wv],
         mtf.Shape(batch_dims + [heads, memory_length, kv_channels]))
     if mask_right:
       query_pos = mtf.range(x.mesh, length, dtype=tf.int32)
@@ -1038,7 +1131,7 @@ def multihead_self_attention_memory_compressed(x,
     o = dot_product_attention(
         q, k, v, mask, dropout, dropout_broadcast_dims, extra_logit=0.0)
     return mtf.einsum(
-        [o, o_var], mtf.Shape(batch_dims + [length, io_channels]))
+        [o, wo], mtf.Shape(batch_dims + [length, io_channels]))
 
 
 def compress_mean(x, dim, compression_factor):
@@ -1062,3 +1155,14 @@ def compress_mean(x, dim, compression_factor):
   x = mtf.reshape(x, new_shape)
   x = mtf.reduce_mean(x, reduced_dim=compression_factor_dim)
   return x
+
+
+def embedding(indices, vocab_dim, output_dim, variable_dtype, name=None):
+  """Embedding layer."""
+  with tf.variable_scope(name, default_name="embedding"):
+    weights = mtf.get_variable(
+        indices.mesh, "w",
+        mtf.Shape([vocab_dim, output_dim]),
+        dtype=variable_dtype,
+        initializer=tf.random_normal_initializer())
+    return mtf.gather(weights, indices, vocab_dim)
