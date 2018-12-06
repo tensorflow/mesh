@@ -336,9 +336,9 @@ class TensorLayout(object):
     Returns:
       Tuple of optional integers, with length mesh_ndims.
     """
+    ta2ma = self._tensor_axis_to_mesh_axis
     return tuple(
-        [self._tensor_axis_to_mesh_axis.index(mesh_axis)
-         if mesh_axis in self._tensor_axis_to_mesh_axis else None
+        [ta2ma.index(mesh_axis) if mesh_axis in ta2ma else None
          for mesh_axis in xrange(mesh_ndims)])
 
 
@@ -459,11 +459,6 @@ class Graph(object):
     key_to_vars = collections.defaultdict(collections.deque)
     for v in all_variables:
       key_to_vars[var_key(v)].append(v)
-    # We need to point the inputs of other operations at the outputs of unstack
-    # instead of the outputs of the deleted Variables.  We construct this
-    # mapping from old input tensors to new input tensors.
-    tensor_mapping = {}
-    # maps from old variable name to (stacked_variable, position)
     individual_to_stacked = {}
     for op in operations:
       if isinstance(op, StackedVariable):
@@ -489,8 +484,13 @@ class Graph(object):
           stacked_var = StackedVariable(to_stack)
           stack_dim = stacked_var.shape.dims[0]
           unstacked = unstack(stacked_var.outputs[0], stack_dim)
-          for v, t in zip(to_stack, unstacked):
-            tensor_mapping[v.outputs[0]] = t
+          unstack_op = unstacked[0].operation
+          # replace the output Tensors of the unstack operation with the
+          # Tensors which were the outputs of the original variable operations.
+          # Later operations use these Tensors as inputs.
+          unstack_op._outputs = [v.outputs[0] for v in to_stack]
+          for t in unstack_op._outputs:
+            t._operation = unstack_op
           for idx, v in enumerate(to_stack):
             individual_to_stacked[v.name] = stacked_var, idx
         else:
@@ -500,10 +500,6 @@ class Graph(object):
           if op.trainable:
             self._trainable_variables.append(op)
       else:
-        # Point inputs of other operations to the outputs of unstack.
-        for i in xrange(len(op._inputs)):
-          if op._inputs[i] in tensor_mapping:
-            op._inputs[i] = tensor_mapping[op._inputs[i]]
         if isinstance(op, Assign):
           # Rewrite the grouped assignment to stack up the values and then
           # assign to the stacked variables.
@@ -930,11 +926,11 @@ class MeshImpl(object):
     num_splits = self.shape[mesh_axis].size
     def my_fn(x, which):
       slice_begin = [
-          dimsize // num_splits * which if i == split_axis
-          else 0 for i, dimsize in enumerate(x.shape.as_list())]
+          dimsize // num_splits * which if i == split_axis else 0
+          for i, dimsize in enumerate(x.shape.as_list())]
       slice_size = [
-          dimsize // num_splits if i == split_axis
-          else dimsize for i, dimsize in enumerate(x.shape.as_list())]
+          dimsize // num_splits if i == split_axis else dimsize
+          for i, dimsize in enumerate(x.shape.as_list())]
       return tf.slice(x, slice_begin, slice_size)
     return self.slicewise(my_fn, x, which)
 
@@ -3657,6 +3653,8 @@ def add(x1, x2, output_shape=None, name=None):
 
 
 def add_n(xs):
+  if not xs:
+    return 0
   return functools.reduce(add, xs)
 
 
@@ -4037,10 +4035,9 @@ def reduce_logsumexp(x, reduced_dim, extra_logit=None, name=None):
     reduced_shape = x.shape - reduced_dim
     max_logit = reduce_max(stop_gradient(x), output_shape=reduced_shape)
     if extra_logit is not None:
-      max_logit = maximum(
-          max_logit,
-          stop_gradient(extra_logit) if isinstance(extra_logit, Tensor)
-          else extra_logit)
+      if isinstance(extra_logit, Tensor):
+        extra_logit = stop_gradient(extra_logit)
+      max_logit = maximum(max_logit, extra_logit)
     x -= max_logit
     exp_x = exp(x)
     sum_exp_x = reduce_sum(exp_x, output_shape=reduced_shape)

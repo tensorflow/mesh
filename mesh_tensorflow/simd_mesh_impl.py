@@ -102,7 +102,7 @@ class SimdMeshImpl(mtf.MeshImpl):
       slices = []
       slices_with_master_dtype = []
       with tf.device(variable.master_device), utils.outside_all_rewrites():
-        zero_tensor = tf.zeros(slice_shape)
+        zero_tensor = tf.zeros(slice_shape, dtype=variable.slice_dtype)
 
       # pylint: disable=protected-access
       init_device_stack = tf.get_default_graph()._device_function_stack
@@ -398,8 +398,9 @@ class SimdMeshImpl(mtf.MeshImpl):
         return inputs[0] + inputs[1]
     # convert all inputs to LaidOutTensor where possible
     inputs = mtf.convert_args_to_laid_out_tensors(inputs)
-    ret = fn(*[x.one_slice if isinstance(x, self.LaidOutTensor)
-               else x for x in inputs])
+    ret = fn(*[
+        x.one_slice if isinstance(x, self.LaidOutTensor) else x
+        for x in inputs])
     if isinstance(ret, tuple):
       return tuple([self.LaidOutTensor([t]) for t in ret])
     else:

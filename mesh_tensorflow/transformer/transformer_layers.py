@@ -92,18 +92,96 @@ class SelfAttention(transformer.TransformerLayer):
     k = mtf.einsum([m, wk], reduced_dims=[context.model_dim])
     v = mtf.einsum([m, wv], reduced_dims=[context.model_dim])
     if context.mode == "incremental":
-      old_k, old_v = context.next_states(2)
-      one_hot = mtf.one_hot(context.position, memory_length)
+      old_k, old_v = context.get_states(2)
+      one_hot = mtf.one_hot(
+          context.position, memory_length, dtype=context.activation_dtype)
       inv_one_hot = 1.0 - one_hot
       k = old_k * inv_one_hot + k * one_hot
       v = old_v * inv_one_hot + v * one_hot
     if context.mode == "incremental" or context.mode == "first_part":
-      context.new_states.extend([k, v])
+      context.record_new_states([k, v])
+    masks = []
     if context.autoregressive:
-      mask = mtf.cast(
+      masks.append(mtf.cast(
           mtf.less(
               context.position,
               mtf.range(context.mesh, memory_length, dtype=tf.int32)),
+          context.activation_dtype) * -1e9)
+    if (context.sequence_id is not None and
+        isinstance(context.sequence_id, mtf.Tensor) and
+        context.length_dim in context.sequence_id.shape):
+      masks.append(mtf.cast(
+          mtf.not_equal(
+              context.sequence_id,
+              mtf.layers.rename_length_to_memory_length(
+                  context.sequence_id)),
+          context.activation_dtype) * -1e9)
+    mask = mtf.add_n(masks) if masks else None
+
+    o = mtf.layers.dot_product_attention_v2(
+        q, k, v,
+        memory_length,
+        self.kv_dim,
+        self.kv_dim,
+        mask,
+        self.dropout_rate if context.train else 0.0,
+        self.dropout_broadcast_dims)
+    return mtf.einsum([o, wo], x.shape, reduced_dims=[
+        self.heads_dim, self.kv_dim])
+
+  @property
+  def heads_dim(self):
+    return mtf.Dimension("heads", self.num_heads)
+
+  @property
+  def kv_dim(self):
+    return mtf.Dimension("d_kv", self.key_value_size)
+
+
+class EncDecAttention(transformer.TransformerLayer):
+  """Multi-head self-attention layer."""
+
+  def __init__(self,
+               num_heads=8,
+               key_value_size=128,
+               dropout_rate=0.0,
+               dropout_broadcast_dims=None):
+    """Create a EncDecAttention Layer.
+
+    Args:
+      num_heads: an integer
+      key_value_size: an integer
+      dropout_rate: a floating-point number
+      dropout_broadcast_dims: an optional list of mtf.Dimension
+    """
+    self.num_heads = num_heads
+    self.key_value_size = key_value_size
+    self.dropout_rate = dropout_rate
+    self.dropout_broadcast_dims = dropout_broadcast_dims
+
+  def call(self, context, x, losses=None):
+    """Call the layer."""
+    memory_input_dim = context.encoder_output.shape[-1]
+    if memory_input_dim != context.model_dim:
+      raise NotImplementedError(
+          "TODO(noam): support different model_dim in encoder and decoder.")
+    wq, wk, wv, wo = mtf.layers.multihead_attention_params(
+        context.mesh, self.heads_dim, context.model_dim, self.kv_dim,
+        context.variable_dtype)
+    q = mtf.einsum([x, wq], reduced_dims=[context.model_dim])
+    if context.mode == "incremental":
+      k, v, memory_length = context.get_constant_state()
+    else:
+      m = context.encoder_output
+      memory_length, = [d for d in m.shape.dims if d.name == "memory_length"]
+      k = mtf.einsum([m, wk], reduced_dims=[context.model_dim])
+      v = mtf.einsum([m, wv], reduced_dims=[context.model_dim])
+      if context.mode == "first_part":
+        context.record_constant_state((k, v, memory_length))
+    if context.encoder_sequence_id and context.sequence_id:
+      mask = mtf.cast(
+          mtf.not_equal(
+              context.sequence_id, context.encoder_sequence_id),
           context.activation_dtype) * -1e9
     else:
       mask = None
@@ -151,10 +229,10 @@ class LocalSelfAttention(transformer.TransformerLayer):
         context.mesh, self.heads_dim, context.model_dim, self.kv_dim,
         context.variable_dtype)
     if context.mode == "incremental":
-      prev_k, prev_v = context.next_states(2)
+      prev_k, prev_v = context.get_states(2)
       y, new_k, new_v = mtf.layers.masked_local_attention_1d_incremental(
           x, prev_k, prev_v, context.position, params=params)
-      context.new_states.extend([new_k, new_v])
+      context.record_new_states([new_k, new_v])
       return y
     else:
       kv = []

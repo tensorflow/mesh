@@ -1157,12 +1157,15 @@ def compress_mean(x, dim, compression_factor):
   return x
 
 
-def embedding(indices, vocab_dim, output_dim, variable_dtype, name=None):
+def embedding_weights(
+    mesh, vocab_dim, output_dim, variable_dtype, name="embedding"):
+  return mtf.get_variable(
+      mesh, name, mtf.Shape([vocab_dim, output_dim]),
+      dtype=variable_dtype, initializer=tf.random_normal_initializer())
+
+
+def embedding(indices, vocab_dim, output_dim, variable_dtype, name="embedding"):
   """Embedding layer."""
-  with tf.variable_scope(name, default_name="embedding"):
-    weights = mtf.get_variable(
-        indices.mesh, "w",
-        mtf.Shape([vocab_dim, output_dim]),
-        dtype=variable_dtype,
-        initializer=tf.random_normal_initializer())
-    return mtf.gather(weights, indices, vocab_dim)
+  weights = embedding_weights(
+      indices.mesh, vocab_dim, output_dim, variable_dtype, name)
+  return mtf.gather(weights, indices, vocab_dim)
