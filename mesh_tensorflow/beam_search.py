@@ -29,19 +29,17 @@ INF = 1. * 1e7
 
 
 def compute_topk_scores_and_seq(sequences, scores, scores_to_gather, flags,
-                                beam_dim, prefix="default",
-                                states=None):
+                                beam_dim, prefix="default"):
   """Given sequences and scores, will gather the top k=beam size sequences.
 
   This function is used to grow alive, and finished. It takes sequences,
   scores, and flags, and returns the top k from sequences, scores_to_gather,
   and flags based on the values in scores.
 
-  This method permits easy introspection using tfdbg.  It adds three named ops
+  This method permits easy introspection using tfdbg.  It adds two named ops
   that are prefixed by `prefix`:
     - _topk_seq: the tensor for topk_seq returned by this method.
     - _topk_flags: the tensor for topk_finished_flags returned by this method.
-    - _topk_scores: the tensor for tokp_gathered_scores returned by this method.
 
   Args:
     sequences: Tensor of sequences that we need to gather from.
@@ -57,16 +55,17 @@ def compute_topk_scores_and_seq(sequences, scores, scores_to_gather, flags,
       EOS or not
     beam_dim: mtf.Dimension
     prefix: an optional string
-    states: an optional list of mtf.Tensor
   Returns:
     Tuple of
     (topk_seq [batch_size, beam_size, decode_length],
      topk_gathered_scores [batch_size, beam_size],
      topk_finished_flags[batch_size, beam_size],
-     topk_gathered_states)
+     selector)
   """
   unused_batch_dim, old_beam_dim, unused_length_dim = sequences.shape.dims
   topk_indices, _ = mtf.top_k(scores, old_beam_dim, beam_dim)
+
+  selector = mtf.one_hot(topk_indices, old_beam_dim, dtype=tf.float32)
 
   # Gather up the highest scoring sequences.
   # For each operation added, give it
@@ -81,11 +80,7 @@ def compute_topk_scores_and_seq(sequences, scores, scores_to_gather, flags,
   topk_seq = gather(sequences, "_seq")
   topk_flags = gather(flags, "_flags")
   topk_gathered_scores = gather(scores_to_gather, "_scores")
-  if states is None:
-    topk_gathered_states = None
-  else:
-    topk_gathered_states = [gather(state, "_topk_states") for state in states]
-  return topk_seq, topk_gathered_scores, topk_flags, topk_gathered_states
+  return topk_seq, topk_gathered_scores, topk_flags, selector
 
 
 def beam_search(logits_fn,
@@ -213,9 +208,9 @@ def beam_search(logits_fn,
     curr_finished_flags = _my_concat(finished_flags, curr_finished)
     return compute_topk_scores_and_seq(
         curr_finished_seq, curr_finished_scores, curr_finished_scores,
-        curr_finished_flags, beam_dim, "grow_finished", states=None)
+        curr_finished_flags, beam_dim, "grow_finished")
 
-  def grow_alive(curr_seq, curr_scores, curr_log_probs, curr_finished, states):
+  def grow_alive(curr_seq, curr_scores, curr_log_probs, curr_finished):
     """Given sequences and scores, will gather the top k=beam size sequences.
 
     Args:
@@ -226,7 +221,6 @@ def beam_search(logits_fn,
         [batch, beam]
       curr_finished: Finished flags for each of these sequences.
         [batch, beam]
-      states: list of mtf.Tensor
     Returns:
       Tuple of
         (Topk sequences based on scores,
@@ -238,7 +232,7 @@ def beam_search(logits_fn,
     curr_scores += mtf.cast(curr_finished, curr_scores.dtype) * -INF
     return compute_topk_scores_and_seq(curr_seq, curr_scores, curr_log_probs,
                                        curr_finished, beam_dim,
-                                       "grow_alive", states)
+                                       "grow_alive")
 
   def grow_topk(i, alive_seq, alive_log_probs, states=None):
     r"""Inner beam search loop.
@@ -298,6 +292,8 @@ def beam_search(logits_fn,
     top_beam_index = top_ids // vocab_dim.size
     top_ids %= vocab_dim.size  # Unflatten the ids
 
+    selector = mtf.one_hot(top_beam_index, beam_dim, dtype=tf.float32)
+
     def my_gather(tensor):
       return mtf.gather(
           tensor, top_beam_index, beam_dim,
@@ -308,14 +304,12 @@ def beam_search(logits_fn,
     # bools
     top_seq = my_gather(alive_seq)
 
-    if states:
-      states = [my_gather(state) for state in new_states]
-
     # Append the most probable alive
     top_seq += top_ids * mtf.one_hot(i, length_dim, dtype=tf.int32)
     top_finished = mtf.equal(top_ids, eos_id)
 
-    return top_seq, top_log_probs, top_scores, top_finished, states
+    return (
+        top_seq, top_log_probs, top_scores, top_finished, new_states, selector)
 
   def inner_loop(i, alive_seq, alive_log_probs, finished_seq, finished_scores,
                  finished_flags, *states):
@@ -368,14 +362,26 @@ def beam_search(logits_fn,
     # 2. Extract the ones that have finished and haven't finished
     # 3. Recompute the contents of finished based on scores.
     (top2k_seq, top2k_log_probs, top2k_scores, top2k_finished,
-     top2k_states) = grow_topk(i, alive_seq, alive_log_probs, states)
-    alive_seq, alive_log_probs, _, states = grow_alive(
-        top2k_seq, top2k_scores, top2k_log_probs, top2k_finished, top2k_states)
+     new_states, first_selector) = grow_topk(
+         i, alive_seq, alive_log_probs, states)
+    alive_seq, alive_log_probs, _, second_selector = grow_alive(
+        top2k_seq, top2k_scores, top2k_log_probs, top2k_finished)
     finished_seq, finished_scores, finished_flags, _ = grow_finished(
         finished_seq, finished_scores, finished_flags, top2k_seq, top2k_scores,
         top2k_finished)
+    old_beam_dim = mtf.Dimension("old_beam", beam_dim.size)
+    selector = mtf.einsum(
+        [mtf.rename_dimension(first_selector, beam_dim.name, old_beam_dim.name),
+         second_selector],
+        output_shape=[batch_dim, old_beam_dim, beam_dim])
+    new_states = [
+        mtf.einsum(
+            [mtf.rename_dimension(state, beam_dim.name, old_beam_dim.name),
+             mtf.cast(selector, state.dtype)],
+            reduced_dims=[old_beam_dim], output_shape=state.shape)
+        for state in new_states]
     return (i + 1, alive_seq, alive_log_probs, finished_seq, finished_scores,
-            finished_flags) + tuple(states)
+            finished_flags) + tuple(new_states)
 
   def _is_finished(i, unused_alive_seq, alive_log_probs, unused_finished_seq,
                    finished_scores, finished_in_finished, *unused_states):
