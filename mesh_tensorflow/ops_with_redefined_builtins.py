@@ -19,14 +19,12 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-from mesh_tensorflow import beam_search
-from mesh_tensorflow import layers
-from mesh_tensorflow import optimize
-from mesh_tensorflow import placement_mesh_impl
-from mesh_tensorflow import simd_mesh_impl
-from mesh_tensorflow import tpu_variables
-from mesh_tensorflow import utils
-from mesh_tensorflow.ops_with_redefined_builtins import *  # pylint: disable=wildcard-import
+from mesh_tensorflow.ops import *  # pylint: disable=wildcard-import
+from mesh_tensorflow.ops import mtf_abs as abs  # pylint: disable=redefined-builtin,unused-import
+from mesh_tensorflow.ops import mtf_pow as pow  # pylint: disable=redefined-builtin,unused-import
+from mesh_tensorflow.ops import mtf_range as range  # pylint: disable=redefined-builtin,unused-import
+from mesh_tensorflow.ops import mtf_slice as slice  # pylint: disable=redefined-builtin,unused-import
+
 
 
 # TODO(trandustin): Seal module.

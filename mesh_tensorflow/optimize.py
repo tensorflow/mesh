@@ -20,7 +20,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-from mesh_tensorflow import ops as mtf
+from mesh_tensorflow import ops_with_redefined_builtins as mtf
 import tensorflow as tf
 
 

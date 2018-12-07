@@ -19,7 +19,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-from mesh_tensorflow import ops as mtf
+from mesh_tensorflow import ops_with_redefined_builtins as mtf
 
 import tensorflow as tf
 
@@ -51,9 +51,6 @@ def dense(x, output_dim, reduced_dims=None, expert_dims=None,
   """
   if variable_dtype is None:
     variable_dtype = mtf.VariableDType(master_dtype, slice_dtype, x.dtype)
-  if variable_dtype.activation_dtype != x.dtype:
-    raise ValueError("variable_dtype.activation_dtype must match x.dtype "
-                     "variable_dtype=%s x=%s" % (variable_dtype, x))
   if expert_dims is None:
     expert_dims = []
   if reduced_dims is None:
@@ -70,6 +67,7 @@ def dense(x, output_dim, reduced_dims=None, expert_dims=None,
         w_shape,
         initializer=tf.random_normal_initializer(stddev=stddev),
         dtype=variable_dtype)
+    w = mtf.cast(w, x.dtype)
     y = mtf.einsum([x, w], output_shape)
     if use_bias:
       b = mtf.get_variable(
@@ -186,13 +184,20 @@ def batch_norm(x, is_training, momentum, epsilon=1e-9,
     return (norm_x * scale) + bias
 
 
-def softmax_cross_entropy_with_logits(logits, targets, vocab_dim):
+def softmax_cross_entropy_with_logits(logits, targets, vocab_dim, z_loss=0.0):
   """Per-example softmax loss.
+
+  if z_loss is nonzero, we add a loss equal to z_loss*log(z)^2, where z is the
+  partition function.  Example value: z_loss=1e-4.  Two uses of z_loss are:
+  - To keep the logits from drifting too far from zero, which can cause
+     unacceptable roundoff errors in bfloat16.
+  - To encourage the logits to be normalized log-probabilities.
 
   Args:
     logits: a mtf.Tensor whose shape contains vocab_dim
     targets: a mtf.Tensor with the same shape as logits
     vocab_dim: a mtf.Dimension
+    z_loss: a float
 
   Returns:
     a mtf.Tensor whose shape is equal to logits.shape - vocab_dim
@@ -206,9 +211,35 @@ def softmax_cross_entropy_with_logits(logits, targets, vocab_dim):
         "logits=%s targets=%s" % (logits.to_string, targets.to_string))
   if vocab_dim not in logits.shape.dims:
     raise ValueError("vocab_dim must be in logits.shape.dims")
-  log_softmax = mtf.log_softmax(logits, vocab_dim)
-  return mtf.negative(
+  log_z = mtf.reduce_logsumexp(logits, vocab_dim)
+  log_softmax = logits - log_z
+  loss = mtf.negative(
       mtf.reduce_sum(log_softmax * targets, reduced_dim=vocab_dim))
+  if z_loss != 0:
+    loss += z_loss * mtf.square(log_z)
+  return loss
+
+
+def sigmoid_cross_entropy_with_logits(logits, targets):
+  """Sigmoid cross-entropy loss.
+
+  Args:
+    logits: a mtf.Tensor
+    targets: a mtf.Tensor with the same shape as logits
+
+  Returns:
+    a mtf.Tensor whose shape is equal to logits.shape
+
+  Raises:
+    ValueError: if the shapes do not match.
+  """
+  if logits.shape != targets.shape:
+    raise ValueError(
+        "logits shape must equal targets shape"
+        "logits=%s targets=%s" % (logits.to_string, targets.to_string))
+  x = logits
+  z = targets
+  return mtf.relu(x) - x * z + mtf.log(1 + mtf.exp(-mtf.abs(x)))
 
 
 def weights_nonzero(targets, dtype=tf.float32):

@@ -323,6 +323,7 @@ class Unitransformer(object):
                max_length,
                shared_embedding_and_softmax_weights=False,
                label_smoothing=0.0,
+               z_loss=1e-4,
                name="transformer"):
     self.layer_stack = layer_stack
     self.model_dim = mtf.Dimension("d_model", d_model)
@@ -338,6 +339,7 @@ class Unitransformer(object):
     self.shared_embedding_and_softmax_weights = (
         shared_embedding_and_softmax_weights)
     self.label_smoothing = label_smoothing
+    self.z_loss = z_loss
     self.name = name
 
   def _call_internal(self, context, inputs, targets=None):
@@ -381,7 +383,7 @@ class Unitransformer(object):
     if self.output_vocab_dim is None:
       return x
     if self.shared_embedding_and_softmax_weights:
-      logits = tf.einsum(
+      logits = mtf.einsum(
           [x * (self.model_dim ** -0.5), embedding_weights],
           reduced_dims=[self.model_dim])
     else:
@@ -389,19 +391,17 @@ class Unitransformer(object):
           x, self.output_vocab_dim, use_bias=False,
           variable_dtype=context.variable_dtype,
           name="logits")
-    if context.train:
-      logits = mtf.layers.multiplicative_jitter(logits, epsilon=1e-2)
     if targets is not None and context.losses is not None:
       off_value = self.label_smoothing / self.output_vocab_dim.size
       on_value = 1.0 - self.label_smoothing + off_value
+      soft_targets = mtf.one_hot(
+          targets, self.output_vocab_dim,
+          dtype=context.activation_dtype,
+          on_value=on_value,
+          off_value=off_value)
       loss = mtf.layers.softmax_cross_entropy_with_logits(
-          logits,
-          mtf.one_hot(
-              targets, self.output_vocab_dim,
-              dtype=context.activation_dtype,
-              on_value=on_value,
-              off_value=off_value),
-          self.output_vocab_dim)
+          logits, soft_targets, self.output_vocab_dim,
+          z_loss=self.z_loss if context.train else 0.0)
       weights = mtf.layers.weights_nonzero(
           targets, dtype=context.activation_dtype)
       loss = mtf.reduce_mean(loss * weights)
@@ -674,6 +674,7 @@ class Bitransformer(object):
                max_length,
                shared_embedding=True,
                label_smoothing=0.0,
+               z_loss=1e-4,
                encoder_name="encoder",
                decoder_name="decoder"):
     self.encoder = Unitransformer(
@@ -692,6 +693,7 @@ class Bitransformer(object):
         autoregressive=True,
         max_length=max_length,
         label_smoothing=label_smoothing,
+        z_loss=z_loss,
         name=decoder_name)
     self.shared_embedding = shared_embedding
 

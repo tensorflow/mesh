@@ -28,18 +28,15 @@ import tensorflow as tf
 class DenseReluDense(transformer.TransformerLayer):
   """Two fully-connected layers with feed-forward activation."""
 
-  def __init__(self, hidden_size=2048, dropout_rate=0.0,
-               dropout_broadcast_dims=None):
+  def __init__(self, hidden_size=2048, dropout_rate=0.0):
     """Create a DenseReluDense.
 
     Args:
       hidden_size: an integer - size of the hidden layer
       dropout_rate: a floating-point number
-      dropout_broadcast_dims: an optional list of mtf.Dimension
     """
     self.hidden_size = hidden_size
     self.dropout_rate = 0.0
-    self.dropout_broadcast_dims = dropout_broadcast_dims
 
   def call(self, context, x, losses=None):
     """Call the layer."""
@@ -49,9 +46,9 @@ class DenseReluDense(transformer.TransformerLayer):
                          use_bias=False, activation=mtf.relu,
                          variable_dtype=context.variable_dtype,
                          name="wi")
-    if self.dropout_rate != 0.0:
+    if context.train and self.dropout_rate != 0.0:
       h = mtf.dropout(h, 1.0 - self.dropout_rate,
-                      noise_shape=h.shape - self._dropout_broadcast_dims)
+                      noise_shape=h.shape - context.length_dim)
     return mtf.layers.dense(h, io_channels, use_bias=False, activation=None,
                             variable_dtype=context.variable_dtype,
                             name="wo")
@@ -63,20 +60,17 @@ class SelfAttention(transformer.TransformerLayer):
   def __init__(self,
                num_heads=8,
                key_value_size=128,
-               dropout_rate=0.0,
-               dropout_broadcast_dims=None):
+               dropout_rate=0.0):
     """Create a SelfAttention Layer.
 
     Args:
       num_heads: an integer
       key_value_size: an integer
       dropout_rate: a floating-point number
-      dropout_broadcast_dims: an optional list of mtf.Dimension
     """
     self.num_heads = num_heads
     self.key_value_size = key_value_size
     self.dropout_rate = dropout_rate
-    self.dropout_broadcast_dims = dropout_broadcast_dims
 
   def call(self, context, x, losses=None):
     """Call the layer."""
@@ -125,7 +119,7 @@ class SelfAttention(transformer.TransformerLayer):
         self.kv_dim,
         mask,
         self.dropout_rate if context.train else 0.0,
-        self.dropout_broadcast_dims)
+        [context.length_dim])
     return mtf.einsum([o, wo], x.shape, reduced_dims=[
         self.heads_dim, self.kv_dim])
 
@@ -144,20 +138,17 @@ class EncDecAttention(transformer.TransformerLayer):
   def __init__(self,
                num_heads=8,
                key_value_size=128,
-               dropout_rate=0.0,
-               dropout_broadcast_dims=None):
+               dropout_rate=0.0):
     """Create a EncDecAttention Layer.
 
     Args:
       num_heads: an integer
       key_value_size: an integer
       dropout_rate: a floating-point number
-      dropout_broadcast_dims: an optional list of mtf.Dimension
     """
     self.num_heads = num_heads
     self.key_value_size = key_value_size
     self.dropout_rate = dropout_rate
-    self.dropout_broadcast_dims = dropout_broadcast_dims
 
   def call(self, context, x, losses=None):
     """Call the layer."""
@@ -191,8 +182,8 @@ class EncDecAttention(transformer.TransformerLayer):
         self.kv_dim,
         self.kv_dim,
         mask,
-        self.dropout_rate if context.train else 0.0,
-        self.dropout_broadcast_dims)
+        dropout=self.dropout_rate if context.train else 0.0,
+        dropout_broadcast_dims=[context.length_dim])
     return mtf.einsum([o, wo], x.shape, reduced_dims=[
         self.heads_dim, self.kv_dim])
 

@@ -20,7 +20,7 @@ from __future__ import print_function
 
 import functools
 
-from mesh_tensorflow import ops as mtf
+from mesh_tensorflow import ops_with_redefined_builtins as mtf
 from six.moves import xrange  # pylint: disable=redefined-builtin
 
 import tensorflow as tf

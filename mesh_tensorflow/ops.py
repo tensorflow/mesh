@@ -1420,6 +1420,7 @@ class SlicewiseOperation(Operation):
       output_dtype: a dtype
       splittable_dims: a list of Dimensions which are ok to split
       grad_function: an optional python function. Default to using tf.gradients
+        pass in the number 0 to indicate no gradient
       name: an optional string
     """
     super(SlicewiseOperation, self).__init__(inputs, name=name or "slicewise")
@@ -1427,6 +1428,12 @@ class SlicewiseOperation(Operation):
     self._outputs = [Tensor(self, output_shape, output_dtype)]
     self._splittable_dims = splittable_dims
     self._grad_function = grad_function
+
+  @property
+  def has_gradient(self):
+    if self._grad_function == 0:
+      return False
+    return super(SlicewiseOperation, self).has_gradient
 
   def gradient(self, grad_ys):
     if self._grad_function is not None:
@@ -1547,7 +1554,8 @@ def tanh(x, name="tanh"):
   return cwise(tf.tanh, [x], name=name, grad_function=grad_function)
 
 
-def pow(x, y):  # pylint: disable=redefined-builtin
+def mtf_pow(x, y):
+  """Call externally as mtf.pow()."""
   return exp(log(x) * y)
 
 
@@ -1572,6 +1580,16 @@ def _relu_grad(op, dy):
 
 def relu(x, name="relu"):
   return cwise(tf.nn.relu, [x], name=name, grad_function=_relu_grad)
+
+
+def sign(x, name="sign"):
+  ret = cwise(tf.sign, [x], name=name, grad_function=0)
+  return ret
+
+
+def mtf_abs(x):
+  """Call externally as mtf.abs()."""
+  return x * sign(x)
 
 
 def cast(x, dtype, name="cast"):
@@ -2174,8 +2192,8 @@ def cumsum(x, dim, exclusive=False):
     new_shape = x.shape.rename_dimension(dim.name, new_name)
     comparator = less if exclusive else less_equal
     m = cast(
-        comparator(range(x.mesh, dim, dtype=tf.float32),
-                   range(x.mesh, new_dim, dtype=tf.float32)), x.dtype)
+        comparator(mtf_range(x.mesh, dim, dtype=tf.float32),
+                   mtf_range(x.mesh, new_dim, dtype=tf.float32)), x.dtype)
     ret = einsum([x, m], output_shape=new_shape)
     return reshape(ret, x.shape)
 
@@ -3577,7 +3595,7 @@ def top_1(x, reduced_dim, dtype=tf.int32, name=None):
   with tf.name_scope(name, default_name="top_1"):
     max_val = reduce_max(x, reduced_dim=reduced_dim)
     is_max = to_float(equal(x, max_val))
-    pos = range(x.mesh, reduced_dim, tf.float32)
+    pos = mtf_range(x.mesh, reduced_dim, tf.float32)
     ret = reduce_max(is_max * pos, reduced_dim=reduced_dim)
     ret = cast(ret, dtype)
     return ret, max_val
@@ -3717,8 +3735,10 @@ def divide(x1, x2, output_shape=None, name=None):
     return multiply(x1, reciprocal(x2), output_shape=output_shape)
 
 
-def slice(x, begin, size, slice_dim_name, name=None):  # pylint: disable=redefined-builtin
+def mtf_slice(x, begin, size, slice_dim_name, name=None):
   """Slice operation.
+
+  Call externally as mtf.slice()
 
   Args:
     x: a list of Tensors
@@ -3754,7 +3774,7 @@ def one_hot(indices, output_dim, on_value=1.0,
 
   TODO(noam): Is there a good reason we need a special mtf.Operation here?
   We could just use some code like this:
-  cast(equal(indices, range(indices.mesh, output_dim, dtype=indices.dtype)),
+  cast(equal(indices, mtf_range(indices.mesh, output_dim, dtype=indices.dtype)),
        dtype)
 
   Args:
@@ -4067,8 +4087,10 @@ def softmax(x, reduced_dim, extra_logit=None, name=None):
     return exp(log_softmax(x, reduced_dim, extra_logit=extra_logit))
 
 
-def range(mesh, dim, dtype, name=None):  # pylint: disable=redefined-builtin
+def mtf_range(mesh, dim, dtype, name=None):
   """Create a 1d mesh tensor with a range from [0, dim.size).
+
+  Call externally as mtf.range()
 
   Args:
     mesh: a Mesh
@@ -4563,9 +4585,10 @@ def halo_exchange(x, blocks_dim, block_size_dim, halo_size, wrap=False):
     parts = ([shift(x, i, blocks_dim, wrap)] + parts +
              [shift(x, -i, blocks_dim, wrap)])
   if partial_size > 0:
-    left_margin = slice(x, 0, partial_size, block_size_dim.name)
-    right_margin = slice(x, block_size_dim.size - partial_size, partial_size,
-                         block_size_dim.name)
+    left_margin = mtf_slice(x, 0, partial_size, block_size_dim.name)
+    right_margin = mtf_slice(
+        x, block_size_dim.size - partial_size, partial_size,
+        block_size_dim.name)
     parts = (
         [shift(right_margin, num_complete_blocks + 1, blocks_dim, wrap)]
         + parts +
@@ -4600,8 +4623,9 @@ def left_halo_exchange(x, blocks_dim, block_size_dim, halo_size, wrap=False):
   for i in xrange(1, num_complete_blocks + 1):
     parts = ([shift(x, i, blocks_dim, wrap)] + parts)
   if partial_size > 0:
-    right_margin = slice(x, block_size_dim.size - partial_size, partial_size,
-                         block_size_dim.name)
+    right_margin = mtf_slice(
+        x, block_size_dim.size - partial_size, partial_size,
+        block_size_dim.name)
     parts = ([shift(right_margin, num_complete_blocks + 1, blocks_dim, wrap)]
              + parts)
   return concat(parts, block_size_dim.name)
