@@ -2220,7 +2220,7 @@ def _einsum_helper(input_shapes, output_shape, mesh_impl):
   reduce_slice_fn, reduced_mesh_axes = _reduce_helper(
       full_shape, output_shape, mesh_impl.tensor_layout(full_shape))
   def einsum_slice_fn_naive(*slices):
-    # naive einsum implementation where we broadcst all inputs to the full
+    # naive einsum implementation where we broadcast all inputs to the full
     # shape, multiply componentwise, then reduce.
     return reduce_slice_fn(functools.reduce(tf.multiply, [
         _expand_dims(x, input_shape, full_shape)
@@ -4512,7 +4512,7 @@ def _shape_union(shapes):
   Returns:
     a Shape
   """
-  return Shape(list(set(sum([s.dims for s in shapes], []))))
+  return Shape(sorted(list(set(sum([s.dims for s in shapes], [])))))
 
 
 def _tf_flatten_batch_dims(x, num_nonbatch_dims):
