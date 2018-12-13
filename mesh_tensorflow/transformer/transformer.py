@@ -274,6 +274,9 @@ class LayerStack(TransformerLayer):
         norm_x = self._layer_norm(context, x)
         with tf.variable_scope(layer.__class__.__name__):
           y = layer.call(context, norm_x)
+          if y.shape != x.shape:
+            raise ValueError("Layer %s returned misshaped output x=%s y=%s"
+                             % (layer.__class__.__name__, x, y))
         x += self._dropout(context, y)
       if context.layer_outputs is not None:
         context.layer_outputs.append(x)

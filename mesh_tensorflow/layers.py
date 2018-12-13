@@ -682,6 +682,8 @@ def multihead_attention_params(mesh, heads, io_channels, kv_channels,
   qkvo = mtf.Dimension("qkvo", 4)
   qk_stddev = (io_channels.size ** -0.5) * (kv_channels.size ** -0.25)
   v_stddev = io_channels.size ** -0.5
+  # TODO(noam): should be: o_stddev = (kv_channels.size * heads.size) ** -0.5
+  #   verify that this still works and change it.
   o_stddev = (io_channels.size * heads.size) ** -0.5
   if combine:
     def qkvo_initializer(shape,
@@ -703,60 +705,6 @@ def multihead_attention_params(mesh, heads, io_channels, kv_channels,
         dtype=variable_dtype) for name, stddev in zip(
             ["q", "k", "v", "o"],
             [qk_stddev, qk_stddev, v_stddev, o_stddev])]
-
-
-def dot_product_attention_v2(q,
-                             k,
-                             v,
-                             memory_length_dim,
-                             k_dim,
-                             v_dim,
-                             mask=None,
-                             dropout=0.0,
-                             dropout_broadcast_dims=None,
-                             extra_logit=None):
-  """Dot-product attention - doesn't use positional dimensions.
-
-  k_dim is a Dimension representing the channels in the queries and keys
-  v_dim is a Dimension representing the channels in values
-  memory_length_dim is a Dimension representing the different key/value pairs.
-
-  Dimensions of q: other_query_dims + {k_dim}
-  Dimensions of k: other_memory_dims + {memory_length_dim, k_dim}
-  Dimensions of v: other_memory_dims + {memory_length_dim, v_dim}
-  other_memory_dims is a subset of other_query_dims
-
-  Typically, other_query_dims={batch, heads, length}
-  Typically, other_memory_dims={batch, heads}
-
-  Args:
-    q: a Tensor
-    k: a Tensor
-    v: a Tensor
-    memory_length_dim: a Dimension
-    k_dim: a Dimension
-    v_dim: a Dimension
-    mask: mask Tensor (see attention_mask())
-    dropout: a float.
-    dropout_broadcast_dims: an optional list of mtf.Dimension
-    extra_logit: an optional scalar or tensor
-
-  Returns:
-    Tensor with shape q.shape - k_dim + v_dim
-  """
-  logits_shape = q.shape - k_dim + memory_length_dim
-  logits = mtf.einsum([q, k], logits_shape, reduced_dims=[k_dim])
-  if mask is not None:
-    logits += mask
-  weights = mtf.softmax(logits, memory_length_dim, extra_logit=extra_logit)
-  if dropout != 0.0:
-    weights = mtf.dropout(
-        weights, 1.0 - dropout,
-        noise_shape=weights.shape - dropout_broadcast_dims)
-  outputs_shape = q.shape - k_dim + v_dim
-  outputs = mtf.einsum(
-      [weights, v], outputs_shape, reduced_dims=[memory_length_dim])
-  return outputs
 
 
 def dot_product_attention(q,
