@@ -219,7 +219,7 @@ class SelfAttention(transformer.TransformerLayer):
               mtf.layers.rename_length_to_memory_length(
                   context.sequence_id)),
           context.activation_dtype) * -1e9)
-      return mtf.add_n(masks) if masks else None
+    return mtf.add_n(masks) if masks else None
 
   @property
   def kv_dim(self):
@@ -345,7 +345,7 @@ class LocalSelfAttention(SelfAttention):
           q,
           mtf.layers.rename_length_to_memory_length(k),
           mtf.layers.rename_length_to_memory_length(v),
-          self.window_dim,
+          self.memory_length(context),
           self.kv_dim,
           self.kv_dim,
           self.compute_mask(context),

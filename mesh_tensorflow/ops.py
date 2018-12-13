@@ -112,6 +112,11 @@ class Shape(object):
     if isinstance(other, Shape):
       other = other.dims
     if isinstance(other, Dimension):
+      if other not in self.dims:
+        raise ValueError(
+            "Subtracting a dimension from a shape requires that the shape"
+            " contain that dimension.  Use shape - [dimension] for the case"
+            " where the dimension may not be in the shape.")
       other = [other]
     return Shape([d for d in self.dims if d not in other])
 
