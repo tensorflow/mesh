@@ -19,6 +19,8 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import os
+
 from mesh_tensorflow import ops_with_redefined_builtins as mtf
 from mesh_tensorflow import tpu_variables
 from mesh_tensorflow import utils
@@ -40,6 +42,7 @@ class SimdMeshImpl(mtf.MeshImpl):
     tf.logging.info("SimdMeshImpl init: {0} {1}".format(shape, layout))
     self._pnum_tensor = None
     self.graph_device_function_stacks = []
+    self.copy_master_to_slice_ops = []
 
   @property
   def pnum_tensor(self):
@@ -139,16 +142,28 @@ class SimdMeshImpl(mtf.MeshImpl):
       self._laid_out_tensor = mesh_impl.LaidOutTensor(
           [tpu_variables.ReplicatedVariable(base_name, slices)])
       with tf.device(variable.master_device), utils.outside_all_rewrites():
-        self._copy_master_to_slices = self._generate_copy_master_to_slices_op(
-            variable.get_master(), shape, slices, slice_shape)
+        if os.environ.get("MTF_SEQUENCE_MODE", "") == "1":
+          if mesh_impl.copy_master_to_slice_ops:
+            with tf.control_dependencies(
+                [mesh_impl.copy_master_to_slice_ops[-1]]):
+              self._copy_master_to_slices = self._gen_copy_master_to_slices_op(
+                  variable.get_master(), shape, slices, slice_shape)
+          else:
+            self._copy_master_to_slices = self._gen_copy_master_to_slices_op(
+                variable.get_master(), shape, slices, slice_shape)
+
+          mesh_impl.copy_master_to_slice_ops.append(self._copy_master_to_slices)
+        else:
+          self._copy_master_to_slices = self._gen_copy_master_to_slices_op(
+              variable.get_master(), shape, slices, slice_shape)
         slices_with_master_dtype = [
             tf.cast(s, variable.master_dtype) for s in slices]
         self._copy_slices_to_master = variable.assign_to_master(
             mesh_impl.combine_slices(slices_with_master_dtype, shape,
                                      device=variable.master_device))
 
-    def _generate_copy_master_to_slices_op(self, master_variable, master_shape,
-                                           slices, slice_shape):
+    def _gen_copy_master_to_slices_op(self, master_variable, master_shape,
+                                      slices, slice_shape):
       """Generate ops which slices master and assign to slices.
 
       Args:

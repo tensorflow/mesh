@@ -21,6 +21,7 @@ from __future__ import print_function
 import collections
 import functools
 import operator
+import os
 import re
 
 from mesh_tensorflow import utils
@@ -648,8 +649,14 @@ class Lowering(object):
     return self.operations[op]
 
   def copy_masters_to_slices(self):
-    return tf.group(
-        [v.copy_master_to_slices for v in six.itervalues(self.variables)])
+    if os.environ.get("MTF_SEQUENCE_MODE", "") == "1":
+      mesh_impls = [impl for impl in six.itervalues(self.mesh_to_impl)]
+      assert len(mesh_impls) == 1
+      mesh_impl = mesh_impls[0]
+      return mesh_impl.copy_master_to_slice_ops[-1]
+    else:
+      return tf.group(
+          [v.copy_master_to_slices for v in six.itervalues(self.variables)])
 
   def copy_slices_to_masters(self):
     return tf.group(
