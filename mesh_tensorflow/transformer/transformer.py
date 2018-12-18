@@ -465,23 +465,28 @@ class Unitransformer(object):
     return logits, loss
 
   def sample_autoregressive(self,
-                            inputs,
+                            partial_sequences,
                             stop_at_token=1,
                             max_steps=None,
                             temperature=1.0,
                             variable_dtype=mtf.VariableDType(tf.float32),
                             encoder_output=None,
                             encoder_sequence_id=None,
-                            shared_params=None):
+                            shared_params=None,
+                            has_partial_sequences=True):
     """Sample randomly one token at a time.
 
-    The inputs represent partial sequences to be continued.  The first tokens
-    of each sequence are nonzero representing the given partial sequences
-    and the last tokens of each sequence are zeros, representing what needs
-    to be filled in.
+    The partial_sequences represent partial sequences to be continued.  The
+    first tokens of each sequence are nonzero representing the given partial
+    sequences and the last tokens of each sequence are zeros, representing what
+    needs to be filled in.
+
+    If there are no partial sequences (you want to sample from the beginning),
+    then pass partial_sequences=mtf.zeros(mesh, shape, dtype=tf.int32) and
+    has_partial_sequences=False (so we can skip computation).
 
     Args:
-      inputs: a Tensor with shape [<batch_dims>, length_dim]
+      partial_sequences: an int32 Tensor with shape [<batch_dims>, length_dim]
       stop_at_token: an optional integer eos id.  Stop when we produce it.
       max_steps: an optional integer
       temperature: an optional floating point value between 0 and 1
@@ -489,6 +494,7 @@ class Unitransformer(object):
       encoder_output: an optional Tensor
       encoder_sequence_id: an optional Tensor
       shared_params: an optional dictionary
+      has_partial_sequences: a boolean
 
     Returns:
       a Tensor with shape [<batch_dims>, length_dim]
@@ -497,6 +503,7 @@ class Unitransformer(object):
     if not self.autoregressive:
       raise ValueError("must be autoregressive")
 
+    inputs = partial_sequences
     batch_dims = inputs.shape.dims[:-1]
     length_dim = inputs.shape.dims[-1]
     initial_position = mtf.reduce_sum(
@@ -523,8 +530,12 @@ class Unitransformer(object):
     with tf.variable_scope(self.name):
       logits = self._call_internal(context_first_part, shifted_inputs)
     del logits
-    initial_states = context_first_part.new_states
     constant_states = context_first_part.constant_states
+    if not has_partial_sequences:
+      initial_states = [
+          mtf.zeros_like(t) for t in context_first_part.new_states]
+    else:
+      initial_states = context_first_part.new_states
 
     def cond_fn(position, ids, *unused_states):
       """Should we run another loop iteration."""
@@ -626,7 +637,9 @@ class Unitransformer(object):
     with tf.variable_scope(self.name):
       logits = self._call_internal(context_first_part, shifted_inputs)
     del logits
-    initial_states = context_first_part.new_states
+    # There are no partial targets.
+    # Replace initial states by zeros to avoid computing them.
+    initial_states = [mtf.zeros_like(t) for t in context_first_part.new_states]
     constant_states = context_first_part.constant_states
 
     def logits_fn(step_num, ids, states):
@@ -650,7 +663,7 @@ class Unitransformer(object):
       inputs_this_step = mtf.gather(ids, step_num - 1, length_dim)
       with tf.variable_scope(self.name, reuse=True):
         logits = self._call_internal(context_incremental, inputs_this_step)
-      return logits, context_incremental.new_states
+      return mtf.to_float(logits), context_incremental.new_states
 
     beams, unused_scores = mtf.beam_search.beam_search(
         logits_fn,
@@ -659,7 +672,7 @@ class Unitransformer(object):
         states=initial_states,
         decode_length=decode_length,
         use_tpu=True,
-        dtype=variable_dtype.activation_dtype)
+        dtype=tf.float32)
     return mtf.gather(
         beams, mtf.constant(inputs.mesh, 0, dtype=tf.int32), beam_dim)
 
@@ -826,14 +839,15 @@ class Bitransformer(object):
         encoder_sequence_id)
     if beam_size == 1:
       ids_shape = inputs.shape
-      partial_targets = mtf.constant(inputs.mesh, 0, ids_shape, dtype=tf.int32)
+      partial_sequences = mtf.zeros(inputs.mesh, ids_shape, dtype=tf.int32)
       return self.decoder.sample_autoregressive(
-          partial_targets,
+          partial_sequences,
           temperature=temperature,
           variable_dtype=variable_dtype,
           encoder_output=encoder_output,
           encoder_sequence_id=encoder_sequence_id,
-          shared_params=shared_params)
+          shared_params=shared_params,
+          has_partial_sequences=False)
     else:
       if temperature != 0:
         raise ValueError(
@@ -843,7 +857,7 @@ class Bitransformer(object):
       batch_dims = inputs.shape[:-1]
       length_dim = inputs.shape[-1]
       ids_shape = mtf.Shape(batch_dims + [beam_dim, length_dim])
-      partial_targets = mtf.constant(inputs.mesh, 0, ids_shape, dtype=tf.int32)
+      partial_sequences = mtf.zeros(inputs.mesh, ids_shape, dtype=tf.int32)
       input_length = mtf.reduce_sum(
           mtf.to_float(mtf.cast(inputs, tf.bool)),
           reduced_dim=length_dim)
@@ -852,7 +866,7 @@ class Bitransformer(object):
           max_input_length * decode_length_multiplier
           + decode_length_constant, tf.int32)
       return self.decoder.beam_search(
-          partial_targets,
+          partial_sequences,
           decode_length,
           variable_dtype=variable_dtype,
           encoder_output=encoder_output,
