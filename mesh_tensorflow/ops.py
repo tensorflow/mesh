@@ -238,7 +238,11 @@ class LayoutRules(object):
     Args:
       pairs: Set-like of string pairs (tensor_dim_name, mesh_dim_name).
     """
+    for (x, y) in pairs:
+        assert type(x) == str
+        assert type(y) == str
     self._pairs = set(pairs)
+    self._mesh_dims = set([y for (x, y) in pairs])
 
   def __repr__(self):
     return "LayoutRules%s" % self._pairs
