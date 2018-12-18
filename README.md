@@ -94,6 +94,8 @@ https://github.com/tensorflow/mesh/blob/master/examples/mnist.py).
 TODO(noam): verify that this code works.
 
 ```Python
+import mesh_tensorflow as mtf
+
 # tf_images is a tf.Tensor with shape [100, 28, 28] and dtype tf.float32
 # tf_labels is a tf.Tensor with shape [100] and dtype tf.int32
 graph = mtf.Graph()
@@ -164,7 +166,7 @@ einsum (generalized matrix multiplication) is computed as follows:
 * On each processor, compute the einsum of the slices of the two operands that
   are local to that processor.
 * If no reduced-out dimensions are split, then we are done.
-* If reduced-out dimensions are split, then perform an "allreduce" operation 
+* If reduced-out dimensions are split, then perform an "allreduce" operation
   on the resulting slices - summing across any mesh dimensions over which the
   reduced-out dimensions are split.
 
@@ -246,7 +248,7 @@ of its mesh if there is a matching rule.
 
 ### Example Layouts
 
-Take our example `Tensor` `image_batch` with shape: 
+Take our example `Tensor` `image_batch` with shape:
 `[("batch", 100), ("rows", 28"), ("cols", 28), ("channels", 3)]`
 
 Assume that this `Tensor` is assigned to a mesh of 8 processors with shape:
@@ -261,7 +263,7 @@ Assume that this `Tensor` is assigned to a mesh of 8 processors with shape:
   `[25, 28, 28, 3]`.  For example, processors (0, 3) and (1, 3) contain
   identical slices - `image_batch[75:100, :, :, :]`.
 
-* If we use the layout rules `"rows:processor_rows;cols:processor_cols"`, 
+* If we use the layout rules `"rows:processor_rows;cols:processor_cols"`,
   then the image is split in two dimensions, with each processor containing one
   spatial tile with shape `[100, 14, 7, 3]`.   For example, processor (0, 1)
   contains the slice `image_batch[:, 0:14, 7:14, :]`.
