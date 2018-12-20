@@ -89,7 +89,8 @@ class AttentionParams(object):
                query_heads_dims,
                memory_heads_dims,
                variable_dtype,
-               shared_kv=False):
+               shared_kv=False,
+               combine_dims=True):
     """Create attention parameters.
 
     Args:
@@ -103,6 +104,7 @@ class AttentionParams(object):
       memory_heads_dims: a list of Dimension
       variable_dtype: a mtf.VariableDType
       shared_kv: a boolean
+      combine_dims: a boolean
     """
     if shared_kv and key_dim != value_dim:
       raise ValueError("shared_kv requires key_dim == value_dim")
@@ -114,10 +116,17 @@ class AttentionParams(object):
     self.query_heads_dims = query_heads_dims or []
     self.memory_heads_dims = memory_heads_dims or []
     self.shared_kv = shared_kv
-    q_shape = self.query_heads_dims + [query_input_dim, key_dim]
-    k_shape = self.memory_heads_dims + [memory_input_dim, key_dim]
-    v_shape = self.memory_heads_dims +  [memory_input_dim, value_dim]
-    o_shape = self.query_heads_dims + [value_dim, output_dim]
+    self.combine_dims = combine_dims
+    if combine_dims:
+      q_shape = [query_input_dim, _combined_dim(self.q_dims)]
+      k_shape = [memory_input_dim, _combined_dim(self.k_dims)]
+      v_shape = [memory_input_dim, _combined_dim(self.v_dims)]
+      o_shape = [_combined_dim(self.o_dims), output_dim]
+    else:
+      q_shape = [query_input_dim] + self.q_dims
+      k_shape = [memory_input_dim] + self.k_dims
+      v_shape = [memory_input_dim] + self.v_dims
+      o_shape = self.o_dims + [output_dim]
     q_init = tf.random_normal_initializer(
         stddev=(query_input_dim.size * key_dim.size) ** -0.5)
     kv_init = tf.random_normal_initializer(
@@ -147,8 +156,11 @@ class AttentionParams(object):
       a Tensor with dimensions
          query_heads_dims + {key_dim} + other_dims
     """
-    return mtf.einsum(
+    ret = mtf.einsum(
         [query_antecedent, self.wq], reduced_dims=[self.query_input_dim])
+    if self.combine_dims:
+      ret = mtf.replace_dimensions(ret, ret.shape.dims[-1], self.q_dims)
+    return ret
 
   def compute_kv(self, memory_antecedent):
     """Compute key/value Tensor kv.
@@ -162,8 +174,11 @@ class AttentionParams(object):
     """
     if not self.shared_kv:
       raise ValueError("compute_kv can only be called with shared_kv")
-    return mtf.einsum(
+    ret = mtf.einsum(
         [memory_antecedent, self.wkv], reduced_dims=[self.memory_input_dim])
+    if self.combine_dims:
+      ret = mtf.replace_dimensions(ret, ret.shape.dims[-1], self.k_dims)
+    return ret
 
   def compute_k(self, memory_antecedent):
     """Compute key Tensor k.
@@ -177,8 +192,11 @@ class AttentionParams(object):
     """
     if self.shared_kv:
       raise ValueError("compute_k cannot be called with shared_kv")
-    return mtf.einsum(
+    ret = mtf.einsum(
         [memory_antecedent, self.wk], reduced_dims=[self.memory_input_dim])
+    if self.combine_dims:
+      ret = mtf.replace_dimensions(ret, ret.shape.dims[-1], self.k_dims)
+    return ret
 
   def compute_v(self, memory_antecedent):
     """Compute value Tensor v.
@@ -192,8 +210,11 @@ class AttentionParams(object):
     """
     if self.shared_kv:
       raise ValueError("compute_v cannot be called with shared_kv")
-    return mtf.einsum(
+    ret = mtf.einsum(
         [memory_antecedent, self.wv], reduced_dims=[self.memory_input_dim])
+    if self.combine_dims:
+      ret = mtf.replace_dimensions(ret, ret.shape.dims[-1], self.v_dims)
+    return ret
 
   def compute_output(self, o, output_shape=None):
     """Compute output of multihead attention.
@@ -206,9 +227,34 @@ class AttentionParams(object):
       a Tensor with shape:
          {output_dim} + other_dims
     """
+    if self.combine_dims:
+      o = mtf.transpose(o, o.shape - self.o_dims + self.o_dims)
+      o = mtf.replace_dimensions(o, self.o_dims, self.wo.shape.dims[0])
+      reduced_dims = [self.wo.shape.dims[0]]
+    else:
+      reduced_dims = self.o_dims
     return mtf.einsum(
-        [o, self.wo], output_shape=output_shape,
-        reduced_dims=self.query_heads_dims + [self.value_dim])
+        [o, self.wo], output_shape=output_shape, reduced_dims=reduced_dims)
+
+  @property
+  def q_dims(self):
+    return self.query_heads_dims + [self.key_dim]
+
+  @property
+  def k_dims(self):
+    return self.memory_heads_dims + [self.key_dim]
+
+  @property
+  def v_dims(self):
+    return self.memory_heads_dims + [self.value_dim]
+
+  @property
+  def o_dims(self):
+    return self.query_heads_dims + [self.value_dim]
+
+
+def _combined_dim(dims):
+  return mtf.Dimension(dims[0].name, mtf.Shape(dims).size)
 
 
 def attention_params_simple(
@@ -325,4 +371,3 @@ def local_attention_1d(q,
   o = attention(q, k, v, padded_memory_block_length,
                 key_dim, value_dim, mask, **attention_kwargs)
   return mtf.replace_dimensions(o, [num_blocks, query_block_length], length_dim)
-

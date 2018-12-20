@@ -327,7 +327,9 @@ class Unitransformer(object):
                shared_embedding_and_softmax_weights=False,
                label_smoothing=0.0,
                z_loss=1e-4,
-               name="transformer"):
+               name="transformer",
+               layout=None,
+               mesh_shape=None):
     self.layer_stack = layer_stack
     self.model_dim = mtf.Dimension("d_model", d_model)
     self.input_vocab_dim = mtf.Dimension("vocab", input_vocab_size)
@@ -344,6 +346,8 @@ class Unitransformer(object):
     self.label_smoothing = label_smoothing
     self.z_loss = z_loss
     self.name = name
+    self.layout = layout
+    self.mesh_shape = mesh_shape
 
   def _call_internal(self, context, inputs, targets=None):
     """Compute logits based on inputs (all positions in parallel).
@@ -672,7 +676,9 @@ class Unitransformer(object):
         states=initial_states,
         decode_length=decode_length,
         use_tpu=True,
-        dtype=tf.float32)
+        dtype=tf.float32,
+        mesh_shape=self.mesh_shape,
+        layout=self.layout)
     return mtf.gather(
         beams, mtf.constant(inputs.mesh, 0, dtype=tf.int32), beam_dim)
 
@@ -692,7 +698,9 @@ class Bitransformer(object):
                label_smoothing=0.0,
                z_loss=1e-4,
                encoder_name="encoder",
-               decoder_name="decoder"):
+               decoder_name="decoder",
+               layout=None,
+               mesh_shape=None):
     self.encoder = Unitransformer(
         encoder_layer_stack,
         encoder_d_model,
@@ -700,7 +708,9 @@ class Bitransformer(object):
         output_vocab_size=None,
         autoregressive=False,
         max_length=max_length,
-        name=encoder_name)
+        name=encoder_name,
+        layout=layout,
+        mesh_shape=mesh_shape)
     self.decoder = Unitransformer(
         decoder_layer_stack,
         decoder_d_model,
@@ -710,7 +720,9 @@ class Bitransformer(object):
         max_length=max_length,
         label_smoothing=label_smoothing,
         z_loss=z_loss,
-        name=decoder_name)
+        name=decoder_name,
+        layout=layout,
+        mesh_shape=mesh_shape)
     self.shared_embedding = shared_embedding
 
   def _shared_params(self, mesh, variable_dtype):

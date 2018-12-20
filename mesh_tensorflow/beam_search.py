@@ -91,7 +91,10 @@ def beam_search(logits_fn,
                 stop_early=True,
                 decode_length=None,
                 use_tpu=True,
-                dtype=tf.float32):
+                dtype=tf.float32,
+                layout=None,
+                mesh_shape=None,
+                num_prefilter=2):
   """Beam search with length penalties.
 
   Requires a function that can take the currently decoded symbols and return
@@ -114,9 +117,13 @@ def beam_search(logits_fn,
   capturing observed from these operations, tensors, clients can make
   assumptions about which step is being recorded.
 
-  WARNING: Assumes 2nd dimension of tensors in `states` and not invariant, this
-  means that the shape of the 2nd dimension of these tensors will not be
-  available (i.e. set to None) inside logits_fn.
+  num_prefilter is a theoretically lossy shortcut around slow performance of
+  top_k on TPU on large Tensors and large k.  This option should be removed once
+  better top_k implementations on TPU are avialable.  If num_prefilter is set to
+  a nonzero value, then at each step we first compute the top num_prefilter
+  sequences per beam and then compute the top k sequences overall from among
+  those.  Empirically, there seems to be no quality difference in setting
+  num_prefilter to 2.
 
   Args:
     logits_fn: Interface to the model, to provide logits.
@@ -133,12 +140,17 @@ def beam_search(logits_fn,
     decode_length: a mtf Scalar of dtype tf.int32 - maximum length of decodes
     use_tpu: a boolean
     dtype: a tf.dtype
+    layout: an optional string
+    mesh_shape: an optional string
+    num_prefilter: an optional integer
   Returns:
     Tuple of
     (decoded beams [batch, beam, length]
      decoding probabilities [batch, beam_size])
   """
   batch_dim, beam_dim, length_dim = initial_ids.shape.dims
+  batch_and_beam_dim = mtf.Dimension(
+      batch_dim.name, batch_dim.size * beam_dim.size)
   mesh = initial_ids.mesh
 
   batch_by_beam = mtf.Shape([batch_dim, beam_dim])
@@ -272,25 +284,68 @@ def beam_search(logits_fn,
 
     length_penalty = mtf.pow(((5. + mtf.cast(i + 1, logits.dtype)) / 6.), alpha)
 
+    # scores have shape [batch, beam, vocab]
     curr_scores = log_probs / length_penalty
 
-    # scores have shape [batch, beam, vocab]
-    beam_and_vocab_dim = mtf.Dimension(
-        "beam_and_vocab", beam_dim.size * vocab_dim.size)
-    flat_shape = mtf.Shape([batch_dim, beam_and_vocab_dim])
+    # We find the top 2k sequences to make sure we get k alive sequences.
+    #
+    # TODO(noam): This is inefficient.  We should separately compute the k
+    # finished sequences (previously alive sequences + EOS), and the top k new
+    # alive sequences.
     double_beam = mtf.Dimension("double_beam", beam_dim.size * 2)
-    # Flatten out (beam_size, vocab_size) probs in to a list of possibilities
-    flat_curr_scores = mtf.reshape(curr_scores, flat_shape)
 
-    top_ids, top_scores = mtf.top_k(
-        flat_curr_scores, reduced_dim=beam_and_vocab_dim, new_dim=double_beam)
+    if use_tpu and layout is not None and mesh_shape is not None:
+      # Do some partial top-k-ing first locally to avoid communication.
+      # We reshape the logits from:
+      #   [batch, beam, vocab] to
+      #   [batch, beam, major_vocab, minor_vocab]
+      # We first reduce (locally) across the minor_vocab dimension.  This makes
+      # the thing we need to broadcast smaller.
+      # This also enables our shortcut of only picking the top num_prefilter
+      #   sequences per beam per major_vocab in the first pass.
+      major_vocab_size = mtf.tensor_dim_to_mesh_dim_size(
+          layout, mesh_shape, vocab_dim)
+      major_vocab = mtf.Dimension(vocab_dim.name, major_vocab_size)
+      minor_vocab = mtf.Dimension(
+          "minor_vocab", vocab_dim.size // major_vocab_size)
+      curr_scores = mtf.reshape(
+          curr_scores, [batch_dim, beam_dim, major_vocab, minor_vocab])
+      prefilter = mtf.Dimension("prefilter", num_prefilter or double_beam.size)
+      # shape = [batch_dim, beam_dim, major_vocab, prefilter]
+      top_minor_vocab_ids, top_scores = mtf.top_k(
+          curr_scores, reduced_dim=minor_vocab, new_dim=prefilter)
+      combined = mtf.Dimension(
+          "combined", beam_dim.size * major_vocab.size * prefilter.size)
+      top_scores = mtf.reshape(top_scores, [batch_dim, combined])
+      top_minor_vocab_ids = mtf.reshape(
+          top_minor_vocab_ids, [batch_dim, combined])
+      # shpae = [batch_dim, double_beam]
+      # ids are indices representing (beam, major_vocab, prefilter)
+      top_combined_ids, top_scores = mtf.top_k(
+          top_scores, reduced_dim=combined, new_dim=double_beam)
+      top_minor_vocab_ids = mtf.gather(
+          top_minor_vocab_ids, top_combined_ids, combined,
+          output_shape=[batch_dim, double_beam])
+      top_beam_index = top_combined_ids // (major_vocab.size * prefilter.size)
+      top_combined_ids -= top_beam_index * (major_vocab.size * prefilter.size)
+      top_major_vocab_ids = top_combined_ids // prefilter.size
+      top_combined_ids -= top_major_vocab_ids * prefilter.size
+      top_ids = top_major_vocab_ids * minor_vocab.size + top_minor_vocab_ids
+    else:
+      beam_and_vocab_dim = mtf.Dimension(
+          "beam_and_vocab", beam_dim.size * vocab_dim.size)
+      flat_shape = mtf.Shape([batch_dim, beam_and_vocab_dim])
+      # Flatten out (beam_size, vocab_size) probs into a list of possibilities
+      flat_curr_scores = mtf.reshape(
+          curr_scores, flat_shape, name="flatten_scores")
+      top_ids, top_scores = mtf.top_k(
+          flat_curr_scores, reduced_dim=beam_and_vocab_dim, new_dim=double_beam)
+      # Work out what beam the top probs are in.
+      top_beam_index = top_ids // vocab_dim.size
+      top_ids %= vocab_dim.size  # Unflatten the ids
 
     # Recovering the log probs because we will need to send them back
     top_log_probs = top_scores * length_penalty
-
-    # Work out what beam the top probs are in.
-    top_beam_index = top_ids // vocab_dim.size
-    top_ids %= vocab_dim.size  # Unflatten the ids
 
     selector = mtf.one_hot(top_beam_index, beam_dim, dtype=tf.float32)
 
@@ -356,7 +411,8 @@ def beam_search(logits_fn,
          Flags indicating which sequence in finished as reached EOS,
          dict of final decoding states)
     """
-
+    states = [mtf.replace_dimensions(
+        state, batch_and_beam_dim, [batch_dim, beam_dim]) for state in states]
     # Each inner loop, we carry out three steps:
     # 1. Get the current topk items.
     # 2. Extract the ones that have finished and haven't finished
@@ -364,24 +420,74 @@ def beam_search(logits_fn,
     (top2k_seq, top2k_log_probs, top2k_scores, top2k_finished,
      new_states, first_selector) = grow_topk(
          i, alive_seq, alive_log_probs, states)
-    alive_seq, alive_log_probs, _, second_selector = grow_alive(
-        top2k_seq, top2k_scores, top2k_log_probs, top2k_finished)
-    finished_seq, finished_scores, finished_flags, _ = grow_finished(
-        finished_seq, finished_scores, finished_flags, top2k_seq, top2k_scores,
-        top2k_finished)
+    with tf.variable_scope("grow_alive"):
+      alive_seq, alive_log_probs, _, second_selector = grow_alive(
+          top2k_seq, top2k_scores, top2k_log_probs, top2k_finished)
+    with tf.variable_scope("grow_finished"):
+      finished_seq, finished_scores, finished_flags, _ = grow_finished(
+          finished_seq, finished_scores, finished_flags, top2k_seq,
+          top2k_scores, top2k_finished)
     old_beam_dim = mtf.Dimension("old_beam", beam_dim.size)
     selector = mtf.einsum(
         [mtf.rename_dimension(first_selector, beam_dim.name, old_beam_dim.name),
          second_selector],
         output_shape=[batch_dim, old_beam_dim, beam_dim])
-    new_states = [
-        mtf.einsum(
+    gathered_states = []
+    if use_tpu and layout is not None and mesh_shape is not None:
+      # This hack combines the beam dimension with some of the batch dimension.
+      # It makes gathering faster on TPU.
+      #
+      # Instead of multiplying by a [beam, beam] selector matrix, we instead
+      # multiply by a [minor_batch*beam, minor_batch*beam] selector matrix.
+      # This is theoretically more FLOPs, but it brings the matrix size closer
+      # to the magic optimal value of 128.
+      #
+      # TODO(noam): file a bug with the XLA team to do this automatically
+      major_batch_size = mtf.tensor_dim_to_mesh_dim_size(
+          layout, mesh_shape, batch_dim)
+      major_batch = mtf.Dimension(batch_dim.name, major_batch_size)
+      minor_batch = mtf.Dimension(
+          "minor_batch", batch_dim.size // major_batch.size)
+      old_minor_batch = mtf.Dimension("old_minor_batch", minor_batch.size)
+      old_combined = mtf.Dimension(
+          "old_combined", minor_batch.size * beam_dim.size)
+      combined = mtf.Dimension(
+          "new_combined", old_combined.size)
+      same_minor_batch = mtf.to_float(
+          mtf.equal(mtf.range(mesh, old_minor_batch, tf.float32),
+                    mtf.range(mesh, minor_batch, tf.float32)))
+      selector = mtf.reshape(
+          selector, [major_batch, minor_batch, old_beam_dim, beam_dim])
+      selector = mtf.einsum(
+          [selector, same_minor_batch],
+          output_shape=[major_batch,
+                        old_minor_batch, old_beam_dim,
+                        minor_batch, beam_dim],
+          reduced_dims=[])
+      selector = mtf.reshape(selector, [major_batch, old_combined, combined])
+      for state in new_states:
+        s = mtf.replace_dimensions(
+            state, [batch_dim, beam_dim], [major_batch, old_combined])
+        s = mtf.einsum(
+            [s, mtf.cast(selector, state.dtype)],
+            reduced_dims=[old_combined],
+            output_shape=mtf.replace_dimensions(
+                state.shape, [batch_dim, beam_dim],
+                [major_batch, combined]))
+        gathered_states.append(mtf.replace_dimensions(
+            s, [major_batch, combined], batch_and_beam_dim))
+    else:
+      for state in new_states:
+        state = mtf.einsum(
             [mtf.rename_dimension(state, beam_dim.name, old_beam_dim.name),
              mtf.cast(selector, state.dtype)],
             reduced_dims=[old_beam_dim], output_shape=state.shape)
-        for state in new_states]
+        state = mtf.replace_dimensions(
+            state, [batch_dim, beam_dim], batch_and_beam_dim)
+        gathered_states.append(state)
+
     return (i + 1, alive_seq, alive_log_probs, finished_seq, finished_scores,
-            finished_flags) + tuple(new_states)
+            finished_flags) + tuple(gathered_states)
 
   def _is_finished(i, unused_alive_seq, alive_log_probs, unused_finished_seq,
                    finished_scores, finished_in_finished, *unused_states):
@@ -440,6 +546,8 @@ def beam_search(logits_fn,
         mtf.less(i, decode_length), mtf.logical_not(bound_is_met))
 
   initial_step_num = mtf.constant(mesh, 0, dtype=tf.int32)
+  states = [mtf.replace_dimensions(
+      state, [batch_dim, beam_dim], batch_and_beam_dim) for state in states]
   while_loop_inputs = [
       initial_step_num, alive_seq, alive_log_probs, finished_seq,
       finished_scores, finished_flags] + states
