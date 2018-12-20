@@ -1414,8 +1414,8 @@ class SlicewiseOperation(Operation):
   def __init__(self,
                tf_fn,
                inputs,
-               output_shape,
-               output_dtype,
+               output_shapes,
+               output_dtypes,
                splittable_dims,
                grad_function=None,
                name=None):
@@ -1430,8 +1430,8 @@ class SlicewiseOperation(Operation):
     Args:
       tf_fn: a function taking n tf.Tensors and returning a tf.Tensor
       inputs: a list of n Tensors
-      output_shape: a Shape
-      output_dtype: a dtype
+      output_shapes: a list of Shapes
+      output_dtypes: a list of dtypes
       splittable_dims: a list of Dimensions which are ok to split
       grad_function: an optional python function. Default to using tf.gradients
         pass in the number 0 to indicate no gradient
@@ -1439,7 +1439,8 @@ class SlicewiseOperation(Operation):
     """
     super(SlicewiseOperation, self).__init__(inputs, name=name or "slicewise")
     self._tf_fn = tf_fn
-    self._outputs = [Tensor(self, output_shape, output_dtype)]
+    self._outputs = [Tensor(self, shape, dtype) for (shape, dtype)
+                     in zip(output_shapes, output_dtypes)]
     self._splittable_dims = splittable_dims
     self._grad_function = grad_function
 
@@ -1451,7 +1452,7 @@ class SlicewiseOperation(Operation):
 
   def gradient(self, grad_ys):
     if self._grad_function is not None:
-      return self._grad_function(self, grad_ys[0])
+      return self._grad_function(self, *grad_ys)
     return GenericGradOperation(self, grad_ys).outputs
 
   def lower(self, lowering):
@@ -1462,10 +1463,12 @@ class SlicewiseOperation(Operation):
       for d, mesh_axis in zip(t.shape.dims, layout.tensor_axis_to_mesh_axis):
         if mesh_axis is not None and d not in self._splittable_dims:
           raise ValueError("dimension %s is not declared as splittable" % d)
-    lowering.set_tensor_lowering(
-        self.outputs[0],
-        mesh_impl.slicewise(
-            self._tf_fn, *[lowering.tensors[x] for x in self.inputs]))
+    values = mesh_impl.slicewise(
+        self._tf_fn, *[lowering.tensors[x] for x in self.inputs])
+    if len(self.outputs) == 1:
+      values = values,
+    for output, value in zip(self.outputs, values):
+      lowering.set_tensor_lowering(output, value)
 
 
 def slicewise(tf_fn,
@@ -1484,23 +1487,28 @@ def slicewise(tf_fn,
   Args:
     tf_fn: a function taking n tf.Tensors and returning a tf.Tensor
     xs: a list of n Tensors
-    output_shape: a Shape
-    output_dtype: a dtype
+    output_shape: a Shape (or list of shapes)
+    output_dtype: a dtype (or list of dtypes)
     splittable_dims: a list of Dimensions which are ok to split
     grad_function: an optional gradients function.  If None, use tf gradient.
     name: an optional string
 
   Returns:
-    a Tensor
+    a Tensor (or a tuple of Tensors)
   """
-  return SlicewiseOperation(
+  multiple_outputs = isinstance(output_dtype, list)
+  output_shapes = output_shape if multiple_outputs else [output_shape]
+  output_dtypes = output_dtype if multiple_outputs else [output_dtype]
+
+  op = SlicewiseOperation(
       tf_fn,
       xs,
-      convert_to_shape(output_shape) or xs[0].shape,
-      output_dtype or xs[0].dtype,
+      [convert_to_shape(shape) or xs[0].shape for shape in output_shapes],
+      [dtype or xs[0].dtype for dtype in output_dtypes],
       splittable_dims,
       grad_function,
-      name=name).outputs[0]
+      name=name)
+  return tuple(op.outputs) if multiple_outputs else op.outputs[0]
 
 
 def cwise(tf_fn, xs, output_dtype=None, grad_function=None, name=None):
@@ -1903,6 +1911,9 @@ class BroadcastOperation(Operation):
 
 
 def broadcast(x, new_shape):
+  new_shape = convert_to_shape(new_shape)
+  if x.shape == new_shape:
+    return x
   return BroadcastOperation(x, new_shape).outputs[0]
 
 
@@ -3337,12 +3348,16 @@ class ReshapeOperation(Operation):
     return [reshape(grad_ys[0], self.inputs[0].shape)]
 
 
-def reshape(x, new_shape):
-  return ReshapeOperation(x, convert_to_shape(new_shape)).outputs[0]
+def reshape(x, new_shape, name="reshape"):
+  return ReshapeOperation(x, convert_to_shape(new_shape), name=name).outputs[0]
 
 
-def transpose(x, new_shape):
-  return einsum([x], output_shape=convert_to_shape(new_shape))
+def transpose(x, new_shape, name="transpose"):
+  new_shape = convert_to_shape(new_shape)
+  if set(x.shape.dims) != set(new_shape.dims):
+    raise ValueError("x must have the same dimensions as new_shape %s vs %s"
+                     % (x, new_shape))
+  return einsum([x], output_shape=new_shape, name=name)
 
 
 def rename_dimension(x, old_name, new_name):
@@ -3458,6 +3473,10 @@ def einsum(xs, output_shape=None, reduced_dims=None, name=None):
       reduced_dims = [d for d, c in six.iteritems(input_dim_count) if c > 1]
     output_shape = Shape([d for d in input_dims if d not in reduced_dims])
   elif reduced_dims is not None:
+    for d in reduced_dims:
+      if not isinstance(d, Dimension):
+        raise ValueError("reduced_dims must be a list of Dimensions.  Got %s."
+                         % (reduced_dims,))
     computed_reduced_dims = [
         d for d in input_dims if d not in output_shape.dims]
     if set(computed_reduced_dims) != set(reduced_dims):
