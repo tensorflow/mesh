@@ -376,7 +376,16 @@ class Unitransformer(object):
       pos_emb_var = mtf.layers.embedding_weights(
           mesh, self.max_length_dim, self.model_dim, context.variable_dtype,
           "positional_embedding")
-    if context.position_is_default:
+    slice_positional_embedding = context.position_is_default
+    if (context.length_dim.size == self.max_length_dim.size and
+        context.activation_dtype == tf.float32):
+      # This masks a bug.
+      # For some unknown reason the slice on TPU produces incorrect results
+      # in float32, but correct results if you first cast to bfloat16, then
+      # slice, then cast back to float32.
+      # TODO(noam): file a bug and document.
+      slice_positional_embedding = False
+    if slice_positional_embedding:
       pos_emb = mtf.rename_dimension(
           mtf.slice(pos_emb_var, 0, context.length_dim.size,
                     self.max_length_dim.name),
