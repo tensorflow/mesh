@@ -377,7 +377,7 @@ class Unitransformer(object):
           mesh, self.max_length_dim, self.model_dim, context.variable_dtype,
           "positional_embedding")
     slice_positional_embedding = context.position_is_default
-    if (context.length_dim.size == self.max_length_dim.size and
+    if (context.length_dim.size < self.max_length_dim.size and
         context.activation_dtype == tf.float32):
       # This masks a bug.
       # For some unknown reason the slice on TPU produces incorrect results
