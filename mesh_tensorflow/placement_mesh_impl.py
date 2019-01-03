@@ -423,7 +423,8 @@ def allreduce_ring(xs, devices, reduction_fn_string="SUM"):
     n %= len(l)
     return l[-n:] + l[:-n]
   def _flatten_and_split(x):
-    return tf.split(tf.reshape(x, [size]), n)
+    # tf.reshape treats [-1] as a special value denoting 1D flattening.
+    return tf.split(tf.reshape(x, [-1]), n)
   def _concat_and_reshape(xs):
     return tf.reshape(tf.concat(xs, 0), shape)
 
