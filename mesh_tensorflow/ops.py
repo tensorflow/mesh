@@ -1626,6 +1626,10 @@ def to_float(x, name="to_float"):
   return cast(x, tf.float32, name=name)
 
 
+def to_bfloat16(x, name="to_bfloat16"):
+  return cast(x, tf.bfloat16, name=name)
+
+
 def to_int32(x, name="to_int32"):
   return cast(x, tf.int32, name=name)
 
@@ -4800,3 +4804,9 @@ def tensor_dim_to_mesh_dim_size(layout, mesh_shape, tensor_dim):
 def tensor_dim_to_size_per_split(layout, mesh_shape, tensor_dim):
   return tensor_dim.size // tensor_dim_to_mesh_dim_size(
       layout, mesh_shape, tensor_dim)
+
+
+def combined_dimension(dims, name=None):
+  if not dims:
+    raise ValueError("dims must be a list of one or more Dimensions")
+  return Dimension(name or dims[0].name, Shape(dims).size)

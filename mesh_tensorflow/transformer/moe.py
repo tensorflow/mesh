@@ -98,9 +98,7 @@ class MoE2D(transformer.TransformerLayer):
                second_policy_train="random",
                second_policy_eval="random",
                second_threshold_train=0.2,
-               second_threshold_eval=0.2,
-               layout="",
-               mesh_shape=""):
+               second_threshold_eval=0.2):
     self._hparams = tf.contrib.training.HParams(
         moe_gating="top_2",
         moe_num_experts=[expert_x, expert_y],
@@ -114,9 +112,7 @@ class MoE2D(transformer.TransformerLayer):
         moe_second_policy_train=second_policy_train,
         moe_second_policy_eval=second_policy_eval,
         moe_second_threshold_train=second_threshold_train,
-        moe_second_threshold_eval=second_threshold_eval,
-        layout=layout,
-        mesh_shape=mesh_shape)
+        moe_second_threshold_eval=second_threshold_eval)
 
   def call(self, context, x, losses=None):
     """Call the layer."""
@@ -132,7 +128,9 @@ class MoE2D(transformer.TransformerLayer):
         context.model_dim,
         self._hparams,
         context.train,
-        context.variable_dtype)
+        context.variable_dtype,
+        layout=context.layout,
+        mesh_shape=context.mesh_shape)
     if context.losses is not None:
       context.losses.append(loss)
     if not has_length_dim:
@@ -218,9 +216,10 @@ def transformer_moe_layer_v1(
   inputs = mtf.reshape(inputs, [batch_dim, group_size_dim, input_dim])
 
   # Each sequence sends expert_capacity positions to each expert.
-  capacity_factor = (
-      hparams.moe_capacity_factor_train if train else
-      hparams.moe_capacity_factor_eval)
+  if train:
+    capacity_factor = hparams.moe_capacity_factor_train
+  else:
+    capacity_factor = hparams.moe_capacity_factor_eval
   expert_capacity = min(
       group_size_dim.size,
       int((group_size_dim.size * capacity_factor) / experts_dim.size))
@@ -270,7 +269,8 @@ def transformer_moe_layer_v1(
 
 
 def transformer_moe_layer_v2(
-    inputs, output_dim, hparams, train, variable_dtype):
+    inputs, output_dim, hparams, train, variable_dtype,
+    layout=None, mesh_shape=None):
   """2-level mixture of experts.
 
   Adapted from the paper https://arxiv.org/abs/1701.06538
@@ -288,8 +288,6 @@ def transformer_moe_layer_v2(
     hparams.moe_capacity_factor_eval: a float
     hparams.moe_capacity_factor_second_level: a float
     hparams.moe_gating: a string
-    hparams.layout: an input to mtf.convert_to_layout_rules
-    hparams.mesh_shape: an input to mtf.convert_to_shape
     + all hyperparmeters used by _top_2_gating()
 
   One set of params for experts in first level and different of hparams
@@ -366,6 +364,8 @@ def transformer_moe_layer_v2(
     hparams: model hyperparameters
     train: a boolean
     variable_dtype: a mtf.VariableDType
+    layout: optional - an input to mtf.convert_to_layout_rules
+    mesh_shape: optional - an input to mtf.convert_to_shape
 
   Returns:
     outputs: a Tensor with shape [a, b, l, n]
@@ -393,16 +393,17 @@ def transformer_moe_layer_v2(
   # over which those groups are split.
   num_groups, group_size = _split_into_groups(
       b1.size * l.size, hparams.moe_group_size,
-      mtf.tensor_dim_to_mesh_dim_size(hparams.layout, hparams.mesh_shape, b1))
+      mtf.tensor_dim_to_mesh_dim_size(layout, mesh_shape, b1))
   g1 = mtf.Dimension(b1.name, num_groups)
   g = mtf.Dimension(b1.name + "_unsplit", g1.size)
   s = mtf.Dimension("group_size_x", group_size)
 
   # Each sequence sends (at most?) expert_capacity positions to each expert.
   # Static expert_capacity dimension is needed for expert batch sizes
-  capacity_factor = (
-      hparams.moe_capacity_factor_train if train else
-      hparams.moe_capacity_factor_eval)
+  if train:
+    capacity_factor = hparams.moe_capacity_factor_train
+  else:
+    capacity_factor = hparams.moe_capacity_factor_eval
   expert_capacity = min(s.size, int((s.size * capacity_factor) / x.size))
   expert_capacity = max(expert_capacity, 4)
   c = mtf.Dimension("expert_capacity_x", expert_capacity)
@@ -413,7 +414,7 @@ def transformer_moe_layer_v2(
   num_groups, group_size = _split_into_groups(
       a0.size * g.size * c.size,
       hparams.moe_group_size,
-      mtf.tensor_dim_to_mesh_dim_size(hparams.layout, hparams.mesh_shape, a0))
+      mtf.tensor_dim_to_mesh_dim_size(layout, mesh_shape, a0))
   t = mtf.Dimension("group_size_y", group_size)
   h0 = mtf.Dimension(a0.name, num_groups)
   h = mtf.Dimension(a0.name + "_unsplit", h0.size)
@@ -657,12 +658,12 @@ def _top_2_gating(
 
   # Depending on the policy in the hparams, we may drop out some of the
   # second-place experts.
-  policy = (
-      hparams.moe_second_policy_train if train else
-      hparams.moe_second_policy_eval)
-  threshold = (
-      hparams.moe_second_threshold_train if train else
-      hparams.moe_second_threshold_eval)
+  if train:
+    policy = hparams.moe_second_policy_train
+    threshold = hparams.moe_second_threshold_train
+  else:
+    policy = hparams.moe_second_policy_eval
+    threshold = hparams.moe_second_threshold_eval
   if policy == "all":
     # Use second-place experts for all examples.
     pass

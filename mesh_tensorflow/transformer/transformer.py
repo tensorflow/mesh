@@ -130,7 +130,9 @@ class Context(object):
                encoder_output=None,
                encoder_sequence_id=None,
                constant_states=None,
-               shared_params=None):
+               shared_params=None,
+               layout=None,
+               mesh_shape=None):
     """Create a context.
 
     Args:
@@ -167,6 +169,8 @@ class Context(object):
       shared_params: an optional dictionary which can be populated by
         parameters that are shared between Transformers - e.g. between the
         encoder and decoder Unitransformers in a Bitransformer.
+      layout: optional - an input to mtf.convert_to_layout_rules
+      mesh_shape: optional - an input to mtf.convert_to_shape
     """
     self.mesh = mesh
     self.batch_dims = batch_dims
@@ -193,6 +197,8 @@ class Context(object):
     self.constant_states = constant_states
     self.next_constant_state = 0
     self.shared_params = shared_params or {}
+    self.layout = layout
+    self.mesh_shape = mesh_shape
 
   @property
   def train(self):
@@ -468,7 +474,9 @@ class Unitransformer(object):
         sequence_id=sequence_id,
         encoder_output=encoder_output,
         encoder_sequence_id=encoder_sequence_id,
-        shared_params=shared_params)
+        shared_params=shared_params,
+        layout=self.layout,
+        mesh_shape=self.mesh_shape)
     with tf.variable_scope(self.name):
       logits = self._call_internal(context, inputs, targets)
     if compute_loss:
@@ -537,7 +545,9 @@ class Unitransformer(object):
         encoder_output=encoder_output,
         encoder_sequence_id=encoder_sequence_id,
         constant_states=[],
-        shared_params=shared_params)
+        shared_params=shared_params,
+        layout=self.layout,
+        mesh_shape=self.mesh_shape)
 
     shifted_inputs = mtf.shift(inputs, offset=1, dim=length_dim, wrap=False)
     with tf.variable_scope(self.name):
@@ -578,7 +588,9 @@ class Unitransformer(object):
           encoder_output=encoder_output,
           encoder_sequence_id=encoder_sequence_id,
           constant_states=constant_states,
-          shared_params=shared_params)
+          shared_params=shared_params,
+          layout=self.layout,
+          mesh_shape=self.mesh_shape)
       inputs_this_step = mtf.gather(ids, position - 1, length_dim)
       with tf.variable_scope(self.name, reuse=True):
         logits = self._call_internal(context_incremental, inputs_this_step)
@@ -644,7 +656,9 @@ class Unitransformer(object):
         encoder_output=encoder_output,
         encoder_sequence_id=encoder_sequence_id,
         constant_states=[],
-        shared_params=shared_params)
+        shared_params=shared_params,
+        layout=self.layout,
+        mesh_shape=self.mesh_shape)
 
     shifted_inputs = mtf.shift(inputs, offset=1, dim=length_dim, wrap=False)
     with tf.variable_scope(self.name):
@@ -672,7 +686,9 @@ class Unitransformer(object):
           encoder_output=encoder_output,
           encoder_sequence_id=encoder_sequence_id,
           constant_states=constant_states,
-          shared_params=shared_params)
+          shared_params=shared_params,
+          layout=self.layout,
+          mesh_shape=self.mesh_shape)
       inputs_this_step = mtf.gather(ids, step_num - 1, length_dim)
       with tf.variable_scope(self.name, reuse=True):
         logits = self._call_internal(context_incremental, inputs_this_step)
