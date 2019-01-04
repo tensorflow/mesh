@@ -406,7 +406,7 @@ class Unitransformer(object):
       return x
     if self.shared_embedding_and_softmax_weights:
       logits = mtf.einsum(
-          [x * (self.model_dim ** -0.5), embedding_weights],
+          [x * (self.model_dim.size ** -0.5), embedding_weights],
           reduced_dims=[self.model_dim])
     else:
       logits = mtf.layers.dense(
@@ -720,6 +720,7 @@ class Bitransformer(object):
                output_vocab_size,
                max_length,
                shared_embedding=True,
+               shared_embedding_and_softmax_weights=False,
                label_smoothing=0.0,
                z_loss=1e-4,
                encoder_name="encoder",
@@ -744,6 +745,8 @@ class Bitransformer(object):
         autoregressive=True,
         max_length=max_length,
         label_smoothing=label_smoothing,
+        shared_embedding_and_softmax_weights=(
+            shared_embedding_and_softmax_weights),
         z_loss=z_loss,
         name=decoder_name,
         layout=layout,
