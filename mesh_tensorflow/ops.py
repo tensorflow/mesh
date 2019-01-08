@@ -2782,6 +2782,21 @@ class ImportOperation(Operation):
         mesh_impl.import_tf_tensor(self.outputs[0], self._tf_tensor))
 
 
+class ImportLaidOutTensorOperation(Operation):
+  """Import LaidOutTensor."""
+
+  def __init__(self, mesh, laid_out_tensor, shape, name=None):
+    super(ImportLaidOutTensorOperation, self).__init__([],
+                                                       mesh=mesh,
+                                                       name=name or "import")
+    dtype = laid_out_tensor.tensor_list[0].dtype
+    self._outputs = [Tensor(self, shape, dtype)]
+    self._laid_out_tensor = laid_out_tensor
+
+  def lower(self, lowering):
+    lowering.set_tensor_lowering(self.outputs[0], self._laid_out_tensor)
+
+
 def anonymous_shape(shape):
   shape = convert_to_shape(shape)
   return Shape([Dimension("_anonymous_%i" % i, d.size)
@@ -2799,6 +2814,26 @@ def import_tf_tensor(mesh, tf_tensor, shape=None, name=None):
     assert not tf_tensor.shape.as_list()
   return ImportOperation(
       mesh, tf_tensor, convert_to_shape(shape), name=name).outputs[0]
+
+
+def import_laid_out_tensor(mesh, laid_out_tensor, shape, name=None):
+  """Import a laid_out_tensor.
+
+  For expert users.
+  The input must be laid out appropriately given the eventual MeshImpl,
+  and layout.
+
+  Args:
+    mesh: a Mesh
+    laid_out_tensor: a LaidOutTensor
+    shape: a mtf.Shape
+    name: an optional string
+
+  Returns:
+   a mtf.Tensor
+  """
+  return ImportLaidOutTensorOperation(
+      mesh, laid_out_tensor, convert_to_shape(shape), name=name).outputs[0]
 
 
 def import_fully_replicated(mesh, tf_tensor, shape, name=None):
