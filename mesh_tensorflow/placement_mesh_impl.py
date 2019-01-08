@@ -19,6 +19,7 @@ from __future__ import division
 from __future__ import print_function
 
 import functools
+import os
 
 from mesh_tensorflow import ops_with_redefined_builtins as mtf
 from six.moves import xrange  # pylint: disable=redefined-builtin
@@ -32,6 +33,7 @@ class PlacementMeshImpl(mtf.MeshImpl):
   def __init__(self, shape, layout, devices):
     super(PlacementMeshImpl, self).__init__(shape, layout)
     self._devices = devices
+    self.copy_master_to_slice_ops = []
 
   class LaidOutTensor(object):
     """One Slice for each processor."""
@@ -95,7 +97,22 @@ class PlacementMeshImpl(mtf.MeshImpl):
             slices_with_master_dtype.append(
                 tf.cast(slices[-1], variable.master_dtype))
         self._laid_out_tensor = mesh_impl.LaidOutTensor(slices)
-        self._copy_master_to_slices = self.assign_to_slices(
+
+        if os.environ.get("MTF_SEQUENCE_MODE", "") == "1":
+          if mesh_impl.copy_master_to_slice_ops:
+            with tf.control_dependencies(
+                [mesh_impl.copy_master_to_slice_ops[-1]]):
+              self._copy_master_to_slices = self.assign_to_slices(
+                mtf.assign_slice, mesh_impl.make_slices(
+                    variable.get_master(), shape))
+          else:
+            self._copy_master_to_slices = self.assign_to_slices(
+              mtf.assign_slice, mesh_impl.make_slices(
+                  variable.get_master(), shape))
+
+          mesh_impl.copy_master_to_slice_ops.append(self._copy_master_to_slices)
+        else:
+          self._copy_master_to_slices = self.assign_to_slices(
             mtf.assign_slice, mesh_impl.make_slices(
                 variable.get_master(), shape))
         self._copy_slices_to_master = variable.assign_to_master(
