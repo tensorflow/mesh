@@ -97,24 +97,23 @@ class PlacementMeshImpl(mtf.MeshImpl):
             slices_with_master_dtype.append(
                 tf.cast(slices[-1], variable.master_dtype))
         self._laid_out_tensor = mesh_impl.LaidOutTensor(slices)
-
         if os.environ.get("MTF_SEQUENCE_MODE", "") == "1":
           if mesh_impl.copy_master_to_slice_ops:
             with tf.control_dependencies(
                 [mesh_impl.copy_master_to_slice_ops[-1]]):
               self._copy_master_to_slices = self.assign_to_slices(
-                mtf.assign_slice, mesh_impl.make_slices(
-                    variable.get_master(), shape))
+                  mtf.assign_slice,
+                  mesh_impl.make_slices(variable.get_master(), shape))
           else:
             self._copy_master_to_slices = self.assign_to_slices(
-              mtf.assign_slice, mesh_impl.make_slices(
-                  variable.get_master(), shape))
+                mtf.assign_slice,
+                mesh_impl.make_slices(variable.get_master(), shape))
 
           mesh_impl.copy_master_to_slice_ops.append(self._copy_master_to_slices)
         else:
           self._copy_master_to_slices = self.assign_to_slices(
-            mtf.assign_slice, mesh_impl.make_slices(
-                variable.get_master(), shape))
+              mtf.assign_slice,
+              mesh_impl.make_slices(variable.get_master(), shape))
         self._copy_slices_to_master = variable.assign_to_master(
             mesh_impl.combine_slices(slices_with_master_dtype, shape))
 
