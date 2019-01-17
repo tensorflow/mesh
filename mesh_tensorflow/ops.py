@@ -4386,7 +4386,9 @@ class MtfRestoreHook(tf.train.SessionRunHook):
     self._op = self._lowering.copy_masters_to_slices()
 
   def after_create_session(self, session, coord):
+    tf.logging.info("Before copy master to slices.")
     session.run(self._op)
+    tf.logging.info("Done with copy master to slices.")
 
 
 class RandomOperation(Operation):
