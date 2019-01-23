@@ -59,7 +59,7 @@ class BalancedVariablePlacer(object):
     shape = tf.TensorShape(var.get_attr('shape'))
     assert shape.num_elements() is not None
 
-    size = tf.DType(var.get_attr('dtype')).size
+    size = var.get_attr('dtype').size
     mem, device = heapq.heappop(self._mem_device_heap)
     mem += shape.num_elements() * size
     heapq.heappush(self._mem_device_heap, (mem, device))
