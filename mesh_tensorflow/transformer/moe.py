@@ -74,7 +74,9 @@ class MoE1D(transformer.TransformerLayer):
         context.model_dim,
         self._hparams,
         context.train,
-        context.variable_dtype)
+        context.variable_dtype,
+        layout=context.layout,
+        mesh_shape=context.mesh_shape)
     if context.losses is not None:
       context.losses.append(loss)
     if not has_length_dim:
@@ -139,7 +141,8 @@ class MoE2D(transformer.TransformerLayer):
 
 
 def transformer_moe_layer_v1(
-    inputs, output_dim, hparams, train, variable_dtype):
+    inputs, output_dim, hparams, train, variable_dtype,
+    layout=None, mesh_shape=None):
   """Local mixture of experts that works well on TPU.
 
   Adapted from the paper https://arxiv.org/abs/1701.06538
@@ -197,6 +200,8 @@ def transformer_moe_layer_v1(
     hparams: model hyperparameters
     train: a boolean
     variable_dtype: a mtf.VariableDType
+    layout: optional - an input to mtf.convert_to_layout_rules
+    mesh_shape: optional - an input to mtf.convert_to_shape
 
   Returns:
     outputs: a Tensor with shape [<batch_dims...>, length_dim, output_dim]
@@ -206,13 +211,19 @@ def transformer_moe_layer_v1(
     ValueError: on unrecognized hparams.moe_gating
   """
   orig_inputs = inputs
-  input_dim = inputs.shape.dims[-1]
   hidden_dim = mtf.Dimension("expert_hidden", hparams.moe_hidden_size)
   experts_dim = mtf.Dimension("experts", hparams.moe_num_experts)
-  group_size_dim = mtf.Dimension("group", hparams.moe_group_size)
-  batch_dim = mtf.Dimension(
-      orig_inputs.shape[0].name,
-      orig_inputs.shape.size // (group_size_dim.size * input_dim.size))
+
+  # We "cheat" here and look at the mesh shape and layout. This is to ensure
+  # that the number of groups is a multiple of the mesh dimension
+  # over which those groups are split.
+  orig_batch_dim, orig_length_dim, input_dim = orig_inputs.shape.dims
+
+  num_groups, group_size = _split_into_groups(
+      orig_batch_dim.size * orig_length_dim.size, hparams.moe_group_size,
+      mtf.tensor_dim_to_mesh_dim_size(layout, mesh_shape, orig_batch_dim))
+  group_size_dim = mtf.Dimension("group", group_size)
+  batch_dim = mtf.Dimension(orig_batch_dim.name, num_groups)
   inputs = mtf.reshape(inputs, [batch_dim, group_size_dim, input_dim])
 
   # Each sequence sends expert_capacity positions to each expert.
