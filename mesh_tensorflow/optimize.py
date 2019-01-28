@@ -99,7 +99,8 @@ class AdafactorOptimizer(Optimizer):
                clipping_threshold=1.0,
                factored=True,
                epsilon1=1e-30,
-               epsilon2=1e-3):
+               epsilon2=1e-3,
+               min_dim_size_to_factor=32):
     """Construct a new Adafactor optimizer.
 
     See class comment.
@@ -114,6 +115,8 @@ class AdafactorOptimizer(Optimizer):
         for 2d variables
       epsilon1: Regularization constant for squared gradient.
       epsilon2: Regularization constant for parameter scale.
+      min_dim_size_to_factor: only factor accumulator if two tensor dimensions
+        are at least this size.
 
     Raises:
       ValueError: if absolute_update_scale and relative_update_scale_fn are both
@@ -131,6 +134,7 @@ class AdafactorOptimizer(Optimizer):
     self._factored = factored
     self._epsilon1 = epsilon1
     self._epsilon2 = epsilon2
+    self._min_dim_size_to_factor = min_dim_size_to_factor
 
   def _factored_dims(self, shape):
     """Should we use a factored second moment estimator.
@@ -138,7 +142,8 @@ class AdafactorOptimizer(Optimizer):
     Based on the shape of the variable.
     If we factor the accumulator, then this function returns a list of two
     mtf.Dimensions to reduce over.  We always pick the two largest dimensions.
-    If there are not two dimensions of size >=128, then we do not factor.
+    If there are not two dimensions of size >= min_dim_size_to_factor, then we
+    do not factor.
 
     Args:
       shape: a Shape
@@ -148,7 +153,7 @@ class AdafactorOptimizer(Optimizer):
     if not self._factored or shape.ndims < 2:
       return None
     sorted_dims = sorted(shape.dims, key=lambda d: -d.size)
-    if sorted_dims[1].size < 128:
+    if sorted_dims[1].size < self._min_dim_size_to_factor:
       return None
     return sorted_dims[:2]
 
