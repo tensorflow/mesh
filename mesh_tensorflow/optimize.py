@@ -100,7 +100,7 @@ class AdafactorOptimizer(Optimizer):
                factored=True,
                epsilon1=1e-30,
                epsilon2=1e-3,
-               min_dim_size_to_factor=32):
+               min_dim_size_to_factor=128):
     """Construct a new Adafactor optimizer.
 
     See class comment.
