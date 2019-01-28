@@ -86,7 +86,10 @@ def attention_params(context,
   Returns:
     an attention.AttentionParams object
   """
-  if num_memory_heads == 0:
+  if num_heads == 1:
+    query_heads_dims = None
+    memory_heads_dims = None
+  elif num_memory_heads == 0:
     query_heads_dims = [mtf.Dimension("heads", num_heads)]
     memory_heads_dims = query_heads_dims
   elif num_memory_heads == 1:

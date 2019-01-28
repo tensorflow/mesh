@@ -93,6 +93,10 @@ class AttentionParams(object):
                combine_dims=True):
     """Create attention parameters.
 
+    combine_dims is a hack for faster execution.  The heads and key/value
+    dimensions are combined in the variables and the computation.  The hack
+    would not be necessary if XLA optimized einsum properly.
+
     Args:
       mesh: a Mesh
       query_input_dim: a Dimension
