@@ -120,7 +120,7 @@ loss = mtf.reduce_mean(mtf.layers.softmax_cross_entropy_with_logits(
     logits, mtf.one_hot(labels, classes_dim), classes_dim))
 w1_grad, w2_grad = mtf.gradients([loss], [w1, w2])
 update_w1_op = mtf.assign(w1, w1 - w1_grad * 0.001)
-update_w2_op = mtf.assign(w1, w1 - w1_grad * 0.001)
+update_w2_op = mtf.assign(w2, w2 - w2_grad * 0.001)
 ```
 
 In the code above, we have built a Mesh TensorFlow graph, which is simply
@@ -188,11 +188,11 @@ yourself.  Mesh TensorFlow helps by accumulating and printing counters of
 computation/communication.  To start, here are some tricks/guidelines.
 
 * It is illegal for two dimensions of the same tensor to be split across the
-  same batch dimension.
+  same mesh dimension.
 * For any compute-intense operation (e.g. einsum), make sure that all
   mesh-dimensions are used to split dimensions of the inputs or outputs.
   Otherwise, computation is duplicated.
-* To keep the ratio of compute/commuication high (i.e. not be bandwidth-bound),
+* To keep the ratio of compute/communication high (i.e. not be bandwidth-bound),
   split dimensions into large chunks.  This should be familiar in the
   data-parallelism case, where we want a large batch size per processor to avoid
   spending most of our time communicating.
@@ -259,7 +259,7 @@ Assume that this `Tensor` is assigned to a mesh of 8 processors with shape:
 Some layout rules would lead to illegal layouts:
 
 * `"batch:processor_rows;rows:processor_rows"` is illegal because two tensor
-  dimensions could be split across the same mesh dimension.
+  dimensions could not be split across the same mesh dimension.
 
 * `"channels:processor_rows"` is illegal because the size of the tensor
   dimension is not evenly divisible by the size of the mesh dimension.
@@ -267,7 +267,7 @@ Some layout rules would lead to illegal layouts:
 ## Einsum
 
 Mesh TensorFlow uses Einstein-summation notation, `mtf.einsum(inputs,
-output_shape)`, using the (named) `Dimensions` as the symbols.  Matrix-
+output_shape)`, using the (named) `Dimensions` as the symbols.  Matrix
 multiplication, broadcast, sum-reduction, and transposition can all be expressed
 as special cases of `mtf.einsum`, though the familiar interfaces are also
 supported.  The operation is lowered to slice-wise `tf.einsum`s, followed by
@@ -334,7 +334,7 @@ cd tensor2tensor/
 pip install --user  .
 ```
 
-Before run the model, you need to prepare the training data and bucket for
+Before running the model, you need to prepare the training data and bucket for
 storing checkpoints. Refer to the
 [Transformer tutorial](https://cloud.google.com/tpu/docs/tutorials/transformer)
 to learn how to generate the training data and create buckets.
