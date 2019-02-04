@@ -29,17 +29,46 @@ from six.moves import xrange  # pylint: disable=redefined-builtin
 import tensorflow as tf
 
 from tensorflow.contrib.tpu.python.ops import tpu_ops
-from tensorflow.python.framework import ops
 
 
 class SimdMeshImpl(mtf.MeshImpl):
   """Mesh implementation for TPU using SIMD and MPI operations."""
 
-  def __init__(self, shape, layout, devices, device_assignment):
+  def __init__(self,
+               shape,
+               layout,
+               devices=None,
+               device_assignment=None,
+               logical_to_physical=None):
+    """Create a SimdMeshImpl.
+
+    Args:
+      shape: an input to mtf.convert_to_shape()
+      layout: an input to mtf.convert_to_layout_rules()
+      devices: deprecated
+      device_assignment: a tf.contrib.tpu.DeviceAssignment - devices must be
+        asssigned in lexicographic order
+      logical_to_physical: an optional permutation representing the mapping
+        from logical cores to "physical" cores, where the physical cores are
+        listed in lexicographic order in the physical mesh, and the logical
+        cores are listed in lexicographic order in the logical mesh.
+    """
     super(SimdMeshImpl, self).__init__(shape, layout)
-    self._devices = devices
+    if devices is not None:
+      assert devices == [""] * self.size
     self._device_assignment = device_assignment
     tf.logging.info("SimdMeshImpl init: {0} {1}".format(shape, layout))
+    tf.logging.info("Device Assignment: {0}".format(device_assignment))
+    if logical_to_physical is None:
+      logical_to_physical = list(range(self.size))
+    if sorted(logical_to_physical) != list(range(self.size)):
+      raise ValueError(
+          "logical_to_physical must be a permutation on range(shape.size)"
+          " shape=%s logical_to_physical=%s" % (shape, logical_to_physical))
+    self._logical_to_physical = logical_to_physical
+    self._physical_to_logical = [None] * self.size
+    for logical, physical in enumerate(self._logical_to_physical):
+      self._physical_to_logical[physical] = logical
     self._pnum_tensor = None
     self.graph_device_function_stacks = []
     self.copy_master_to_slice_ops = []
@@ -51,8 +80,14 @@ class SimdMeshImpl(mtf.MeshImpl):
     with utils.outside_all_rewrites():
       tf.logging.info("Create pnum_tensor")
       self._pnum_tensor = tpu_ops.tpu_replicated_input(
-          list(range(self.size)), name="pnum_constants")
+          self._physical_to_logical, name="pnum_constants")
       return self._pnum_tensor
+
+  def l2p(self, logical_pnum):
+    return self._logical_to_physical[logical_pnum]
+
+  def p2l(self, physical_pnum):
+    return self._physical_to_logical[physical_pnum]
 
   class LaidOutTensor(object):
     """One Slice."""
@@ -113,18 +148,18 @@ class SimdMeshImpl(mtf.MeshImpl):
       if not mesh_impl.graph_device_function_stacks:
         for pnum in xrange(mesh_impl.size):
           tpu_device = mesh_impl.device_assignment.tpu_device(replica=pnum)
-          with ops.device(tpu_device):
+          with tf.device(tpu_device):
             mesh_impl.graph_device_function_stacks.append(
                 tf.get_default_graph()._device_function_stack.copy())
 
-      for pnum in xrange(mesh_impl.size):
-        slice_var_name = base_name + "_slice_%d" % pnum
+      for physical_pnum in xrange(mesh_impl.size):
+        slice_var_name = base_name + "_slice_%d" % physical_pnum
         # Use tf.Variable instead of tf.get_variable since latter adds lots of
         # useless operations to the TF graph.
         # Note: Repeatedly 'with tf.device():' slows down the graph
         # construction. Therefore we directly use the cached device_stack here.
-        tf.get_default_graph(
-        )._device_function_stack = mesh_impl.graph_device_function_stacks[pnum]
+        tf.get_default_graph()._device_function_stack = (
+            mesh_impl.graph_device_function_stacks[physical_pnum])
 
         slices.append(
             tf.Variable(
@@ -158,6 +193,9 @@ class SimdMeshImpl(mtf.MeshImpl):
               variable.get_master(), shape, slices, slice_shape)
         slices_with_master_dtype = [
             tf.cast(s, variable.master_dtype) for s in slices]
+        slices_with_master_dtype = [
+            slices_with_master_dtype[mesh_impl.l2p(logical_pnum)]
+            for logical_pnum in range(mesh_impl.size)]
         self._copy_slices_to_master = variable.assign_to_master(
             mesh_impl.combine_slices(slices_with_master_dtype, shape,
                                      device=variable.master_device))
@@ -169,12 +207,13 @@ class SimdMeshImpl(mtf.MeshImpl):
       Args:
         master_variable: The master variable.
         master_shape: The shape of master variable.
-        slices: The list of sliced variables.
+        slices: The list of slice-variables in physical order.
         slice_shape: The shape of the slice variable.
       Returns:
         A grouped tf.assign ops.
       """
-      master_layout = self._mesh_impl.tensor_layout(master_shape)
+      mesh_impl = self._mesh_impl
+      master_layout = mesh_impl.tensor_layout(master_shape)
       # For handling case: master is float32 and slices are bfloat16.
       if master_variable.dtype != slices[0].dtype:
         master_variable = tf.cast(master_variable, slices[0].dtype)
@@ -183,15 +222,16 @@ class SimdMeshImpl(mtf.MeshImpl):
         assign_ops = [tf.assign(t, master_variable) for t in slices]
       else:
         slice_dict = {}
-        for pnum in xrange(len(slices)):
-          slice_begin = self._mesh_impl.slice_begin(master_shape, pnum)
+        for logical_pnum in xrange(len(slices)):
+          slice_begin = mesh_impl.slice_begin(master_shape, logical_pnum)
           slice_begin_tuple = tuple(slice_begin)
           # Reuse the same slice if slice_begin doesn't change.
           if slice_begin_tuple not in slice_dict:
             slice_dict[slice_begin_tuple] = tf.slice(master_variable,
                                                      slice_begin, slice_shape)
+          physical_pnum = mesh_impl.l2p(logical_pnum)
           assign_ops.append(
-              tf.assign(slices[pnum], slice_dict[slice_begin_tuple]))
+              tf.assign(slices[physical_pnum], slice_dict[slice_begin_tuple]))
       return tf.group(assign_ops)
 
     def assign_to_slices(self, assign_fn, values, assign_to_tensor_list=None):
@@ -230,7 +270,7 @@ class SimdMeshImpl(mtf.MeshImpl):
       return self._copy_slices_to_master
 
   def laid_out_pnum(self):
-    """Returns a LaidOutTensor containing the processor number.
+    """Returns a LaidOutTensor containing the logical processor number.
 
     Returns:
       a LaidOutTensor where each slice is an integer scalar
@@ -238,17 +278,17 @@ class SimdMeshImpl(mtf.MeshImpl):
     return self.LaidOutTensor([self.pnum_tensor])
 
   def _create_group_assignment(self, mesh_axes):
-    """Create group assignment for XLA cross replica ops."""
+    """Create group assignment for XLA cross replica ops (physical pnums)."""
 
     partitioning = {}
-    for pnum in xrange(self.size):
-      group = mtf.pnum_to_group(self.shape, mesh_axes, pnum)
+    for logical_pnum in xrange(self.size):
+      group = mtf.pnum_to_group(self.shape, mesh_axes, logical_pnum)
       if group not in partitioning:
         partitioning[group] = []
-      partitioning[group].append(pnum)
+      partitioning[group].append(self.l2p(logical_pnum))
     group_assignment = []
-    for group, pnums in partitioning.items():
-      group_assignment.append(pnums)
+    for group, physical_pnums in partitioning.items():
+      group_assignment.append(physical_pnums)
     return group_assignment
 
   def allreduce(self, x, mesh_axes, reduction_fn_string):
@@ -375,7 +415,9 @@ class SimdMeshImpl(mtf.MeshImpl):
       if source_pcoord[k] is not None:
         coord[mesh_axis] = source_pcoord[k]
         target_pnum = self.processor_coordinates_to_pnum(coord)
-        source_target_pairs.append([pnum, target_pnum])
+        source_target_pairs.append(
+            [self.l2p(pnum),
+             self.l2p(target_pnum)])
 
     return tpu_ops.collective_permute(t, source_target_pairs)
 
@@ -491,3 +533,82 @@ class SimdMeshImpl(mtf.MeshImpl):
   @property
   def supports_control_dependencies(self):
     return False
+
+
+def _ring_2d(m, n):
+  """Ring-order of a mxn mesh.
+
+  Args:
+    m: an integer
+    n: an integer
+  Returns:
+    a list of mxn pairs
+  """
+  if m == 1:
+    return [(0, i) for i in range(n)]
+  if n == 1:
+    return [(i, 0) for i in range(n)]
+  if m % 2 != 0:
+    tf.logging.warning("Odd dimension")
+    return [(i % m, i // m) for i in range(n * m)]
+  ret = [(0, 0)]
+  for i in range(m // 2):
+    for j in range(1, n):
+      ret.append((2 * i, j))
+    for j in range(n-1, 0, -1):
+      ret.append((2 * i + 1, j))
+  for i in range(m-1, 0, -1):
+    ret.append((i, 0))
+  return ret
+
+
+def tile_2d(physical_shape, tile_shape,
+            outer_name="outer", inner_name="inner"):
+  """2D tiling of a 3d physical mesh.
+
+  The "inner" mesh dimension corresponds to the position within a tile
+  of processors.  The "outer" mesh dimension corresponds to which processor.
+
+  Example:
+
+  tile_2d(physical_shape=[8, 16, 2], tile_shape=[4, 4])
+
+  The "inner" dimension has size 4x4x2=32 and corresponds to the position
+  within a 4x4 tile of processors.
+
+  The "outer" dimension has size 8/4 * 16/4 = 8, and corresponds to the 8
+  tiles in the mesh.
+
+  Args:
+    physical_shape: a triple
+    tile_shape: a pair
+    outer_name: a string
+    inner_name: a string
+
+  Returns:
+    mesh_shape: a mtf.Shape
+    logical_to_physical: a list
+  """
+  logical_to_physical = []
+  p0, p1, p2 = physical_shape
+  t0, t1 = tile_shape
+  tile_ring = _ring_2d(t0, t1)
+  tiles_ring = _ring_2d(p0 // t0, p1 // t1)
+  for logical_pnum in range(p0 * p1 * p2):
+    core_on_chip = logical_pnum % p2
+    logical_chip_num = logical_pnum // p2
+    logical_pos_in_tile = logical_chip_num % (t0 * t1)
+    logical_tile_num = logical_chip_num // (t0 * t1)
+    tile_i, tile_j = tile_ring[logical_pos_in_tile]
+    tiles_i, tiles_j = tiles_ring[logical_tile_num]
+    physical_pnum = core_on_chip + p2 * (
+        tile_i * p1 + tile_j +
+        tiles_i * p1 * t0 + tiles_j * t1)
+    logical_to_physical.append(physical_pnum)
+  assert sorted(logical_to_physical) == list(range(p0 * p1  * p2))
+  tile_size = t0 * t1 * p2
+  num_tiles = p0 * p1 // (t0 * t1)
+  mesh_shape = mtf.Shape(
+      [mtf.Dimension(outer_name, int(num_tiles)),
+       mtf.Dimension(inner_name, int(tile_size))])
+  return mesh_shape, logical_to_physical
