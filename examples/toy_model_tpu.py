@@ -40,6 +40,7 @@ tf.flags.DEFINE_string('master_dtype', 'bfloat16', 'dtype for master vars.')
 tf.flags.DEFINE_string('slice_dtype', 'float32', 'dtype for slice vars.')
 tf.flags.DEFINE_string('activation_dtype', 'float32', 'dtype for activations.')
 tf.flags.DEFINE_string('optimizer', 'SGD', 'optimizer (SGD or Adafactor).')
+tf.flags.DEFINE_float('lr', 1e-4, 'Learning rate.')
 tf.flags.DEFINE_string('mesh_shape', 'all:8', 'mesh shape')
 tf.flags.DEFINE_string('layout', 'hidden_odd:all', 'layout rules')
 tf.flags.DEFINE_integer('iterations', 100,
@@ -172,7 +173,7 @@ def model_fn(features, labels, mode, params):
       optimizer = mtf.optimize.AdafactorOptimizer()
     else:
       assert FLAGS.optimizer == 'SGD'
-      optimizer = mtf.optimize.SgdOptimizer(lr=1e-4)
+      optimizer = mtf.optimize.SgdOptimizer(lr=FLAGS.lr)
     update_ops = optimizer.apply_grads(var_grads, graph.trainable_variables)
   else:
     # for now, we can only export fully-replicated tensors.
@@ -255,18 +256,19 @@ def run_toy_model_tpu():
       eval_batch_size=FLAGS.batch_size)
   current_step = estimator_lib._load_global_step_from_checkpoint_dir(FLAGS.model_dir)  # pylint: disable=protected-access,line-too-long
   logging.info('Current step %d', current_step)
+  if FLAGS.steps_per_checkpoint == 0:
+    classifier.train(input_fn=ToyModelInput(), max_steps=FLAGS.train_steps)
+    return
   while current_step < FLAGS.train_steps:
     next_checkpoint = min(current_step + FLAGS.steps_per_checkpoint,
                           FLAGS.train_steps)
     classifier.train(input_fn=ToyModelInput(), max_steps=next_checkpoint)
     current_step = next_checkpoint
-
     logging.info('Starting to evaluate.')
     eval_results = classifier.evaluate(
         input_fn=ToyModelInput(),
         steps=156)  # since we have 10000 examples and batch_size = 64 per host
     logging.info('Eval results: %s', eval_results)
-  # classifier.train(input_fn=ToyModelInput(), max_steps=FLAGS.train_steps)
 
 
 def main(_):
