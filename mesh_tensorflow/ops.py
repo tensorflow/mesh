@@ -1236,9 +1236,9 @@ def convert_args_to_laid_out_tensors(xs):
   """
   ret = []
   for x in xs:
-    try:
+    if hasattr(x, "to_laid_out_tensor"):
       ret.append(x.to_laid_out_tensor())
-    except AttributeError:
+    else:
       ret.append(x)
   return ret
 

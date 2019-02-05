@@ -55,7 +55,7 @@ class SimdMeshImpl(mtf.MeshImpl):
     """
     super(SimdMeshImpl, self).__init__(shape, layout)
     if devices is not None:
-      assert devices == [""] * self.size
+      tf.logging.warning("SimdMeshImpl ignoring devices %s" % devices)
     self._device_assignment = device_assignment
     tf.logging.info("SimdMeshImpl init: {0} {1}".format(shape, layout))
     tf.logging.info("Device Assignment: {0}".format(device_assignment))
