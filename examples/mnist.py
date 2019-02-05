@@ -56,7 +56,7 @@ def mnist_model(image, labels, mesh):
     mesh: a mtf.Mesh
 
   Returns:
-    logits: a tf.Tensor with shape [batch, 10]
+    logits: a mtf.Tensor with shape [batch, 10]
     loss: a mtf.Tensor with shape []
   """
   batch_dim = mtf.Dimension("batch", FLAGS.batch_size)
