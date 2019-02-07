@@ -1,5 +1,5 @@
 # coding=utf-8
-# Copyright 2018 The Mesh TensorFlow Authors.
+# Copyright 2019 The Mesh TensorFlow Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -438,6 +438,7 @@ class Unitransformer(object):
       mode=tf.estimator.ModeKeys.TRAIN,
       variable_dtype=mtf.VariableDType(tf.float32),
       sequence_id=None,
+      position=None,
       encoder_output=None,
       encoder_sequence_id=None,
       shared_params=None):
@@ -454,6 +455,7 @@ class Unitransformer(object):
       mode: a tf.estimator.ModeKeys
       variable_dtype: a mtf.VariableDType
       sequence_id: an optional Tensor
+      position: an optional Tensor
       encoder_output: an optional Tensor
       encoder_sequence_id: an optional Tensor
       shared_params: an optional dictionary
@@ -472,6 +474,7 @@ class Unitransformer(object):
         autoregressive=self.autoregressive,
         losses=[] if compute_loss else None,
         sequence_id=sequence_id,
+        position=position,
         encoder_output=encoder_output,
         encoder_sequence_id=encoder_sequence_id,
         shared_params=shared_params,
@@ -791,7 +794,9 @@ class Bitransformer(object):
       mode=tf.estimator.ModeKeys.TRAIN,
       variable_dtype=mtf.VariableDType(tf.float32),
       encoder_sequence_id=None,
-      decoder_sequence_id=None):
+      decoder_sequence_id=None,
+      encoder_position=None,
+      decoder_position=None):
     """Compute logits based on inputs (all positions in parallel).
 
     This is called during training and evaluation.
@@ -804,6 +809,8 @@ class Bitransformer(object):
       variable_dtype: a mtf.VariableDType
       encoder_sequence_id: an optional Tensor
       decoder_sequence_id: an optional Tensor
+      encoder_position: an optional Tensor
+      decoder_position: an optional Tensor
 
     Returns:
       logits: a Tensor with shape [<batch_dims>, output_vocab_dim]
@@ -817,6 +824,7 @@ class Bitransformer(object):
         mode=mode,
         variable_dtype=variable_dtype,
         sequence_id=encoder_sequence_id,
+        position=encoder_position,
         shared_params=shared_params)
     encoder_output = mtf.layers.rename_length_to_memory_length(encoder_output)
     if encoder_sequence_id is not None:
@@ -824,6 +832,8 @@ class Bitransformer(object):
           encoder_sequence_id)
     length_dim = targets.shape.dims[-1]
     shifted_targets = mtf.shift(targets, offset=1, dim=length_dim, wrap=False)
+    if decoder_position is not None:
+      shifted_targets *= mtf.to_int32(mtf.not_equal(decoder_position, 0))
     logits, loss = self.decoder.call_simple(
         shifted_targets,
         targets,
@@ -833,6 +843,7 @@ class Bitransformer(object):
         sequence_id=decoder_sequence_id,
         encoder_output=encoder_output,
         encoder_sequence_id=encoder_sequence_id,
+        position=decoder_position,
         shared_params=shared_params)
     if loss is not None and encoder_loss is not None:
       loss += encoder_loss
