@@ -20,6 +20,7 @@ from __future__ import print_function
 
 import functools
 import os
+import random
 
 from mesh_tensorflow import ops_with_redefined_builtins as mtf
 from six.moves import xrange  # pylint: disable=redefined-builtin
@@ -321,11 +322,11 @@ class PlacementMeshImpl(mtf.MeshImpl):
       a LaidOutTensor
     """
     slice_shape = self.slice_shape(shape)
-    var_scope = tf.get_variable_scope().name
+    op_seed = random.random()
     def my_fn(pnum):
       # seeds are necessary to make sure that slices that should have the
       # same values actually do have the same values.
-      seed = hash("%s%s" % (var_scope, self.slice_begin(shape, pnum)))
+      seed = hash("%s,%s" % (op_seed, self.slice_begin(shape, pnum)))
       return tf_fn(slice_shape, seed=seed, **kwargs)
     return self.slicewise(my_fn, self.laid_out_pnum())
 
