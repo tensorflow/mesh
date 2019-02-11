@@ -832,8 +832,9 @@ class Bitransformer(object):
           encoder_sequence_id)
     length_dim = targets.shape.dims[-1]
     shifted_targets = mtf.shift(targets, offset=1, dim=length_dim, wrap=False)
-    if decoder_position is not None:
-      shifted_targets *= mtf.to_int32(mtf.not_equal(decoder_position, 0))
+    # We should have a 0 at the beginning of each sequence rather than the
+    # shifted EOS (1) from the previous sequence.
+    shifted_targets -= mtf.to_int32(mtf.equal(shifted_targets, 1))
     logits, loss = self.decoder.call_simple(
         shifted_targets,
         targets,
