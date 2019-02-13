@@ -19,6 +19,7 @@ Interfaces and algorithms are under development and subject to rapid change
 without notice.
 
 TODO(noam): Remove the other copy of this code from tensor2tensor.
+TODO(noam): Write a new, simpler, cleaner version of this code.
 """
 
 from __future__ import absolute_import
@@ -76,7 +77,8 @@ class MoE1D(transformer.TransformerLayer):
         context.train,
         context.variable_dtype,
         layout=context.layout,
-        mesh_shape=context.mesh_shape)
+        mesh_shape=context.mesh_shape,
+        nonpadding=context.nonpadding)
     if context.losses is not None:
       context.losses.append(loss)
     if not has_length_dim:
@@ -132,7 +134,8 @@ class MoE2D(transformer.TransformerLayer):
         context.train,
         context.variable_dtype,
         layout=context.layout,
-        mesh_shape=context.mesh_shape)
+        mesh_shape=context.mesh_shape,
+        nonpadding=context.nonpadding)
     if context.losses is not None:
       context.losses.append(loss)
     if not has_length_dim:
@@ -142,7 +145,7 @@ class MoE2D(transformer.TransformerLayer):
 
 def transformer_moe_layer_v1(
     inputs, output_dim, hparams, train, variable_dtype,
-    layout=None, mesh_shape=None):
+    layout=None, mesh_shape=None, nonpadding=None):
   """Local mixture of experts that works well on TPU.
 
   Adapted from the paper https://arxiv.org/abs/1701.06538
@@ -202,6 +205,9 @@ def transformer_moe_layer_v1(
     variable_dtype: a mtf.VariableDType
     layout: optional - an input to mtf.convert_to_layout_rules
     mesh_shape: optional - an input to mtf.convert_to_shape
+    nonpadding: an optional Tensor with shape [<batch_dims>, length_dim]
+      and the same dtype as inputs, consisting of ones(nonpadding)
+      and zeros(padding).
 
   Returns:
     outputs: a Tensor with shape [<batch_dims...>, length_dim, output_dim]
@@ -238,7 +244,10 @@ def transformer_moe_layer_v1(
 
   experts_dim_unsplit = mtf.Dimension("expert_unsplit", experts_dim.size)
   batch_dim_unsplit = mtf.Dimension("batch_unsplit", batch_dim.size)
-
+  if nonpadding is not None:
+    nonpadding = mtf.zeros(inputs.mesh, [orig_batch_dim, orig_length_dim],
+                           dtype=inputs.dtype) + nonpadding
+    nonpadding = mtf.reshape(nonpadding, [batch_dim, group_size_dim])
   if hparams.moe_gating == "top_2":
     dispatch_tensor, combine_tensor, loss = _top_2_gating(
         inputs=inputs,
@@ -247,7 +256,8 @@ def transformer_moe_layer_v1(
         expert_capacity_dim=expert_capacity_dim,
         hparams=hparams,
         train=train,
-        variable_dtype=variable_dtype)
+        variable_dtype=variable_dtype,
+        importance=nonpadding)
   else:
     raise ValueError("unknown hparams.moe_gating=%s" % hparams.moe_gating)
 
@@ -281,7 +291,7 @@ def transformer_moe_layer_v1(
 
 def transformer_moe_layer_v2(
     inputs, output_dim, hparams, train, variable_dtype,
-    layout=None, mesh_shape=None):
+    layout=None, mesh_shape=None, nonpadding=None):
   """2-level mixture of experts.
 
   Adapted from the paper https://arxiv.org/abs/1701.06538
@@ -377,6 +387,9 @@ def transformer_moe_layer_v2(
     variable_dtype: a mtf.VariableDType
     layout: optional - an input to mtf.convert_to_layout_rules
     mesh_shape: optional - an input to mtf.convert_to_shape
+    nonpadding: an optional mtf.Tensor with shape [a, b, l]
+      and the same dtype as inputs, consisting of ones(nonpadding)
+      and zeros(padding).
 
   Returns:
     outputs: a Tensor with shape [a, b, l, n]
@@ -385,6 +398,9 @@ def transformer_moe_layer_v2(
   Raises:
     ValueError: on unrecognized hparams.moe_gating
   """
+  if nonpadding is not None:
+    nonpadding = mtf.zeros(inputs.mesh, inputs.shape.dims[:-1],
+                           dtype=inputs.dtype) + nonpadding
   insert_outer_batch_dim = (len(inputs.shape.dims) == 3)
   if insert_outer_batch_dim:
     inputs = mtf.reshape(
@@ -440,6 +456,8 @@ def transformer_moe_layer_v2(
   # Reshape the inner batch size to a multiple of group_dim g1 and
   # group_size_dim s.
   inputs = mtf.reshape(inputs, [a0, g1, s, m])
+  if nonpadding is not None:
+    nonpadding = mtf.reshape(nonpadding, [a0, g1, s])
 
   # Get the assignments for the first level.
   # dispatch_tensor_x has shape [a0, g1, s, x, c]
@@ -452,7 +470,8 @@ def transformer_moe_layer_v2(
         hparams=hparams,
         train=train,
         variable_dtype=variable_dtype,
-        name="outer_gating")
+        name="outer_gating",
+        importance=nonpadding)
   else:
     raise ValueError("unknown hparams.moe_gating=%s" % hparams.moe_gating)
 

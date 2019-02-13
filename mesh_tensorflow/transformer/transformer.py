@@ -251,6 +251,17 @@ class Context(object):
     self.next_constant_state += 1
     return ret
 
+  @property
+  def nonpadding(self):
+    """Tensor with zeros in padding positions and ones elsewhere."""
+    if self.sequence_id is None:
+      return None
+    if self.sequence_id == 1:
+      return 1
+    else:
+      return mtf.cast(
+          mtf.not_equal(self.sequence_id, 0), self.activation_dtype)
+
 
 class LayerStack(TransformerLayer):
   """A stack of layers with residual connections and layer norms."""
