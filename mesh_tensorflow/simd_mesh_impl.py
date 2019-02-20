@@ -410,11 +410,11 @@ class SimdMeshImpl(mtf.MeshImpl):
     source_target_pairs = []
 
     for pnum in xrange(self.size):
-      coord = self.pnum_to_processor_coordinates(self.shape, pnum)
+      coord = mtf.pnum_to_processor_coordinates(self.shape, pnum)
       k = coord[mesh_axis]
       if source_pcoord[k] is not None:
         coord[mesh_axis] = source_pcoord[k]
-        target_pnum = self.processor_coordinates_to_pnum(coord)
+        target_pnum = mtf.processor_coordinates_to_pnum(self.shape, coord)
         source_target_pairs.append(
             [self.l2p(pnum),
              self.l2p(target_pnum)])
