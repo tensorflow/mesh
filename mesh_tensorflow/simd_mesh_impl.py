@@ -419,7 +419,13 @@ class SimdMeshImpl(mtf.MeshImpl):
             [self.l2p(pnum),
              self.l2p(target_pnum)])
 
-    return tpu_ops.collective_permute(t, source_target_pairs)
+    # TODO(joshuawang): Update when collective_permute works for tf.int32.
+    if t.dtype in [tf.float32, tf.bfloat16]:
+      return tpu_ops.collective_permute(t, source_target_pairs)
+
+    # If t is not one of the allowed types, cast and cast back.
+    return tf.cast(tpu_ops.collective_permute(
+        tf.cast(t, tf.float32), source_target_pairs), t.dtype)
 
   def slice(self, tf_tensor, tensor_shape):
     """"Slice out the corresponding part of tensor given the pnum variable."""
