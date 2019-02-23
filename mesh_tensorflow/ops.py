@@ -25,6 +25,7 @@ import os
 import re
 
 from mesh_tensorflow import utils
+import numpy as np
 import six
 from six.moves import xrange  # pylint: disable=redefined-builtin
 
@@ -3759,11 +3760,32 @@ def top_k(x, reduced_dim, new_dim, dtype=tf.int32, name=None):
 
 
 def sample_with_temperature(x, dim, temperature=1.0, dtype=tf.int32, name=None):
+  """Either argmax or random sampling.
+
+  Args:
+    x: a Tensor.
+    dim: a Dimension in x.shape.dims
+    temperature: a float  0.0=argmax 1.0=random
+    dtype: a tf.dtype (for the output)
+    name: an optional string
+
+  Returns:
+    a Tensor with type dtype.
+  """
   dim = convert_to_dimension(dim)
   with tf.name_scope(name, default_name="sample_with_temperature"):
     if temperature != 0.0:
-      # gumbel trick
-      g = -log(-log(random_uniform(x.mesh, x.shape, dtype=x.dtype)))
+      # gumbel trick.
+      # Note: we don't want to generate 0 or 1 because:
+      # * -log(-log(0)) is -infinity
+      # * -log(-log(1)) is +infinity.
+      g = -log(-log(
+          random_uniform(
+              x.mesh,
+              x.shape,
+              minval=np.finfo(x.dtype.as_numpy_dtype).tiny,
+              maxval=1.,
+              dtype=x.dtype)))
       x += g * temperature
     return argmax(x, dim, dtype, name)
 
