@@ -419,8 +419,7 @@ class SimdMeshImpl(mtf.MeshImpl):
             [self.l2p(pnum),
              self.l2p(target_pnum)])
 
-    # TODO(joshuawang): Update when collective_permute works for tf.int32.
-    if t.dtype in [tf.float32, tf.bfloat16]:
+    if t.dtype in [tf.float32, tf.bfloat16, tf.int32]:
       return tpu_ops.collective_permute(t, source_target_pairs)
 
     # If t is not one of the allowed types, cast and cast back.
