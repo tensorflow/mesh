@@ -184,7 +184,10 @@ class ReplicatedVariable(object):
     """Converts a variable to a tensor."""
     # pylint: disable=protected-access
     if _enclosing_tpu_context() is None:
-      return self._primary_var._dense_var_to_tensor(dtype, name, as_ref)
+      if hasattr(self._primary_var, '_dense_var_to_tensor'):
+        return self._primary_var._dense_var_to_tensor(dtype, name, as_ref)
+      else:
+        return ops.convert_to_tensor(self._primary_var)
     # pylint: enable=protected-access
     if dtype is not None and dtype != self.dtype:
       return NotImplemented
