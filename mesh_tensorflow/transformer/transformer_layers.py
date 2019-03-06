@@ -157,10 +157,11 @@ class SelfAttention(transformer.TransformerLayer):
     """Call the layer."""
     params = self.make_params(context)
     q = params.compute_q(x)
+    memory_length = self.memory_length(context)
     if context.mode == "incremental":
       m = x
     else:
-      m = mtf.rename_dimension(x, context.length_dim.name, "memory_length")
+      m = mtf.replace_dimensions(x, context.length_dim, memory_length)
     if self.shared_kv:
       kv = params.compute_kv(m)
     else:
@@ -168,8 +169,7 @@ class SelfAttention(transformer.TransformerLayer):
       v = params.compute_v(m)
     if context.mode == "incremental":
       one_hot = mtf.one_hot(
-          context.position, self.memory_length(context),
-          dtype=context.activation_dtype)
+          context.position, memory_length, dtype=context.activation_dtype)
       inv_one_hot = 1.0 - one_hot
       if self.shared_kv:
         old_kv = context.get_states(1)
@@ -178,49 +178,52 @@ class SelfAttention(transformer.TransformerLayer):
         old_k, old_v = context.get_states(2)
         k = old_k * inv_one_hot + k * one_hot
         v = old_v * inv_one_hot + v * one_hot
+      memory_position = mtf.range(context.mesh, memory_length, tf.int32)
+    else:
+      memory_position = self.rename_length_to_memory_length(
+          context.position, context)
     if context.mode == "incremental" or context.mode == "first_part":
       context.record_new_states([kv] if self.shared_kv else [k, v])
     if self.shared_kv:
       k = kv
       v = kv
-    mask = self.compute_mask(context)
     o = attention.attention(
         q, k, v,
-        self.memory_length(context),
+        memory_length,
         self.kv_dim,
         self.kv_dim,
-        mask,
+        self.compute_mask(context, memory_position),
         **self.attention_kwargs_from_context(context))
     return params.compute_output(o, output_shape=x.shape)
 
-  def compute_mask(self, context):
+  def compute_mask(self, context, memory_position):
     """Compute attention mask.
 
     Args:
       context: a transformer.Context
+      memory_position: an int32 tensor containing memory_length dimension.
     Returns:
       a Tensor or None
     """
     masks = []
-    memory_position = mtf.range(
-        context.mesh, self.memory_length(context), dtype=tf.int32)
-    relative_position = memory_position - context.position
     min_relative_position = self.min_relative_position(context)
     max_relative_position = self.max_relative_position(context)
-    if min_relative_position is not None:
-      illegal = mtf.less(relative_position, min_relative_position)
-      masks.append(mtf.cast(illegal, context.activation_dtype) * -1e9)
-    if max_relative_position is not None:
-      illegal = mtf.greater(relative_position, max_relative_position)
-      masks.append(mtf.cast(illegal, context.activation_dtype) * -1e9)
+    if max_relative_position is not None or min_relative_position is not None:
+      relative_position = memory_position - context.position
+      if min_relative_position is not None:
+        illegal = mtf.less(relative_position, min_relative_position)
+        masks.append(mtf.cast(illegal, context.activation_dtype) * -1e9)
+      if max_relative_position is not None:
+        illegal = mtf.greater(relative_position, max_relative_position)
+        masks.append(mtf.cast(illegal, context.activation_dtype) * -1e9)
     if (context.sequence_id is not None and
         isinstance(context.sequence_id, mtf.Tensor) and
         context.length_dim in context.sequence_id.shape):
       masks.append(mtf.cast(
           mtf.not_equal(
               context.sequence_id,
-              mtf.layers.rename_length_to_memory_length(
-                  context.sequence_id)),
+              self.rename_length_to_memory_length(
+                  context.sequence_id, context)),
           context.activation_dtype) * -1e9)
     return mtf.add_n(masks) if masks else None
 
@@ -230,6 +233,10 @@ class SelfAttention(transformer.TransformerLayer):
 
   def memory_length(self, context):
     return mtf.Dimension("memory_length", context.length_dim.size)
+
+  def rename_length_to_memory_length(self, x, context):
+    return mtf.replace_dimensions(
+        x, context.length_dim, self.memory_length(context))
 
   def min_relative_position(self, context):
     return None
@@ -343,15 +350,16 @@ class LocalSelfAttention(SelfAttention):
           **self.attention_kwargs_from_context(context))
     elif context.length_dim.size <= max(256, self.radius * 4):
       # nothing fancy - just do full attention and mask
-      mask = self.compute_mask(context)
+      memory_length = self.rename_length_to_memory_length(
+          context.position, context)
       o = attention.attention(
           q,
-          mtf.layers.rename_length_to_memory_length(k),
-          mtf.layers.rename_length_to_memory_length(v),
+          self.rename_length_to_memory_length(k, context),
+          self.rename_length_to_memory_length(v, context),
           self.memory_length(context),
           self.kv_dim,
           self.kv_dim,
-          self.compute_mask(context),
+          self.compute_mask(context, memory_length),
           **self.attention_kwargs_from_context(context))
     else:
       # fancy local attention algorithm
