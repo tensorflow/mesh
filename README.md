@@ -327,6 +327,40 @@ cd mesh/
 pip install --user .
 ```
 
+## Run the Transfomer model (no Tensor2Tensor dependencies)
+```sh
+pip install tensorflow_datasets
+
+cd mesh/
+MODEL_DIR=gs://noam-mtf/transformer_ende
+DATA_DIR=gs://noam-mtf/data
+TPU=noam-mtf-donut
+
+### TRAIN
+python examples/transformer_standalone.py \
+  --tpu=$TPU --model_dir=$MODEL_DIR --logtostderr \
+  --mode=train
+
+### EVAL
+python examples/transformer_standalone.py \
+  --tpu=$TPU --model_dir=$MODEL_DIR --logtostderr \
+  --mode=train
+
+### INFER
+pip3 install sacrebleu
+mkdir ~/input ~/output
+~/.local/bin/sacrebleu -t wmt13 -l en-de --echo src > ~/input/ende.dev
+python examples/transformer_standalone.py \
+  --tpu=$TPU --model_dir=$MODEL_DIR --logtostderr \
+  --input_file=~/input/ende.dev \
+  --output_file=~/output/ende.dev.out \
+  --mode=infer
+
+# Compute BLEU score for dev set
+cat ~/output/ende.dev.out | ~/.local/bin/sacrebleu -t wmt13 -l en-de -tok intl
+```
+
+
 ## Run the Transfomer model with Tensor2Tensor config
 ```sh
 git clone https://github.com/tensorflow/tensor2tensor.git
