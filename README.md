@@ -9,9 +9,6 @@ welcome](https://img.shields.io/badge/contributions-welcome-brightgreen.svg)](CO
 [![License](https://img.shields.io/badge/License-Apache%202.0-brightgreen.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Travis](https://img.shields.io/travis/tensorflow/mesh.svg)](https://travis-ci.org/tensorflow/mesh)
 
-Transformer for EN-FR WMT with model splitting |  Transformer for EN-FR WMT with data splitting
-:-------------------------:|:-------------------------:
-![model_splitting](./transformer_model_splitting.png) | ![data_splitting](./transformer_data_splitting.png)
 
 # Introduction
 
@@ -43,11 +40,6 @@ convolutions
 
 * Each tensor is distributed (split and/or replicated) across all processors
   in a mesh.
-
-* The "layout" of a tensor on a mesh is an injective partial map from the
-  dimensions of the tensor to the dimensions of the mesh, specifying which
-  dimensions of the tensor are split across which dimensions of the mesh.  An
-  empty layout means that the tensor is fully replicated across all processors.
 
 * Tensor dimensions and mesh dimensions are named.  The layouts of all tensors
   follow from a set of user-defined layout rules which specify which
@@ -332,32 +324,47 @@ pip install --user .
 pip install tensorflow_datasets
 
 cd mesh/
-MODEL_DIR=gs://noam-mtf/transformer_ende
 DATA_DIR=gs://noam-mtf/data
 TPU=noam-mtf-donut
 
-### TRAIN
+# MODEL HPARAMS AND DIRECTORY  (uncomment one)
+# base model
+MODEL="--model_dir=gs://noam-mtf/transformer_ende"
+# 3B parameter model - only trains with model-parallelism
+# MODEL="--num_layers=16 --d_ff=32768 --d_model=1024 --num_heads=32  --batch_size=8 --model_dir=gs://noam-mtf/ende_3b"
+
+# UNCOMMENT ONE OF THESE
+# Data-parallelism
+LAYOUT="--mesh_shape=all:8 --layout=batch:all"
+# Model-parallelism
+# LAYOUT="--mesh_shape=all:8 --layout=d_ff:all,heads:all,vocab:all"
+# Data-parallelism and Model-Parallelism
+# LAYOUT="--mesh_shape=rows:2,cols:4 --layout=batch:rows,d_ff:cols,heads:cols,vocab:cols"
+
+# TRAIN
 python examples/transformer_standalone.py \
-  --tpu=$TPU --model_dir=$MODEL_DIR --logtostderr \
+  --tpu=$TPU --data_dir=$DATA_DIR $MODEL $LAYOUT --logtostderr \
   --mode=train
 
-### EVAL
+# EVAL
 python examples/transformer_standalone.py \
-  --tpu=$TPU --model_dir=$MODEL_DIR --logtostderr \
+  --tpu=$TPU --data_dir=$DATA_DIR $MODEL $LAYOUT --logtostderr \
   --mode=train
 
-### INFER
+# INFER
 pip3 install sacrebleu
 mkdir ~/input ~/output
-~/.local/bin/sacrebleu -t wmt13 -l en-de --echo src > ~/input/ende.dev
+DECODE_INPUT=/home/$USER/input/ende.dev
+DECODE_OUTPUT=/home/$USER/output/ende.dev.out
+~/.local/bin/sacrebleu -t wmt13 -l en-de --echo src > $DECODE_INPUT
 python examples/transformer_standalone.py \
-  --tpu=$TPU --model_dir=$MODEL_DIR --logtostderr \
-  --input_file=~/input/ende.dev \
-  --output_file=~/output/ende.dev.out \
+  --tpu=$TPU --data_dir=$DATA_DIR $MODEL $LAYOUT --logtostderr \
+  --input_file=$DECODE_INPUT \
+  --output_file=$DECODE_OUTPUT \
   --mode=infer
 
 # Compute BLEU score for dev set
-cat ~/output/ende.dev.out | ~/.local/bin/sacrebleu -t wmt13 -l en-de -tok intl
+cat $DECODE_OUTPUT | ~/.local/bin/sacrebleu -t wmt13 -l en-de -tok intl
 ```
 
 

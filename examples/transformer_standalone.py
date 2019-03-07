@@ -15,9 +15,14 @@
 
 r"""Transformer using Mesh-TensorFlow.
 
-Everything needed to train and infer from a transformer in one file.
-TODO(noam): factor and document this better.
-TODO(noam): add instructions for running on cloud TPU
+Training/Eval/Inference of a transformer machine-translation model.
+
+Data comes from TensorFlow Datasets.
+
+The core transformer model code is in the mesh_tensorflow/transformer/
+directory of this repository.
+
+Instructions for running this on cloud TPU are in the README .
 """
 
 from __future__ import absolute_import
@@ -25,7 +30,7 @@ from __future__ import division
 from __future__ import print_function
 
 import mesh_tensorflow as mtf
-from mesh_tensorflow.examples import transformer_dataset
+import transformer_dataset as transformer_dataset  # local file import
 from mesh_tensorflow.transformer import transformer
 from mesh_tensorflow.transformer import transformer_layers
 import numpy as np
@@ -35,13 +40,10 @@ from tensorflow.contrib.tpu.python.tpu import tpu_estimator
 
 tf.flags.DEFINE_string("model_dir", "/tmp/mnist_model", "Estimator model_dir")
 tf.flags.DEFINE_string("dataset", "wmt_translate_ende/ende_subwords8k_t2t",
-                       "dataset")
-tf.flags.DEFINE_string("data_dir", "", "data_dir for tensorflow_datasets")
-tf.flags.DEFINE_string("inputs_feature", "en", "input feature")
-tf.flags.DEFINE_string("targets_feature", "de", "target feature")
-tf.flags.DEFINE_integer("batch_size", 64,
-                        "Mini-batch size for the training. Note that this "
-                        "is the global batch size and not the per-shard batch.")
+                       "TensorFlow Datasets dataset name")
+tf.flags.DEFINE_string("data_dir", "", "data_dir for TensorFlow Datasets")
+
+# MODEL HYPERPARAMETERS
 tf.flags.DEFINE_integer("max_length", 256,
                         "maximum sequence length (checkpoints depend on this)")
 tf.flags.DEFINE_integer("length", 0,
@@ -51,27 +53,55 @@ tf.flags.DEFINE_integer("d_model", 512, "size of hidden state")
 tf.flags.DEFINE_integer("d_ff", 2048, "size of feed-forward hidden layers")
 tf.flags.DEFINE_integer("d_kv", 128, "size of attention keys/values")
 tf.flags.DEFINE_integer("num_heads", 8, "heads per attention layer")
+
+# DATA TYPES (each should be float32 or bfloat16)
+# master_dtype must be the same between training and eval/inference
+# slice_dtype should be float32 for training (otherwise bad quality)
+tf.flags.DEFINE_string("master_dtype", "float32", "datatype for checkpoints")
+tf.flags.DEFINE_string("slice_dtype", "float32", "datatype for variables")
+tf.flags.DEFINE_string("activation_dtype", "float32",
+                       "datatype for activations")
+
+# TRAINING HYPERPARAMETERS
+tf.flags.DEFINE_integer("batch_size", 64,
+                        "Mini-batch size for the training. Note that this "
+                        "is the global batch size and not the per-shard batch.")
+tf.flags.DEFINE_float("dropout", 0.1, "dropout")
+tf.flags.DEFINE_float("label_smoothing", 0.1, "label smoothing")
 tf.flags.DEFINE_integer(
     "train_steps", 100000, "Total number of training steps.")
 
-tf.flags.DEFINE_integer("iterations_per_loop", 100, "steps per train loop")
-tf.flags.DEFINE_integer("save_checkpoints_steps", 1000, "steps per checkpoint")
-tf.flags.DEFINE_integer("steps_between_evals", 1000,
-                        "# of epochs between evaluations.")
-tf.flags.DEFINE_integer("eval_steps", 0,
-                        "Total number of evaluation steps. If `0`, evaluation "
-                        "after training is skipped.")
+# DISTRIBUTED LAYOUT
+# When running on TPU, make sure that the size of the mesh
+# (the product of all dimension sizes) equals the number of TPU cores.
+#
+# The layout specifies a partial mapping from tensor-dimension-names to
+# mesh-dimension names over which those tensor-dimensions are split.
+#
+# For our Transformer implementation, the reasonable model-dimensions
+# to split are:
+#   - "d_ff" (feed-forward hidden-layer size)
+#   - "heads" (number of attention heads)
+#   - "vocab" (vocabulary size)
+# For a model-parallel layout, all three of these dimensions should be split
+#   across the same mesh dimension - i.e. layout=d_ff:all,heads:all,vocab:all
+# For a data-parallel and model-parallel layout then split the batch along
+#   one mesh dimension and the model dimensions along the other:
+#   mesh_shape=rows:2,cols:4 layout=batch:rows,d_ff:cols,heads:cols,vocab:cols
 tf.flags.DEFINE_string("mesh_shape", "all:8", "mesh shape")
 tf.flags.DEFINE_string("layout", "batch:all", "layout")
-tf.flags.DEFINE_float("label_smoothing", 0.1, "label smoothing")
-tf.flags.DEFINE_float("dropout", 0.1, "dropout")
 
-# Inference params
+# INFERENCE HYPERPARAMETERS
 tf.flags.DEFINE_float("temperature", 0.0, "sampling temperature for inference")
 tf.flags.DEFINE_float("alpha", 0.6, "length adjustment for beam search")
 tf.flags.DEFINE_integer("beam_size", 1, "use a value >1 for beam search")
 tf.flags.DEFINE_string("input_file", "", "Where to read decoding prompts")
 tf.flags.DEFINE_string("output_file", "", "Where to write decoding outputs")
+
+# MISC
+tf.flags.DEFINE_integer("iterations_per_loop", 100, "steps per train loop")
+tf.flags.DEFINE_integer("save_checkpoints_steps", 1000, "steps per checkpoint")
+tf.flags.DEFINE_integer("eval_steps", 10, "Number of evaluation steps.")
 
 tf.flags.DEFINE_string(
     "tpu",
@@ -91,6 +121,9 @@ tf.flags.DEFINE_string(
     default=None,
     help="GCE zone where the Cloud TPU is located in. If not specified, we "
     "will attempt to automatically detect the GCE project from metadata.")
+
+# Enable this to speed up compilation on large clusters.
+tf.flags.DEFINE_boolean("autostack", False, "Internally combine variables")
 
 FLAGS = tf.flags.FLAGS
 
@@ -213,16 +246,21 @@ def my_model_fn(features,
 
   inputs = import_feature(features, mesh, "inputs")
 
+  variable_dtype = mtf.VariableDType(
+      tf.as_dtype(FLAGS.master_dtype),
+      tf.as_dtype(FLAGS.slice_dtype),
+      tf.as_dtype(FLAGS.activation_dtype))
+
   # PREDICT mode
   if mode == tf.estimator.ModeKeys.PREDICT:
     mtf_samples = model.decode(
         inputs,
-        # variable_dtype=None,  # TODO(noam)
+        variable_dtype=variable_dtype,
         beam_size=FLAGS.beam_size,
         alpha=FLAGS.alpha,
         temperature=FLAGS.temperature)
     mtf_samples = mtf.anonymize(mtf_samples)
-    lowering = mtf.Lowering(graph, {mesh: mesh_impl})
+    lowering = mtf.Lowering(graph, {mesh: mesh_impl}, autostack=FLAGS.autostack)
     outputs = lowering.export_to_tf_tensor(mtf_samples)
     ndims = len(outputs.shape.as_list())
     actual_batch_size = tf.shape(features["inputs"])[0]
@@ -245,6 +283,7 @@ def my_model_fn(features,
       targets=targets,
       compute_loss=True,
       mode=mode,
+      variable_dtype=variable_dtype,
       encoder_sequence_id=import_feature(features, mesh, "inputs_segmentation"),
       decoder_sequence_id=import_feature(
           features, mesh, "targets_segmentation"),
@@ -262,7 +301,7 @@ def my_model_fn(features,
     optimizer = mtf.optimize.AdafactorOptimizer()
     update_ops = optimizer.apply_grads(var_grads, graph.trainable_variables)
 
-  lowering = mtf.Lowering(graph, {mesh: mesh_impl})
+  lowering = mtf.Lowering(graph, {mesh: mesh_impl}, autostack=FLAGS.autostack)
 
   tf_loss = lowering.export_to_tf_tensor(loss)
   tf_loss = tf.to_float(tf_loss)
