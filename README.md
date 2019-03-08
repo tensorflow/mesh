@@ -343,12 +343,12 @@ LAYOUT="--mesh_shape=all:8 --layout=batch:all"
 
 # TRAIN
 python examples/transformer_standalone.py \
-  --tpu=$TPU --data_dir=$DATA_DIR $MODEL $LAYOUT --logtostderr \
+  --tpu=$TPU --data_dir=$DATA_DIR $MODEL $LAYOUT \
   --mode=train
 
 # EVAL
 python examples/transformer_standalone.py \
-  --tpu=$TPU --data_dir=$DATA_DIR $MODEL $LAYOUT --logtostderr \
+  --tpu=$TPU --data_dir=$DATA_DIR $MODEL $LAYOUT \
   --mode=train
 
 # INFER
@@ -358,7 +358,7 @@ DECODE_INPUT=/home/$USER/input/ende.dev
 DECODE_OUTPUT=/home/$USER/output/ende.dev.out
 ~/.local/bin/sacrebleu -t wmt13 -l en-de --echo src > $DECODE_INPUT
 python examples/transformer_standalone.py \
-  --tpu=$TPU --data_dir=$DATA_DIR $MODEL $LAYOUT --logtostderr \
+  --tpu=$TPU --data_dir=$DATA_DIR $MODEL $LAYOUT \
   --input_file=$DECODE_INPUT \
   --output_file=$DECODE_OUTPUT \
   --mode=infer

@@ -57,9 +57,9 @@ tf.flags.DEFINE_integer("num_heads", 8, "heads per attention layer")
 # DATA TYPES (each should be float32 or bfloat16)
 # master_dtype must be the same between training and eval/inference
 # slice_dtype should be float32 for training (otherwise bad quality)
-tf.flags.DEFINE_string("master_dtype", "float32", "datatype for checkpoints")
+tf.flags.DEFINE_string("master_dtype", "bfloat16", "datatype for checkpoints")
 tf.flags.DEFINE_string("slice_dtype", "float32", "datatype for variables")
-tf.flags.DEFINE_string("activation_dtype", "float32",
+tf.flags.DEFINE_string("activation_dtype", "bfloat16",
                        "datatype for activations")
 
 # TRAINING HYPERPARAMETERS
@@ -123,7 +123,7 @@ tf.flags.DEFINE_string(
     "will attempt to automatically detect the GCE project from metadata.")
 
 # Enable this to speed up compilation on large clusters.
-tf.flags.DEFINE_boolean("autostack", False, "Internally combine variables")
+tf.flags.DEFINE_boolean("autostack", True, "Internally combine variables")
 
 FLAGS = tf.flags.FLAGS
 
@@ -262,15 +262,9 @@ def my_model_fn(features,
     mtf_samples = mtf.anonymize(mtf_samples)
     lowering = mtf.Lowering(graph, {mesh: mesh_impl}, autostack=FLAGS.autostack)
     outputs = lowering.export_to_tf_tensor(mtf_samples)
-    ndims = len(outputs.shape.as_list())
-    actual_batch_size = tf.shape(features["inputs"])[0]
-    outputs = tf.slice(
-        outputs, [0] * ndims, [actual_batch_size] + [-1] * (ndims - 1))
     predictions = {
         "outputs": outputs
     }
-    if features.get("inputs") is not None:
-      predictions["inputs"] = features["inputs"]
     return tpu_estimator.TPUEstimatorSpec(
         mode=tf.estimator.ModeKeys.PREDICT,
         predictions=predictions,
@@ -388,26 +382,43 @@ def decode_from_file(estimator):
     all_input_ids.append(ids)
   # pad to make an integral number of batches
   all_input_ids.extend([all_input_ids[0]] * (-n % FLAGS.batch_size))
+  padded_n = len(all_input_ids)
   all_input_ids = np.array(all_input_ids, dtype=np.int32)
   def input_fn(params):
     del params
     dataset = tf.data.Dataset.from_tensor_slices({"inputs": all_input_ids})
     dataset = dataset.batch(FLAGS.batch_size, drop_remainder=True)
     return dataset
-  # decodes = []
   result_iter = estimator.predict(input_fn)
   targets_encoder = transformer_dataset.targets_encoder(FLAGS.dataset)
   output_file = tf.gfile.Open(FLAGS.output_file, "w")
   vocab_size = transformer_dataset.targets_vocab_size(FLAGS.dataset)
+  decodes = []
   for i, result in enumerate(result_iter):
-    if i >= n:
-      break
     output_ids = transformer_dataset.clean_output(
         list(result["outputs"]), vocab_size)
     output_string = targets_encoder.decode(output_ids)
-    tf.logging.info(inputs[i])
-    tf.logging.info(output_string)
-    output_file.write(output_string)
+    decodes.append(output_string)
+    if i < 3:
+      # LOG THE FIRST FEW DECODES
+      tf.logging.info(inputs[i])
+      tf.logging.info(output_string)
+  # BUG WORKAROUND - on TF1.13 and earlier, the output for each batch is
+  # repeated a number of times equal to the number of cores.
+  num_cores = mtf.convert_to_shape(FLAGS.mesh_shape).size
+  if len(decodes) == padded_n:
+    tf.logging.info("number of decodes matches number of inputs")
+  elif len(decodes) == padded_n * num_cores:
+    tf.logging.info("output is repeated num_cores times - removing extras")
+    def keep(i):
+      return i % (FLAGS.batch_size * num_cores) < FLAGS.batch_size
+    decodes = [d for i, d in enumerate(decodes) if keep(i)]
+  else:
+    raise ValueError("unexpected number of outputs")
+  output_file = tf.gfile.Open(FLAGS.output_file, "w")
+  decodes = decodes[:n]
+  for d in decodes:
+    output_file.write(d)
     output_file.write("\n")
   output_file.close()
 
