@@ -58,9 +58,14 @@ tf.flags.DEFINE_integer("num_heads", 8, "heads per attention layer")
 # master_dtype must be the same between training and eval/inference
 # slice_dtype should be float32 for training (otherwise bad quality)
 tf.flags.DEFINE_string("master_dtype", "bfloat16", "datatype for checkpoints")
-tf.flags.DEFINE_string("slice_dtype", "float32", "datatype for variables")
-tf.flags.DEFINE_string("activation_dtype", "bfloat16",
-                       "datatype for activations")
+tf.flags.DEFINE_string(
+    "slice_dtype", "",
+    "datatype for variables in memory. "
+    "Defaults to float32 during training and on non-TPU. "
+    "Defaults to bfloat16 during non-training on TPU. ")
+tf.flags.DEFINE_string(
+    "activation_dtype", "",
+    "datatype for activations.  Defaults to bfloat16 on TPU else float32")
 
 # TRAINING HYPERPARAMETERS
 tf.flags.DEFINE_integer("batch_size", 64,
@@ -246,10 +251,22 @@ def my_model_fn(features,
 
   inputs = import_feature(features, mesh, "inputs")
 
-  variable_dtype = mtf.VariableDType(
-      tf.as_dtype(FLAGS.master_dtype),
-      tf.as_dtype(FLAGS.slice_dtype),
-      tf.as_dtype(FLAGS.activation_dtype))
+  # Data-types used for variables and activations
+  # See comments in the FLAGS
+  master_dtype = tf.as_dtype(FLAGS.master_dtype)
+  if FLAGS.slice_dtype:
+    slice_dtype = tf.as_dtype(FLAGS.slice_dtype)
+  elif not FLAGS.tpu or FLAGS.mode == "train":
+    slice_dtype = tf.float32
+  else:
+    slice_dtype = tf.bfloat16
+  if FLAGS.activation_dtype:
+    activation_dtype = tf.as_dtype(FLAGS.activation_dtype)
+  else:
+    activation_dtype = tf.bfloat16 if FLAGS.tpu else tf.float32
+  variable_dtype = mtf.VariableDType(master_dtype=master_dtype,
+                                     slice_dtype=slice_dtype,
+                                     activation_dtype=activation_dtype)
 
   # PREDICT mode
   if mode == tf.estimator.ModeKeys.PREDICT:

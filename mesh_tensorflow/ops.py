@@ -602,6 +602,8 @@ class Lowering(object):
       autostack: a boolean.  If True, then the graph gets rewritten to
         reduce the number of variables (see rewrite_stack_variables()).
         This is a helpful performance optimization for large meshes.
+        For more fine-grained control, you can call
+        graph.rewrite_stack_variables() yourself before creating the Lowering.
     """
     # tf.logging.info("LOWERING GRAPH:\n%s" % graph.to_string)
     self.mesh_to_impl = mesh_to_impl   # {Mesh: MeshImpl}
@@ -696,8 +698,20 @@ class Lowering(object):
           % (correct_shape, actual_shape))
 
   def autostack(self):
-    """Rewrite graph to stack similar variables (performance optimization)."""
-    self.graph.rewrite_stack_variables(mesh_to_impl=self.mesh_to_impl)
+    """Rewrite graph to combine similarly-shaped variables (faster startup)."""
+    num_slices = 0
+    for v in self.graph.all_variables:
+      num_slices += self.mesh_to_impl[v.mesh].size
+    if num_slices >= 2 ** 16:
+      # Startup times are slow with lots of variable slices.
+      # Perform more aggressive stacking
+      max_combined_slice_size = 2 ** 25
+    else:
+      # Stacking hurts memory utilization - only stack small variables.
+      max_combined_slice_size = 2 ** 16
+    self.graph.rewrite_stack_variables(
+        mesh_to_impl=self.mesh_to_impl,
+        max_combined_slice_size=max_combined_slice_size)
 
 
 class Mesh(object):

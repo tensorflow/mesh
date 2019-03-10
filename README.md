@@ -19,6 +19,9 @@ computation graph over your hardware/processors. For example: "Split the batch
 over rows of processors and split the units in the hidden layer across columns
 of processors." Mesh TensorFlow is implemented as a layer over TensorFlow.
 
+Watch our [YouTube video](https://www.youtube.com/watch?v=HgGyWS40g-g).
+
+
 ## Do I need Mesh TensorFlow?
 
 If you just want data-parallel training (batch-splitting), then you do not need
@@ -329,9 +332,9 @@ TPU=noam-mtf-donut
 
 # MODEL HPARAMS AND DIRECTORY  (uncomment one)
 # base model
-MODEL="--model_dir=gs://noam-mtf/transformer_ende"
-# 3B parameter model - only trains with model-parallelism
-# MODEL="--num_layers=16 --d_ff=32768 --d_model=1024 --num_heads=32  --batch_size=8 --model_dir=gs://noam-mtf/ende_3b"
+MODEL="--model_dir=gs://noam-mtf/ende_base"
+# 5B parameters (too big for this dataset, only trains with model-parallelism)
+# MODEL="--num_layers=16 --d_ff=65536 --d_model=1024 --num_heads=32  --batch_size=8 --model_dir=gs://noam-mtf/ende_5b"
 
 # UNCOMMENT ONE OF THESE
 # Data-parallelism
