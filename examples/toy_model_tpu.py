@@ -47,8 +47,6 @@ tf.flags.DEFINE_integer('iterations', 100,
                         'Number of iterations per training loop.')
 tf.flags.DEFINE_integer('train_steps', 10000, 'max steps')
 tf.flags.DEFINE_integer('steps_per_checkpoint', 200, 'steps_per_checkpoint')
-tf.flags.DEFINE_string('master', 'local',
-                       'BNS name of the TensorFlow master to use.')
 tf.flags.DEFINE_string(
     'model_dir',
     default='',
