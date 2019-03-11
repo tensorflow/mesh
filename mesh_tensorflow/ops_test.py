@@ -25,6 +25,13 @@ import mesh_tensorflow as mtf
 import tensorflow as tf
 
 
+class LaidOutTensor(object):
+  """LaidOutTensor (see placement_mesh_impl.py, simd_mesh_impl.py) for tests."""
+
+  def __init__(self, tensor_list):
+    self.tensor_list = tensor_list
+
+
 class MeshTensorFlowTest(parameterized.TestCase, tf.test.TestCase):
 
   @parameterized.parameters(
@@ -182,6 +189,288 @@ class MeshTensorFlowTest(parameterized.TestCase, tf.test.TestCase):
     self.assertEqual(mesh_impl.tensor_dimension_to_mesh_axis(heads), 1)
     self.assertEqual(mesh_impl.tensor_layout(mtf.Shape([batch, length, d_ff])),
                      mtf.TensorLayout([0, None, 1]))
+
+
+class OperationSplittabilityTest(tf.test.TestCase):
+
+  def setUp(self):
+    self.graph = mtf.Graph()
+    self.mesh = mtf.Mesh(self.graph, "my_mesh")
+
+    self.a_dim = mtf.Dimension("a", 5)
+    self.b_dim = mtf.Dimension("b", 10)
+    self.c_dim = mtf.Dimension("c", 15)
+
+    self.ab_shape = mtf.Shape([self.a_dim, self.b_dim])
+    self.x = mtf.zeros(self.mesh, self.ab_shape)
+
+    self.batch_dim = mtf.Dimension("batch", 100)
+    self.grid_h_dim = mtf.Dimension("grid_h", 10)
+    self.grid_w_dim = mtf.Dimension("grid_w", 10)
+    self.filter_h_dim = mtf.Dimension("filter_h", 5)
+    self.filter_w_dim = mtf.Dimension("filter_w", 5)
+    self.in_dim = mtf.Dimension("in", 10)
+    self.out_dim = mtf.Dimension("out", 10)
+
+  def testOperation(self):
+    operation = mtf.Operation([self.x], name="operation")
+
+    # Everything is splittable.
+    self.assertEqual(
+        operation._initialize_all_dimensions_as_splittable(),
+        (frozenset(["a", "b"]), frozenset()))
+
+    # Everything is unsplittable.
+    self.assertEqual(
+        operation._initialize_splittable_and_unsplittable_dims("unsplittable"),
+        (frozenset(), frozenset(["a", "b"])))
+
+    # Everything is unsplittable except dimension "b".
+    self.assertEqual(
+        operation._initialize_splittable_and_unsplittable_dims(
+            "unsplittable", ["b"]),
+        (frozenset(["b"]), frozenset(["a"])))
+
+    self.assertRaises(
+        ValueError,
+        operation._initialize_splittable_and_unsplittable_dims,
+        "invalid")
+
+  def testSlicewiseOperationAndGenericGradOperation(self):
+    slicewise_operation = mtf.SlicewiseOperation(
+        tf.exp,
+        [self.x],
+        [self.x.shape],
+        [self.x.dtype],
+        splittable_dims=[self.a_dim],  # pretend only dim "a" can be split.
+        grad_function=lambda op, dy: [dy * op.outputs[0]],
+        name="component-wise exp")
+
+    self.assertEqual(slicewise_operation.splittable_dims, frozenset(["a"]))
+    self.assertEqual(slicewise_operation.unsplittable_dims, frozenset(["b"]))
+
+    generic_grad_operation = mtf.GenericGradOperation(slicewise_operation,
+                                                      [self.x])
+
+    self.assertEqual(generic_grad_operation.splittable_dims,
+                     frozenset(["a", "b"]))
+    self.assertEqual(generic_grad_operation.unsplittable_dims,
+                     frozenset())
+
+  def testScalarMultiplyOperationandScalarAddOperation(self):
+    scalar = 2.0
+    scalar_multiply_operation = mtf.ScalarMultiplyOperation(self.x, scalar)
+    self.assertEqual(scalar_multiply_operation.splittable_dims,
+                     frozenset(["a", "b"]))
+    self.assertEqual(scalar_multiply_operation.unsplittable_dims, frozenset())
+
+    scalar_add_operation = mtf.ScalarAddOperation(self.x, scalar)
+    self.assertEqual(scalar_add_operation.splittable_dims,
+                     frozenset(["a", "b"]))
+    self.assertEqual(scalar_add_operation.unsplittable_dims, frozenset())
+
+  def testBinaryOpWithBroadcasting(self):
+    x2 = mtf.zeros(self.mesh, mtf.Shape([self.a_dim, self.c_dim]))
+    binary_op_with_broadcasting = mtf.BinaryOpWithBroadcasting(
+        tf.less,
+        self.x,
+        x2,
+        mtf.Shape([self.a_dim, self.b_dim, self.c_dim]),
+        tf.bool,
+        name="less with broadcasting")
+
+    self.assertEqual(binary_op_with_broadcasting.splittable_dims,
+                     frozenset(["a", "b", "c"]))
+    self.assertEqual(binary_op_with_broadcasting.unsplittable_dims, frozenset())
+
+  def testBroadcastOperation(self):
+    broadcast_operation = mtf.BroadcastOperation(
+        self.x, mtf.Shape([self.b_dim, self.c_dim, self.a_dim]))
+    self.assertEqual(broadcast_operation.splittable_dims,
+                     frozenset(["a", "b", "c"]))
+    self.assertEqual(broadcast_operation.unsplittable_dims, frozenset())
+
+  def testReduceOperation(self):
+    reduce_operation = mtf.ReduceOperation(self.x, mtf.Shape([self.b_dim]),
+                                           "sum")
+    self.assertEqual(reduce_operation.splittable_dims, frozenset(["a", "b"]))
+    self.assertEqual(reduce_operation.unsplittable_dims, frozenset())
+
+  def testConcatOperation(self):
+    concat_dim1 = mtf.Dimension("concat", 5)
+    concat_dim2 = mtf.Dimension("concat", 7)
+
+    x1 = mtf.zeros(self.mesh, mtf.Shape([self.a_dim, self.b_dim, concat_dim1]))
+    x2 = mtf.zeros(self.mesh, mtf.Shape([self.a_dim, self.b_dim, concat_dim2]))
+
+    concat_operation = mtf.ConcatOperation([x1, x2], "concat")
+    self.assertEqual(concat_operation.splittable_dims, frozenset(["a", "b"]))
+    self.assertEqual(concat_operation.unsplittable_dims, frozenset(["concat"]))
+
+  def testSplitOperation(self):
+    split_operation = mtf.SplitOperation(self.x, self.b_dim, [3, 7])
+    self.assertEqual(split_operation.splittable_dims, frozenset(["a"]))
+    self.assertEqual(split_operation.unsplittable_dims, frozenset(["b"]))
+
+  def testStackOperation(self):
+    stack_operation = mtf.StackOperation([self.x, self.x], "stack", axis=0)
+    self.assertEqual(stack_operation.splittable_dims, frozenset(["a", "b"]))
+    self.assertEqual(stack_operation.unsplittable_dims, frozenset(["stack"]))
+
+  def testUnstackOperation(self):
+    unstack_operation = mtf.UnstackOperation(self.x, self.b_dim)
+    self.assertEqual(unstack_operation.splittable_dims, frozenset(["a"]))
+    self.assertEqual(unstack_operation.unsplittable_dims, frozenset(["b"]))
+
+  def testEinsumOperation(self):
+    x2 = mtf.zeros(self.mesh, mtf.Shape([self.a_dim, self.c_dim]))
+    einsum_operation = mtf.EinsumOperation([self.x, x2],
+                                           mtf.Shape([self.b_dim, self.c_dim]))
+    self.assertEqual(einsum_operation.splittable_dims,
+                     frozenset(["a", "b", "c"]))
+    self.assertEqual(einsum_operation.unsplittable_dims, frozenset())
+
+  def testConv2dOperations(self):
+    conv_input = mtf.zeros(
+        self.mesh,
+        mtf.Shape([self.batch_dim, self.grid_h_dim, self.grid_w_dim,
+                   self.in_dim]))
+    conv_filter = mtf.zeros(
+        self.mesh,
+        mtf.Shape([self.filter_h_dim, self.filter_w_dim, self.in_dim,
+                   self.out_dim]))
+    strides = [1, 1, 1, 1]
+    padding = "SAME"
+
+    conv2d_operation = mtf.Conv2dOperation(conv_input, conv_filter, strides,
+                                           padding)
+    self.assertEqual(conv2d_operation.splittable_dims,
+                     frozenset(["batch", "in", "out"]))
+    self.assertEqual(conv2d_operation.unsplittable_dims,
+                     frozenset(["filter_h", "filter_w", "grid_h", "grid_w"]))
+
+    output = conv2d_operation.outputs[0]
+    d_output = mtf.zeros(self.mesh, output.shape)
+
+    conv2d_backprop_input_operation = mtf.Conv2dBackpropInputOperation(
+        conv_input.shape, conv_filter, d_output, strides, padding)
+    self.assertEqual(conv2d_backprop_input_operation.splittable_dims,
+                     frozenset(["batch", "filter_h", "filter_w", "grid_h",
+                                "grid_w", "in", "out"]))
+    self.assertEqual(conv2d_backprop_input_operation.unsplittable_dims,
+                     frozenset())
+
+    conv2d_backprop_filter_operation = mtf.Conv2dBackpropFilterOperation(
+        conv_input, conv_filter.shape, d_output, strides, padding)
+    self.assertEqual(conv2d_backprop_filter_operation.splittable_dims,
+                     frozenset(["batch", "filter_h", "filter_w", "grid_h",
+                                "grid_w", "in", "out"]))
+    self.assertEqual(conv2d_backprop_filter_operation.unsplittable_dims,
+                     frozenset())
+
+  def testShiftOperation(self):
+    shift_operation = mtf.ShiftOperation(self.x, -5, self.b_dim, wrap=True)
+    self.assertEqual(shift_operation.splittable_dims, frozenset(["a", "b"]))
+    self.assertEqual(shift_operation.unsplittable_dims, frozenset())
+
+  def testSliceOperation(self):
+    slice_operation = mtf.SliceOperation(self.x, begin=3, size=4,
+                                         slice_dim_name="b")
+    self.assertEqual(slice_operation.splittable_dims, frozenset(["a"]))
+    self.assertEqual(slice_operation.unsplittable_dims, frozenset(["b"]))
+
+  def testPadOperation(self):
+    pad_operation = mtf.PadOperation(self.x, [7, 2], "a")
+    self.assertEqual(pad_operation.splittable_dims, frozenset(["b"]))
+    self.assertEqual(pad_operation.unsplittable_dims, frozenset(["a"]))
+
+  def testOneHotOperation(self):
+    x = mtf.zeros(self.mesh, self.ab_shape, dtype=tf.int32)
+    one_hot_operation = mtf.OneHotOperation(x, self.c_dim, 1, 0, dtype=tf.bool)
+    self.assertEqual(one_hot_operation.splittable_dims,
+                     frozenset(["a", "b", "c"]))
+    self.assertEqual(one_hot_operation.unsplittable_dims, frozenset())
+
+  def testImportOperation(self):
+    tf_x = tf.zeros([5, 10])
+    import_operation = mtf.ImportOperation(self.mesh, tf_x, self.ab_shape)
+    self.assertEqual(import_operation.splittable_dims, frozenset(["a", "b"]))
+    self.assertEqual(import_operation.unsplittable_dims, frozenset())
+
+  def testImportLaidOutTensorOperation(self):
+    laid_out_x = LaidOutTensor([self.x])
+
+    import_laid_out_tensor_operation = mtf.ImportLaidOutTensorOperation(
+        self.mesh, laid_out_x, self.ab_shape)
+    self.assertEqual(import_laid_out_tensor_operation.splittable_dims,
+                     frozenset())
+    self.assertEqual(import_laid_out_tensor_operation.unsplittable_dims,
+                     frozenset(["a", "b"]))
+
+  def testVariableOperations(self):
+    var = mtf.Variable(self.mesh,
+                       "test_variable",
+                       self.ab_shape,
+                       mtf.VariableDType(tf.int32, tf.int32, tf.int32),
+                       initializer=tf.zeros_initializer(),
+                       trainable=True)
+
+    self.assertEqual(var.splittable_dims, frozenset(["a", "b"]))
+    self.assertEqual(var.unsplittable_dims, frozenset())
+
+    read_variable = mtf.ReadVariable(var)
+    self.assertEqual(read_variable.splittable_dims, frozenset(["a", "b"]))
+    self.assertEqual(read_variable.unsplittable_dims, frozenset())
+
+    assign = mtf.Assign([var], [self.x])
+    self.assertEqual(assign.splittable_dims, frozenset(["a", "b"]))
+    self.assertEqual(assign.unsplittable_dims, frozenset())
+
+    depend = mtf.Depend(read_variable.outputs[0], [assign])
+    self.assertEqual(depend.splittable_dims, frozenset(["a", "b"]))
+    self.assertEqual(depend.unsplittable_dims, frozenset())
+
+  def testConstant(self):
+    constant = mtf.Constant(self.mesh, 0, self.ab_shape, dtype=tf.int32)
+    self.assertEqual(constant.splittable_dims, frozenset(["a", "b"]))
+    self.assertEqual(constant.unsplittable_dims, frozenset())
+
+  def testStopGradient(self):
+    stop_gradient = mtf.StopGradient(self.x)
+    self.assertEqual(stop_gradient.splittable_dims, frozenset(["a", "b"]))
+    self.assertEqual(stop_gradient.unsplittable_dims, frozenset())
+
+  def testPrintOperation(self):
+    print_operation = mtf.PrintOperation(self.x, [self.x], "Tensor x: ")
+    self.assertEqual(print_operation.splittable_dims, frozenset(["a", "b"]))
+    self.assertEqual(print_operation.unsplittable_dims, frozenset())
+
+  def testReshapeOperation(self):
+    reshape_operation = mtf.ReshapeOperation(
+        self.x, mtf.Shape([mtf.Dimension("x", 25), mtf.Dimension("y", 2)]))
+    self.assertEqual(reshape_operation.splittable_dims,
+                     frozenset(["a", "b", "x", "y"]))
+    self.assertEqual(reshape_operation.unsplittable_dims, frozenset())
+
+  def testRandomOperation(self):
+    random_operation = mtf.RandomOperation(self.mesh, self.ab_shape,
+                                           tf.random_uniform)
+    self.assertEqual(random_operation.splittable_dims, frozenset(["a", "b"]))
+    self.assertEqual(random_operation.unsplittable_dims, frozenset())
+
+  def testWhileLoopOperation(self):
+    # This test case implements the following:
+    # for i in range(10):
+    #   x = x * 2
+    i = mtf.constant(self.mesh, 0, mtf.Shape([]))
+    cond_fn = lambda i, x: mtf.less(i, 10)
+    body_fn = lambda i, x: [mtf.add(i, 1), mtf.multiply(x, 2)]
+
+    while_loop_operation = mtf.WhileLoopOperation(cond_fn, body_fn, [i, self.x])
+    self.assertEqual(while_loop_operation.splittable_dims,
+                     frozenset(["a", "b"]))
+    self.assertEqual(while_loop_operation.unsplittable_dims, frozenset())
+
 
 if __name__ == "__main__":
   tf.test.main()

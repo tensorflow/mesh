@@ -20,6 +20,7 @@ from __future__ import print_function
 
 import collections
 import functools
+import itertools
 import operator
 import os
 import re
@@ -1362,6 +1363,16 @@ class Operation(object):
   """A Distributed Operation."""
 
   def __init__(self, inputs, mesh=None, name=None):
+    """Initializer.
+
+    Args:
+      inputs: a list of Tensor
+      mesh: an optional Mesh (if unspecified, will be inferred from first input)
+      name: a string, which will get uniquified (in TensorFlow style)
+
+    Raises:
+      ValueError: mesh was not provided and there were no inputs to infer from.
+    """
     if mesh is None:
       if not inputs:
         raise ValueError("mesh must be specified if no inputs")
@@ -1369,6 +1380,9 @@ class Operation(object):
     self._inputs = inputs
     self._outputs = []
     self._mesh = mesh
+    # In a default operation, all dimensions are splittable.
+    self._splittable_dims, self._unsplittable_dims = (
+        self._initialize_all_dimensions_as_splittable())
     assert name is not None
     self._name = mesh.graph.unique_name(name)
     mesh.graph.operations.append(self)
@@ -1394,6 +1408,16 @@ class Operation(object):
     return self._outputs[:]
 
   @property
+  def splittable_dims(self):
+    """Frozenset of the names of dims safe to split when lowering this op."""
+    return self._splittable_dims
+
+  @property
+  def unsplittable_dims(self):
+    """Frozenset of the names of dims unsafe to split when lowering this op."""
+    return self._unsplittable_dims
+
+  @property
   def to_string(self):
     return "%s[Inputs=(%s) Outputs=(%s)]" % (
         type(self).__name__,
@@ -1411,6 +1435,50 @@ class Operation(object):
 
   def lower(self, lowering):
     raise NotImplementedError("Lower not implemented")
+
+  def _initialize_splittable_and_unsplittable_dims(
+      self, default_splittability, exception_dims_iterable=None):
+    """Initializer for splittable_dims and unsplittable_dims.
+
+    Helper method to categorize all dimensions in the input/output tensors as
+    either splittable or unsplittable.
+
+    Args:
+      default_splittability: a string which is either "splittable" or
+        "unsplittable".
+      exception_dims_iterable: an optional iterable of names of dimensions
+        which are exceptions to the default splittability.
+
+    Returns:
+      splittable_dims and unsplittable_dims, two frozensets of names of
+        dimensions (strings)
+
+    Raises:
+      ValueError: default_splittability is not one of "splittable" or
+        "unsplittable".
+    """
+    default_dims = set()
+    exception_dims = set()
+    if exception_dims_iterable:
+      exception_dims.update(exception_dims_iterable)
+
+    for t in itertools.chain(self.inputs, self.outputs):
+      for dim_name in t.shape.dimension_names:
+        if dim_name not in exception_dims:
+          default_dims.add(dim_name)
+
+    if default_splittability == "splittable":
+      return frozenset(default_dims), frozenset(exception_dims)
+    elif default_splittability == "unsplittable":
+      return frozenset(exception_dims), frozenset(default_dims)
+    else:
+      raise ValueError("default_splittability should be either \"splittable\" "
+                       "or \"unsplittable\" but was {}"
+                       .format(default_splittability))
+
+  def _initialize_all_dimensions_as_splittable(self):
+    """Helper init for the most common case: all dimensions may be split."""
+    return self._initialize_splittable_and_unsplittable_dims("splittable")
 
 
 class SlicewiseOperation(Operation):
@@ -1456,7 +1524,9 @@ class SlicewiseOperation(Operation):
     self._tf_fn = tf_fn
     self._outputs = [Tensor(self, shape, dtype) for (shape, dtype)
                      in zip(output_shapes, output_dtypes)]
-    self._splittable_dims = splittable_dims
+    self._splittable_dims, self._unsplittable_dims = (
+        self._initialize_splittable_and_unsplittable_dims(
+            "unsplittable", [dim.name for dim in splittable_dims]))
     self._grad_function = grad_function
 
   @property
@@ -1476,7 +1546,7 @@ class SlicewiseOperation(Operation):
     for t in self.inputs + self.outputs:
       layout = mesh_impl.tensor_layout(t)
       for d, mesh_axis in zip(t.shape.dims, layout.tensor_axis_to_mesh_axis):
-        if mesh_axis is not None and d not in self._splittable_dims:
+        if mesh_axis is not None and d.name not in self._splittable_dims:
           raise ValueError("dimension %s is not declared as splittable" % d)
     values = mesh_impl.slicewise(
         self._tf_fn, *[lowering.tensors[x] for x in self.inputs])
@@ -1737,6 +1807,10 @@ class BinaryOpWithBroadcasting(Operation):
     self._outputs = [Tensor(self, output_shape, output_dtype)]
     self._tf_fn = tf_fn
 
+    # Rerun to take the new output into account.
+    self._splittable_dims, self._unsplittable_dims = (
+        self._initialize_all_dimensions_as_splittable())
+
   def gradient(self, unused_grad_ys):
     raise ValueError("Gradient not implememnted")
 
@@ -1918,6 +1992,9 @@ class BroadcastOperation(Operation):
   def __init__(self, x, output_shape, name=None):
     super(BroadcastOperation, self).__init__([x], name=name or "broadcast")
     self._outputs = [Tensor(self, output_shape, x.dtype)]
+    # Rerun to take the new output into account.
+    self._splittable_dims, self._unsplittable_dims = (
+        self._initialize_all_dimensions_as_splittable())
 
   def gradient(self, grad_ys):
     return [reduce_sum(grad_ys[0], output_shape=self.inputs[0].shape)]
@@ -2038,6 +2115,10 @@ class ConcatOperation(Operation):
         Tensor(self, xs[0].shape.resize_dimension(concat_dim_name, output_size),
                xs[0].dtype)]
 
+    self._splittable_dims, self._unsplittable_dims = (
+        self._initialize_splittable_and_unsplittable_dims(
+            "splittable", [concat_dim_name]))
+
   def gradient(self, grad_ys):
     dy = grad_ys[0]
     return split(dy, self.outputs[0].shape.dims[self._axis], self._input_sizes)
@@ -2101,6 +2182,10 @@ class SplitOperation(Operation):
                x.dtype, index=i)
         for i, output_size in enumerate(self._output_sizes)]
 
+    self._splittable_dims, self._unsplittable_dims = (
+        self._initialize_splittable_and_unsplittable_dims(
+            "splittable", [split_dim.name]))
+
   def gradient(self, grad_ys):
     return [concat(grad_ys, self._split_dim.name)]
 
@@ -2149,6 +2234,10 @@ class StackOperation(Operation):
         input_shape.dims[:axis] + [self._new_dim]+ input_shape.dims[axis:])
     self._outputs = [Tensor(self, output_shape, xs[0].dtype)]
 
+    self._splittable_dims, self._unsplittable_dims = (
+        self._initialize_splittable_and_unsplittable_dims(
+            "splittable", [dim_name]))
+
   def gradient(self, grad_ys):
     return unstack(grad_ys[0], self._new_dim)
 
@@ -2189,6 +2278,10 @@ class UnstackOperation(Operation):
     output_shape = x.shape - dim
     self._outputs = [
         Tensor(self, output_shape, x.dtype, index=i) for i in xrange(dim.size)]
+
+    self._splittable_dims, self._unsplittable_dims = (
+        self._initialize_splittable_and_unsplittable_dims(
+            "splittable", [dim.name]))
 
   def gradient(self, grad_ys):
     return [stack(grad_ys, self._dim.name, self._axis)]
@@ -2376,6 +2469,12 @@ class Conv2dOperation(Operation):
         self._batch_dims + [self._out_h_dim, self._out_w_dim, self._out_dim])
     self._outputs = [Tensor(self, output_shape, conv_input.dtype)]
 
+    unsplittable_dims = [self._in_h_dim, self._in_w_dim, self._fh_dim,
+                         self._fw_dim]
+    self._splittable_dims, self._unsplittable_dims = (
+        self._initialize_splittable_and_unsplittable_dims(
+            "splittable", [dim.name for dim in unsplittable_dims]))
+
   def gradient(self, grad_ys):
     dy = grad_ys[0]
     conv_input, conv_filter = self.inputs
@@ -2441,6 +2540,10 @@ class Conv2dBackpropInputOperation(Operation):
     self._input_shape = input_shape
     self._outputs = [Tensor(self, input_shape, dy.dtype)]
 
+    # Rerun to take the new output into account.
+    self._splittable_dims, self._unsplittable_dims = (
+        self._initialize_all_dimensions_as_splittable())
+
   def lower(self, lowering):
     mesh_impl = lowering.mesh_impl(self)
     dy, conv_filter = self.inputs
@@ -2491,6 +2594,10 @@ class Conv2dBackpropFilterOperation(Operation):
     self._strides = strides
     self._filter_shape = filter_shape
     self._outputs = [Tensor(self, filter_shape, dy.dtype)]
+
+    # Rerun to take the new output into account.
+    self._splittable_dims, self._unsplittable_dims = (
+        self._initialize_all_dimensions_as_splittable())
 
   def lower(self, lowering):
     mesh_impl = lowering.mesh_impl(self)
@@ -2668,6 +2775,9 @@ class SliceOperation(Operation):
     output_shape = Shape(
         input_shape.dims[:axis] + [self._slice_dim] + input_shape.dims[axis+1:])
     self._outputs = [Tensor(self, output_shape, x.dtype)]
+    self._splittable_dims, self._unsplittable_dims = (
+        self._initialize_splittable_and_unsplittable_dims(
+            "splittable", [slice_dim_name]))
 
   def gradient(self, grad_ys):
     actual_size = self._inputs[0].shape.dims[self._axis].size
@@ -2716,6 +2826,9 @@ class PadOperation(Operation):
         input_shape.dims[:axis] +
         [self._output_dim] + input_shape.dims[axis+1:])
     self._outputs = [Tensor(self, output_shape, x.dtype)]
+    self._splittable_dims, self._unsplittable_dims = (
+        self._initialize_splittable_and_unsplittable_dims(
+            "splittable", [pad_dim_name]))
 
   def gradient(self, grad_ys):
     slice_dim_name = self._output_dim.name
@@ -2754,6 +2867,10 @@ class OneHotOperation(Operation):
     output_shape = Shape(indices.shape.dims + [output_dim])
     self._outputs = [Tensor(self, output_shape, dtype)]
 
+    # Rerun to take the new output into account.
+    self._splittable_dims, self._unsplittable_dims = (
+        self._initialize_all_dimensions_as_splittable())
+
   def lower(self, lowering):
     mesh_impl = lowering.mesh_impl(self)
     indices = self.inputs[0]
@@ -2790,6 +2907,10 @@ class ImportOperation(Operation):
     self._outputs = [Tensor(self, shape, tf_tensor.dtype)]
     self._tf_tensor = tf_tensor
 
+    # Rerun to take the new output into account.
+    self._splittable_dims, self._unsplittable_dims = (
+        self._initialize_all_dimensions_as_splittable())
+
   def lower(self, lowering):
     mesh_impl = lowering.mesh_impl(self)
     lowering.set_tensor_lowering(
@@ -2807,6 +2928,11 @@ class ImportLaidOutTensorOperation(Operation):
     dtype = laid_out_tensor.tensor_list[0].dtype
     self._outputs = [Tensor(self, shape, dtype)]
     self._laid_out_tensor = laid_out_tensor
+
+    # For this operation, it doesn't make sense to talk about the splittability
+    # of dimensions, because laid_out_tensor depends on a particular layout.
+    self._splittable_dims, self._unsplittable_dims = (
+        self._initialize_splittable_and_unsplittable_dims("unsplittable"))
 
   def lower(self, lowering):
     lowering.set_tensor_lowering(self.outputs[0], self._laid_out_tensor)
@@ -2938,6 +3064,11 @@ class Variable(Operation):
             initializer=initializer, **kwargs)
       self._name = self._master.name[:self._master.name.find(":")]
     self._outputs = [Tensor(self, shape, dtype.activation_dtype)]
+
+    # Rerun to take the new output into account.
+    self._splittable_dims, self._unsplittable_dims = (
+        self._initialize_all_dimensions_as_splittable())
+
     self.graph.all_variables.append(self)
     if trainable:
       self.graph.trainable_variables.append(self)
@@ -3021,6 +3152,10 @@ class StackedVariable(Variable):
     self._name = name
     self._masters = [v.get_master() for v in vs]
     self._original_names = [v.name for v in vs]
+
+    # Rerun to take the new output into account.
+    self._splittable_dims, self._unsplittable_dims = (
+        self._initialize_all_dimensions_as_splittable())
 
   @property
   def original_names(self):
@@ -3222,6 +3357,9 @@ class Constant(Operation):
     super(Constant, self).__init__([], mesh, name=name or "constant")
     self._outputs = [Tensor(self, shape, dtype)]
     self._value = value
+    # Rerun to take the new output into account.
+    self._splittable_dims, self._unsplittable_dims = (
+        self._initialize_all_dimensions_as_splittable())
 
   def lower(self, lowering):
     mesh_impl = lowering.mesh_impl(self)
@@ -3315,6 +3453,10 @@ class ReshapeOperation(Operation):
       raise ValueError("Cannot reshape Tensor %s to shape %s - sizes differ."
                        % (x, new_shape))
     self._outputs = [Tensor(self, new_shape, x.dtype)]
+
+    # Rerun to take the new output into account.
+    self._splittable_dims, self._unsplittable_dims = (
+        self._initialize_all_dimensions_as_splittable())
 
   def lower(self, lowering):
     """Lower the ReshapeOperation.
@@ -4436,6 +4578,9 @@ class RandomOperation(Operation):
     self._tf_fn = tf_fn
     self._kwargs = kwargs
     self._outputs = [Tensor(self, shape, kwargs.get("dtype", tf.float32))]
+    # Rerun to take the new output into account.
+    self._splittable_dims, self._unsplittable_dims = (
+        self._initialize_all_dimensions_as_splittable())
 
   def lower(self, lowering):
     mesh_impl = lowering.mesh_impl(self)
@@ -4566,6 +4711,10 @@ class WhileLoopOperation(Operation):
     self._body_ops = ops[before:]
     del ops[before:]
     self._outputs = make_placeholders("output")
+
+    # Rerun to take the new output into account.
+    self._splittable_dims, self._unsplittable_dims = (
+        self._initialize_all_dimensions_as_splittable())
 
   def lower(self, lowering):
     mesh_impl = lowering.mesh_impl(self)
