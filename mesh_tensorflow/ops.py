@@ -1145,9 +1145,10 @@ class MeshImpl(object):
           devices = [device] * slice_size
         else:
           devices = [ret[i].device for i in xrange(slice_size)]
-        concat_inputs = [[ret[i + slice_size * j]
-                          for j in xrange(mesh_dim.size)]
-                         for i in xrange(slice_size)]
+        concat_inputs = []
+        for i in xrange(slice_size):
+          concat_inputs.append(
+              [ret[i + slice_size * j] for j in xrange(mesh_dim.size)])
         ret = parallel(
             devices, tf.concat, concat_inputs,
             axis=[tensor_axis] * len(devices))
@@ -1205,15 +1206,15 @@ class LazyAllreduceSum(object):
     self.mesh_impl = mesh_impl
     self.laid_out_input = laid_out_input
     self.mesh_axes = mesh_axes
-    self._add_counter_fn = add_counter_fn
+    self.add_counter_fn = add_counter_fn
     self._reduced = None
 
   def to_laid_out_tensor(self):
     if not self._reduced:
       self._reduced = self.mesh_impl.allreduce(
           self.laid_out_input, self.mesh_axes, "SUM")
-      if self._add_counter_fn:
-        self._add_counter_fn()
+      if self.add_counter_fn:
+        self.add_counter_fn()
     return self._reduced
 
   def __add__(self, other):
@@ -1232,7 +1233,7 @@ class LazyAllreduceSum(object):
           self.mesh_impl.slicewise(
               tf.add, self.laid_out_input, other.laid_out_input),
           self.mesh_axes,
-          add_counter_fn=self._add_counter_fn)
+          add_counter_fn=self.add_counter_fn)
     else:
       return self.mesh_impl.slicewise(
           tf.add, self.to_laid_out_tensor(), other.to_laid_out_tensor())
@@ -2400,9 +2401,12 @@ class EinsumOperation(Operation):
   def gradient(self, grad_ys):
     dy = grad_ys[0]
     xs = self.inputs
-    return [
-        einsum([dy] + [xs[j] for j in xrange(len(xs)) if j != i], xs[i].shape)
-        for i in xrange(len(self.inputs))]
+    ret = []
+    for i in xrange(len(self.inputs)):
+      ret.append(
+          einsum([dy] + [xs[j] for j in xrange(len(xs)) if j != i], xs[i].shape)
+      )
+    return ret
 
   def lower(self, lowering):
     mesh_impl = lowering.mesh_impl(self)
@@ -3606,7 +3610,7 @@ def replace_dimensions(tensor_or_shape, old_dim_or_dims, new_dim_or_dims):
   try:
     positions = [in_dims.index(d) for d in old_dim_or_dims]
     pos = positions[0]
-    if positions != range(pos, pos + len(positions)):
+    if positions != list(range(pos, pos + len(positions))):
       raise ValueError()
   except ValueError:
     raise ValueError(
@@ -4686,7 +4690,35 @@ class WhileLoopOperation(Operation):
   """While loop, like tf.while_loop."""
 
   def __init__(self, cond_fn, body_fn, inputs,
-               tf_kwargs=None, name="while_loop"):
+               tf_kwargs=None, has_accumulators=False, name="while_loop"):
+    """Create a WhileLoopOperation.
+
+    A few differences from tf.while_loop:
+
+    - gradients are not yet supported
+
+    - inputs must be a list of tensors, as opposed to an arbitrary nested
+      structure.  cond_fn and body_fn take an argument list
+
+    - we support optional "accumulators" which are additional outputs
+      returned by body_fn.  These are summed across all iterations and
+      retured as additional outputs of the while-loop.  To use accumulators,
+      the has_accumulators argument must be True.  For better performance,
+      we delay allreduce on the accumulators until after the loop, so that it
+      only needs to happen once.  This is useful, for example, if the
+      accumulators are summing gradients for many mini-batches.
+
+    Args:
+      cond_fn: a function from n mtf Tensors to mtf Scalar
+      body_fn: a function from n mtf Tensors to sequence of mtf Tensors
+      inputs: list of n mtf Tensors
+      tf_kwargs: a dictionary of arguments for tf.while_loop
+      has_accumulators: a boolean
+      name: a string
+    Returns:
+      a WhileLoopOperation
+    """
+
     super(WhileLoopOperation, self).__init__(
         inputs, mesh=inputs[0].mesh, name=name)
     self._cond_fn = cond_fn
@@ -4694,6 +4726,8 @@ class WhileLoopOperation(Operation):
     self._tf_kwargs = tf_kwargs or {}
     assert not self._tf_kwargs.get("back_prop", False)
     ops = self.graph.operations
+    # remove self from the graph's operations
+    ops.pop()
     before = len(ops)
     def make_placeholders(name):
       return [Tensor(self, t.shape, t.dtype, name="%s:%d" % (name, i))
@@ -4704,13 +4738,29 @@ class WhileLoopOperation(Operation):
     del ops[before:]
     self._body_inputs = make_placeholders("body_input")
     self._body_outputs = self._body_fn(*self._body_inputs)
-    for (i, (inp, body_out)) in enumerate(zip(inputs, self._body_outputs)):
+    if len(self._body_outputs) < len(inputs):
+      raise ValueError("body_fn produces fewer outputs than inputs")
+    if len(self._body_outputs) > len(inputs) and not has_accumulators:
+      raise ValueError("body_fn produces more outputs than inputs")
+    for (i, (inp, body_out)) in enumerate(
+        zip(inputs, self._body_outputs[:len(inputs)])):
       if inp.shape != body_out.shape:
         raise ValueError(
             "shape mismatch i=%d inp=%s body_out=%s" % (i, inp, body_out))
-    self._body_ops = ops[before:]
+    # Pull new variables outside the loop.
+    added_ops = ops[before:]
     del ops[before:]
-    self._outputs = make_placeholders("output")
+    self._body_ops = []
+    for op in added_ops:
+      if isinstance(op, Variable):
+        ops.append(op)
+      else:
+        self._body_ops.append(op)
+    # re-add self to graph's operations
+    ops.append(self)
+    self._outputs = [
+        Tensor(self, t.shape, t.dtype, name="output:%d" % i)
+        for i, t in enumerate(self._body_outputs)]
 
     # Rerun to take the new output into account.
     self._splittable_dims, self._unsplittable_dims = (
@@ -4719,7 +4769,8 @@ class WhileLoopOperation(Operation):
   def lower(self, lowering):
     mesh_impl = lowering.mesh_impl(self)
     def tf_cond_fn(*tf_inputs):
-      for tf_inp, mtf_inp in zip(tf_inputs, self._cond_inputs):
+      for tf_inp, mtf_inp in zip(
+          tf_inputs[:len(self._cond_inputs)], self._cond_inputs):
         lowering.tensors[mtf_inp] = mesh_impl.LaidOutTensor(tf_inp)
       for op in self._cond_ops:
         with tf.name_scope(op.name):
@@ -4728,31 +4779,69 @@ class WhileLoopOperation(Operation):
       ret = lowered_output.to_laid_out_tensor().tensor_list[0]
       return ret
 
+    # This array keeps track of which lowered body-outputs have type
+    # LazyAllreduceSum.  We treat these specially  - instead of
+    # immediately converting to LaidOutTensor (executing the allreduce)
+    # we sum across iterations first, then allreduce at the end.
+    # When one of the body outputs is a LazyAllreduceSum, we put the
+    #  LazyAllreduceSum object into this array for future reference.
+    is_lazyallreducesum = [None] * len(self._outputs)
     def tf_body_fn(*tf_inputs):
-      for tf_inp, mtf_inp in zip(tf_inputs, self._body_inputs):
+      """Body function for tf.while_loop.
+
+      Args:
+        *tf_inputs: a list of tf.Tensor
+      Returns:
+        a list of tf.Tensor
+      """
+      for tf_inp, mtf_inp in zip(
+          tf_inputs[:len(self._inputs)], self._body_inputs):
         lowering.tensors[mtf_inp] = mesh_impl.LaidOutTensor(tf_inp)
       for op in self._body_ops:
         with tf.name_scope(op.name):
           op.lower(lowering)
-      return [
-          lowering.tensors[mtf_out].to_laid_out_tensor().tensor_list
-          for mtf_out in self._body_outputs]
+      ret = []
+      for i, mtf_out in enumerate(self._body_outputs):
+        lowered_out = lowering.tensors[mtf_out]
+        if isinstance(lowered_out, LazyAllreduceSum):
+          is_lazyallreducesum[i] = lowered_out
+          ret.append(lowered_out.laid_out_input.tensor_list)
+        else:
+          ret.append(lowered_out.to_laid_out_tensor().tensor_list)
+      # accumulators
+      for i in range(len(self._inputs), len(self._outputs)):
+        ret[i] = [x + y for x, y in zip(ret[i], tf_inputs[i])]
+      return ret
 
-    lowered_inputs = [
-        lowering.tensors[t].to_laid_out_tensor().tensor_list
-        for t in self.inputs]
+    lowered_inputs = []
+    for t in self.inputs:
+      lowered_inputs.append(
+          lowering.tensors[t].to_laid_out_tensor().tensor_list)
+    # accumulators get initial value 0
+    for t in self._body_outputs[len(self.inputs):]:
+      def slice_fn():
+        return tf.zeros(mesh_impl.slice_shape(t.shape), dtype=t.dtype)
+      lowered_inputs.append(mesh_impl.slicewise(slice_fn).tensor_list)
 
     tf_outs = tf.while_loop(tf_cond_fn,
                             tf_body_fn,
                             lowered_inputs,
                             back_prop=False,
                             **self._tf_kwargs)
-    for tf_out, mtf_out in zip(tf_outs, self._outputs):
-      lowering.set_tensor_lowering(mtf_out, mesh_impl.LaidOutTensor(tf_out))
+    for i, (tf_out, mtf_out) in enumerate(zip(tf_outs, self._outputs)):
+      out = mesh_impl.LaidOutTensor(tf_out)
+      lazy = is_lazyallreducesum[i]
+      if lazy:
+        out = LazyAllreduceSum(
+            mesh_impl, out, lazy.mesh_axes, lazy.add_counter_fn)
+      lowering.set_tensor_lowering(mtf_out, out)
 
 
-def while_loop(cond_fn, body_fn, inputs, num_loop_vars=None, **kwargs):
+def while_loop(cond_fn, body_fn, inputs, num_loop_vars=None,
+               has_accumulators=False, **kwargs):
   """While Loop.
+
+  See comments above for WhileLoopOperation
 
   num_loop_vars is a hack for the multi-gpu setup.  In this case, loops
   are generally slow, as all loop variables are placed on device.  By setting
@@ -4765,26 +4854,30 @@ def while_loop(cond_fn, body_fn, inputs, num_loop_vars=None, **kwargs):
 
   Args:
     cond_fn: a function from n Tensors to scalar boolean Tensor
-    body_fn: a function from n Tensors to n Tensors
+    body_fn: a function from n Tensors to list of n Tensors
     inputs: a list of n Tensors
     num_loop_vars: an optional integer.
+    has_accumulators: a boolean
     **kwargs: additional kwargs passed to tf.while_loop
 
   Returns:
     a list of n Tensors.
   """
   if num_loop_vars is None:
-    return WhileLoopOperation(cond_fn, body_fn, inputs, kwargs).outputs
+    return WhileLoopOperation(cond_fn, body_fn, inputs, tf_kwargs=kwargs,
+                              has_accumulators=has_accumulators).outputs
   # Turn all loop vars except for the first ones into non-loop vars.
   # see comments in docstring.
   assert num_loop_vars > 0
   extra_inputs = inputs[num_loop_vars:]
-  my_vars = tuple([get_variable(
-      x.mesh, "loop_var_%d" % i,
-      x.shape, initializer=tf.zeros_initializer(),
-      dtype=x.dtype,
-      collections=[tf.GraphKeys.LOCAL_VARIABLES])
-                   for i, x in enumerate(extra_inputs)])
+  my_vars = []
+  for i, x in enumerate(extra_inputs):
+    my_vars.append(get_variable(
+        x.mesh, "loop_var_%d" % i,
+        x.shape, initializer=tf.zeros_initializer(),
+        dtype=x.dtype,
+        collections=[tf.GraphKeys.LOCAL_VARIABLES]))
+  my_vars = tuple(my_vars)
   first_input = depend(
       inputs[0], [assign(var, x) for var, x in zip(my_vars, extra_inputs)])
   inputs = [first_input] + inputs[1:num_loop_vars]
@@ -4798,7 +4891,8 @@ def while_loop(cond_fn, body_fn, inputs, num_loop_vars=None, **kwargs):
     outputs = (first_output,) + outputs[1:num_loop_vars]
     return outputs
   return WhileLoopOperation(
-      my_cond_fn, my_body_fn, inputs, kwargs).outputs
+      my_cond_fn, my_body_fn, inputs, tf_kwargs=kwargs,
+      has_accumulators=has_accumulators).outputs
 
 
 def where(condition, if_true, if_false, output_shape=None):
@@ -5032,3 +5126,91 @@ def combined_dimension(dims, name=None):
   if not dims:
     raise ValueError("dims must be a list of one or more Dimensions")
   return Dimension(name or dims[0].name, Shape(dims).size)
+
+
+def serialize_training_step(features, model_fn, batch_dim, num_splits):
+  """Break the training batch into multiple microbatches.
+
+  Returns two structures:
+
+  grads - a list of Tensors corresponding to the gradients on
+     graph.trainable_variables.  These are summed across all microbatches
+
+  outputs - a dictionary of Tensors corresponding to the output dictionary of
+     model_fn.   Each value is either summed across all microbatches (if it
+     has no batch-dimension), or concatenated across all microbatches to
+     represent the original batch (if it does have a batch-dimension).
+
+  Args:
+    features: a dictionary of Tensors, each with a batch_dim dimension
+    model_fn: a function from feature dictionary to output dictionary
+      output_dictionary must contain "loss"
+    batch_dim: a Dimension
+    num_splits: an integer dividing batch_dim.size
+
+  Returns:
+    grads: a list of Tensors corresponding to the gradients on
+      graph.trainable_variables
+    outputs: dictionary of output Tensors summed across microbatches
+  """
+  for v in features.values():
+    mesh = v.mesh
+    graph = v.graph
+  microbatch_dim = Dimension("microbatch", num_splits)
+  smaller_batch_dim = Dimension(batch_dim.name, batch_dim.size // num_splits)
+  cache = {}
+  def select(t, microbatch_num):
+    return gather(
+        replace_dimensions(t, batch_dim, [smaller_batch_dim, microbatch_dim]),
+        microbatch_num, microbatch_dim)
+  def cond_fn(microbatch_num):
+    return less(microbatch_num, num_splits)
+  def body_fn(microbatch_num):
+    """Body function for mtf.while_loop.
+
+    Args:
+      microbatch_num: a mtf Scalar
+    Returns:
+      a list of mtf Tensors
+    """
+    my_features = {}
+    for k, v in six.iteritems(features):
+      my_features[k] = select(v, microbatch_num)
+    outputs = model_fn(my_features)
+    grads = gradients(
+        [outputs["loss"]], [v.outputs[0] for v in graph.trainable_variables])
+    output_keys = outputs.keys()
+    cache["output_keys"] = output_keys
+    ret = []
+    ret.append(microbatch_num + 1)
+    # The rest of the returned values are "accumulators" that get summed
+    # across all microbatches.
+    for t in outputs.values():
+      if smaller_batch_dim in t.shape:
+        # The output contains a batch dimension, so we want to concatenate
+        # across microbatches.
+        # Here we pad the tensor for each microbatch - summing will complete
+        #  the concatenation.
+        t = einsum(
+            [t, one_hot(microbatch_num, microbatch_dim, dtype=t.dtype)],
+            output_shape=replace_dimensions(
+                t.shape, smaller_batch_dim,
+                [smaller_batch_dim, microbatch_dim]))
+        t = replace_dimensions(
+            t, [smaller_batch_dim, microbatch_dim], batch_dim)
+        ret.append(t)
+      else:
+        # There is no batch dimension.  Sum across all microbatches.
+        ret.append(t)
+    # we also want to sum the gradients.
+    ret.extend(grads)
+    return ret
+  while_out = while_loop(
+      cond_fn, body_fn, [constant(mesh, 0, dtype=tf.int32)],
+      has_accumulators=True)
+  num_outputs = len(cache["output_keys"])
+  combined_outputs = {}
+  for k, v in zip(cache["output_keys"], while_out[1:1 + num_outputs]):
+    combined_outputs[k] = v
+  combined_grads = while_out[1 + num_outputs:]
+  return combined_grads, combined_outputs
