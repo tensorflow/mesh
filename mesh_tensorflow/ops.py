@@ -706,7 +706,7 @@ class Lowering(object):
     if num_slices >= 2 ** 16:
       # Startup times are slow with lots of variable slices.
       # Perform more aggressive stacking
-      max_combined_slice_size = 2 ** 25
+      max_combined_slice_size = 2 ** 27
     else:
       # Stacking hurts memory utilization - only stack small variables.
       max_combined_slice_size = 2 ** 16
