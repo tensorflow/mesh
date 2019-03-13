@@ -260,7 +260,8 @@ def clean_output(ids, vocab_size):
   return ret
 
 
-def get_dataset(tfds_name, data_dir, train, batch_size, length):
+def get_dataset(tfds_name, data_dir, train, batch_size, length,
+                text2self=False):
   """Get a tf.data.Dataset. for training/eval.
 
   Args:
@@ -269,6 +270,7 @@ def get_dataset(tfds_name, data_dir, train, batch_size, length):
     train: a boolean
     batch_size: an integer
     length: an integer
+    text2self: a boolean
   Returns:
     a tf.data.Dataset
   """
@@ -280,7 +282,10 @@ def get_dataset(tfds_name, data_dir, train, batch_size, length):
   if train:
     dataset = dataset.repeat()
   def my_fn(inputs, targets):
-    return {"inputs": add_eos(inputs), "targets": add_eos(targets)}
+    if text2self:
+      return {"targets": add_eos(targets)}
+    else:
+      return {"inputs": add_eos(inputs), "targets": add_eos(targets)}
   dataset = dataset.map(my_fn)
   dataset = pack_dataset(dataset, length=length)
   dataset = dataset.batch(batch_size, drop_remainder=False)

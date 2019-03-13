@@ -41,7 +41,18 @@ from tensorflow.contrib.tpu.python.tpu import tpu_estimator
 tf.flags.DEFINE_string("model_dir", "/tmp/mnist_model", "Estimator model_dir")
 tf.flags.DEFINE_string("dataset", "wmt_translate_ende/ende_subwords8k_t2t",
                        "TensorFlow Datasets dataset name")
-tf.flags.DEFINE_string("data_dir", "", "data_dir for TensorFlow Datasets")
+tf.flags.DEFINE_string(
+    "data_dir",
+    ""
+    ,
+    "data_dir for TensorFlow Datasets"
+)
+tf.flags.DEFINE_boolean(
+    "text2self",
+    False,
+    "Whether to train a language model (True) or encoder-decoder text-to-text "
+    "model (False)."
+)
 
 # MODEL HYPERPARAMETERS
 tf.flags.DEFINE_integer("max_length", 256,
@@ -74,7 +85,7 @@ tf.flags.DEFINE_integer("batch_size", 64,
 tf.flags.DEFINE_float("dropout", 0.1, "dropout")
 tf.flags.DEFINE_float("label_smoothing", 0.1, "label smoothing")
 tf.flags.DEFINE_integer(
-    "train_steps", 100000, "Total number of training steps.")
+    "train_steps", 10000000, "Total number of training steps.")
 
 # DISTRIBUTED LAYOUT
 # When running on TPU, make sure that the size of the mesh
@@ -98,8 +109,15 @@ tf.flags.DEFINE_string("layout", "batch:all", "layout")
 
 # INFERENCE HYPERPARAMETERS
 tf.flags.DEFINE_float("temperature", 0.0, "sampling temperature for inference")
-tf.flags.DEFINE_float("alpha", 0.6, "length adjustment for beam search")
-tf.flags.DEFINE_integer("beam_size", 1, "use a value >1 for beam search")
+tf.flags.DEFINE_float(
+    "alpha",
+    0.6,
+    "length adjustment for beam search (ignored when text2self=True)"
+)
+tf.flags.DEFINE_integer(
+    "beam_size", 1,
+    "use a value >1 for beam search (ignored when text2self=True)"
+)
 tf.flags.DEFINE_string("input_file", "", "Where to read decoding prompts")
 tf.flags.DEFINE_string("output_file", "", "Where to write decoding outputs")
 
@@ -233,23 +251,44 @@ def my_model_fn(features,
   graph = mtf.Graph()
   mesh = mtf.Mesh(graph, "my_mesh", var_placer)
 
-  model = transformer.Bitransformer(
-      encoder_layer_stack=layer_stack(include_encdec_attention=False),
-      decoder_layer_stack=layer_stack(include_encdec_attention=True),
-      encoder_d_model=FLAGS.d_model,
-      decoder_d_model=FLAGS.d_model,
-      input_vocab_size=transformer_dataset.padded_vocab_size(
-          transformer_dataset.inputs_vocab_size(FLAGS.dataset)),
-      output_vocab_size=transformer_dataset.padded_vocab_size(
-          transformer_dataset.targets_vocab_size(FLAGS.dataset)),
-      max_length=FLAGS.max_length,
-      shared_embedding=False,
-      shared_embedding_and_softmax_weights=True,
-      label_smoothing=FLAGS.label_smoothing,
-      layout=FLAGS.layout,
-      mesh_shape=FLAGS.mesh_shape)
+  if FLAGS.text2self:
+    model = transformer.Unitransformer(
+        layer_stack=layer_stack(include_encdec_attention=False),
+        d_model=FLAGS.d_model,
+        input_vocab_size=transformer_dataset.padded_vocab_size(
+            transformer_dataset.inputs_vocab_size(FLAGS.dataset)),
+        output_vocab_size=transformer_dataset.padded_vocab_size(
+            transformer_dataset.targets_vocab_size(FLAGS.dataset)),
+        autoregressive=True,
+        max_length=FLAGS.max_length,
+        shared_embedding_and_softmax_weights=True,
+        label_smoothing=FLAGS.label_smoothing,
+        layout=FLAGS.layout,
+        mesh_shape=FLAGS.mesh_shape)
+  else:
+    model = transformer.Bitransformer(
+        encoder_layer_stack=layer_stack(include_encdec_attention=False),
+        decoder_layer_stack=layer_stack(include_encdec_attention=True),
+        encoder_d_model=FLAGS.d_model,
+        decoder_d_model=FLAGS.d_model,
+        input_vocab_size=transformer_dataset.padded_vocab_size(
+            transformer_dataset.inputs_vocab_size(FLAGS.dataset)),
+        output_vocab_size=transformer_dataset.padded_vocab_size(
+            transformer_dataset.targets_vocab_size(FLAGS.dataset)),
+        max_length=FLAGS.max_length,
+        shared_embedding=False,
+        shared_embedding_and_softmax_weights=True,
+        label_smoothing=FLAGS.label_smoothing,
+        layout=FLAGS.layout,
+        mesh_shape=FLAGS.mesh_shape)
 
-  inputs = import_feature(features, mesh, "inputs")
+  targets = import_feature(features, mesh, "targets")
+  anon_targets = mtf.anonymize(targets)
+  if FLAGS.text2self:
+    _, length_dim = targets.shape
+    inputs = mtf.shift(targets, offset=1, dim=length_dim, wrap=False)
+  else:
+    inputs = import_feature(features, mesh, "inputs")
 
   # Data-types used for variables and activations
   # See comments in the FLAGS
@@ -270,12 +309,18 @@ def my_model_fn(features,
 
   # PREDICT mode
   if mode == tf.estimator.ModeKeys.PREDICT:
-    mtf_samples = model.decode(
-        inputs,
-        variable_dtype=variable_dtype,
-        beam_size=FLAGS.beam_size,
-        alpha=FLAGS.alpha,
-        temperature=FLAGS.temperature)
+    if FLAGS.text2self:
+      mtf_samples = model.sample_autoregressive(
+          inputs,
+          variable_dtype=variable_dtype,
+          temperature=FLAGS.temperature)
+    else:
+      mtf_samples = model.decode(
+          inputs,
+          variable_dtype=variable_dtype,
+          beam_size=FLAGS.beam_size,
+          alpha=FLAGS.alpha,
+          temperature=FLAGS.temperature)
     mtf_samples = mtf.anonymize(mtf_samples)
     lowering = mtf.Lowering(graph, {mesh: mesh_impl}, autostack=FLAGS.autostack)
     outputs = lowering.export_to_tf_tensor(mtf_samples)
@@ -287,19 +332,30 @@ def my_model_fn(features,
         predictions=predictions,
         prediction_hooks=[mtf.MtfRestoreHook(lowering)])
 
-  targets = import_feature(features, mesh, "targets")
-  anon_targets = mtf.anonymize(targets)
+  if FLAGS.text2self:
+    position_kwargs = dict(
+        sequence_id=import_feature(features, mesh, "targets_segmentation"),
+        position=import_feature(features, mesh, "inputs_position"),
+    )
+  else:
+    position_kwargs = dict(
+        encoder_sequence_id=import_feature(
+            features, mesh, "inputs_segmentation"
+        ),
+        decoder_sequence_id=import_feature(
+            features, mesh, "targets_segmentation"
+        ),
+        encoder_position=import_feature(features, mesh, "inputs_position"),
+        decoder_position=import_feature(features, mesh, "targets_position"),
+    )
+
   logits, loss = model.call_simple(
       inputs=inputs,
       targets=targets,
       compute_loss=True,
       mode=mode,
       variable_dtype=variable_dtype,
-      encoder_sequence_id=import_feature(features, mesh, "inputs_segmentation"),
-      decoder_sequence_id=import_feature(
-          features, mesh, "targets_segmentation"),
-      encoder_position=import_feature(features, mesh, "inputs_position"),
-      decoder_position=import_feature(features, mesh, "targets_position")
+      **position_kwargs
   )
 
   if use_tpu and logits is not None:
@@ -473,7 +529,9 @@ def main(_):
         FLAGS.data_dir or None,
         train=(FLAGS.mode == "train"),
         batch_size=FLAGS.batch_size,
-        length=length_from_flags())
+        length=length_from_flags(),
+        text2self=FLAGS.text2self,
+    )
 
   if FLAGS.mode == "train":
     estimator.train(
