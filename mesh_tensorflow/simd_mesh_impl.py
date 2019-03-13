@@ -552,7 +552,7 @@ def _ring_2d(m, n):
   if m == 1:
     return [(0, i) for i in range(n)]
   if n == 1:
-    return [(i, 0) for i in range(n)]
+    return [(i, 0) for i in range(m)]
   if m % 2 != 0:
     tf.logging.warning("Odd dimension")
     return [(i % m, i // m) for i in range(n * m)]
