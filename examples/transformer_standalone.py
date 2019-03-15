@@ -37,7 +37,10 @@ from mesh_tensorflow.transformer import utils
 import tensorflow as tf
 from tensorflow.contrib.tpu.python.tpu import tpu_config
 from tensorflow.contrib.tpu.python.tpu import tpu_estimator
-
+tf.flags.DEFINE_string(
+    "tpu_job_name", None,
+    "Name of TPU worker binary. Only necessary if job name is changed from"
+    " default tpu_worker.")
 tf.flags.DEFINE_string("model_dir", "/tmp/mnist_model", "Estimator model_dir")
 tf.flags.DEFINE_string("dataset", "wmt_translate_ende/ende_subwords8k_t2t",
                        "TensorFlow Datasets dataset name")
@@ -217,9 +220,12 @@ def build_model(input_vocab_size, output_vocab_size):
 def main(_):
   """Run training/eval/inference."""
   cluster = tf.contrib.cluster_resolver.TPUClusterResolver(
-      tpu=[FLAGS.tpu], zone=FLAGS.tpu_zone, project=FLAGS.gcp_project)
+      FLAGS.tpu if (FLAGS.tpu) else "",
+      zone=FLAGS.tpu_zone,
+      project=FLAGS.gcp_project)
 
   my_tpu_config = tpu_config.TPUConfig(
+      tpu_job_name=FLAGS.tpu_job_name,
       iterations_per_loop=FLAGS.iterations_per_loop,
       num_cores_per_replica=1,
       per_host_input_for_training=tpu_config.InputPipelineConfig.BROADCAST,
