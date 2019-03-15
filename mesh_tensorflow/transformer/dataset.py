@@ -26,12 +26,229 @@ import tensorflow as tf
 import tensorflow_datasets as tfds
 
 
+class Encoder(object):
+  """Abstract class for encoding strings as lists of integers.
+
+  We will subclass this and wrap multiple implementations of text encoders.
+  We follow the convention that ids 0=PAD and 1=EOS are reserved.
+  """
+
+  @property
+  def vocab_size(self):
+    """Number of ids (including 0=PAD and 1=EOS).
+
+    Returns:
+      an integer
+    """
+    raise NotImplementedError("Not implemented.")
+
+  def encode(self, s):
+    """Encode a python string as a list of integers.
+
+    Args:
+      s: a string
+    Returns:
+      a list of integers (not terminated by EOS)
+    """
+    raise NotImplementedError("Not implemented.")
+
+  def decode(self, ids):
+    """Decode a list of integers to a python string.
+
+    Args:
+      ids: a list of integers (not terminated by EOS)
+    Returns:
+      a string
+    """
+    raise NotImplementedError("Not implemented.")
+
+  def encode_tf(self, s):
+    """Encode a tf.Scalar string to a tf.Tensor.
+
+    This will be necessary for on-the-fly tokenization.
+
+    Args:
+      s: a tf.Scalar with dtype tf.string
+    Returns:
+      a 1d tf.Tensor with dtype tf.int32
+    """
+    raise NotImplementedError("Not implemented.")
+
+  def decode_tf(self, ids):
+    """Decode in TensorFlow.
+
+    I don't know when we will use this, but it seems logical to
+    have if we can.
+
+    Args:
+      ids: a 1d tf.Tensor with dtype tf.int32
+    Returns:
+      a tf Scalar with dtype tf.string
+    """
+    raise NotImplementedError("Not implemented.")
+
+
+class TFDSEncoderWrapper(Encoder):
+  """Wrapper for tensorflow_datasets encoders.
+
+  In the TFDS encoders, ID=0 is reserved for padding.
+  We want to also reserve ID=1 for EOS, so we shift all IDs up by 1.
+  """
+
+  def __init__(self, tfds_encoder):
+    self._tfds_encoder = tfds_encoder
+
+  @property
+  def vocab_size(self):
+    """Number of ids (including 0=PAD and 1=EOS).
+
+    Returns:
+      an integer
+    """
+    return self._tfds_encoder.vocab_size + 1
+
+  def encode(self, s):
+    """Encode a python string as a list of integers.
+
+    Args:
+      s: a string
+    Returns:
+      a list of integers (not terminated by EOS)
+    """
+    # shift IDs up by 1 to make room for EOS=1 (see class docstring)
+    return [i + 1 for i in self._tfds_encoder.encode(s)]
+
+  def decode(self, ids):
+    """Decode a list of integers to a python string.
+
+    Args:
+      ids: a list of integers (not terminated by EOS)
+    Returns:
+      a string
+    """
+    return self._tfds_encoder.decode([i - 1 for i in ids])
+
+
+class Dataset(object):
+  """Abstract dataset class."""
+
+  @property
+  def feature_keys(self):
+    return self.encoders.keys()
+
+  @property
+  def encoders(self):
+    """A dictionary from feature key to Encoder.
+
+    Returns:
+       a dictionary from string to Encoder.
+    """
+    raise NotImplementedError("Not implemented")
+
+  def load(self, batch_size, length, train, pack):
+    """Get a tf.data.Dataset. for training/eval.
+
+    The tensors in the returned tf.data.Dataset have shape
+    [batch_size, length].  Zeros indicate padding.
+
+    length indicates the length of the emitted examples.  Examples with
+    inputs/targets longer than length get truncated.
+
+    If pack=False, then each emitted example will contain one
+    example emitted by load_internal().
+
+    If pack=True, then multiple examples emitted by load_internal() are
+    concatenated to form one combined example with the given length.
+    See comments in the function pack_dataset().
+
+    batch_size indicates the number of (combined) examples per batch,
+    across all cores.
+
+    Args:
+      batch_size: an integer
+      length: an integer
+      train: a boolean
+      pack: a boolean
+    Returns:
+      a tf.data.Dataset
+    """
+    dataset = self.load_internal(train)
+    if train:
+      dataset = dataset.repeat()
+    def append_eos(features):
+      return {k: tf.concat([features[k], [1]], 0) for k in self.feature_keys}
+    dataset = dataset.map(append_eos)
+    if pack:
+      dataset = pack_dataset(dataset, length=length)
+    dataset = dataset.batch(batch_size, drop_remainder=False)
+    dataset = dataset.map(
+        functools.partial(trim_and_pad_all_features,
+                          batch_size=batch_size,
+                          length=length))
+    return dataset
+
+  def load_internal(self, train):
+    """Get a tf.data.Dataset containing single examples with no EOS.
+
+    Args:
+      train: a boolean
+    Returns:
+      a tf.data.Dataset
+    """
+    raise NotImplementedError("Not implemented")
+
+
+class TokenizedTFDSDataset(Dataset):
+  """Wrapper around pre-tokenized TFDS dataset."""
+
+  def __init__(self, tfds_name, text2self=False, data_dir=None):
+    self._tfds_name = tfds_name
+    self._text2self = text2self
+    self._data_dir = data_dir
+    info = tfds.builder(tfds_name).info
+    self._encoders = {
+        "targets": TFDSEncoderWrapper(
+            info.features[info.supervised_keys[1]].encoder)
+    }
+    if not text2self:
+      self._encoders["inputs"] = TFDSEncoderWrapper(
+          info.features[info.supervised_keys[0]].encoder)
+
+  def load_internal(self, train):
+    """Get a tf.data.Dataset containing single examples with no EOS.
+
+    Args:
+      train: a boolean
+    Returns:
+      a tf.data.Dataset
+    """
+    dataset = tfds.load(
+        self._tfds_name,
+        split=tfds.Split.TRAIN if train else tfds.Split.VALIDATION,
+        as_supervised=True,
+        data_dir=self._data_dir)
+    def feature_map(inputs, targets):
+      if self._text2self:
+        return {"targets": targets + 1}
+      else:
+        return {"inputs": inputs + 1, "targets": targets + 1}
+    return dataset.map(feature_map)
+
+  @property
+  def encoders(self):
+    """A dictionary from feature key to Encoder.
+
+    Returns:
+       a dictionary from string to Encoder.
+    """
+    return self._encoders
+
+
 def pack_dataset(dataset, length, keys=None):
   """Creates a 'packed' version of a dataset on-the-fly.
 
   Borrowed from the tensor2tensor library.
   TODO(noam): make this faster
-  TODO(noam): move to another file.
 
   This is meant to replace the irritation of having to create a separate
   "packed" version of a dataset to train efficiently on TPU.
@@ -225,99 +442,15 @@ def trim_and_pad_all_features(features, batch_size, length):
   return {k: _trim_and_pad(v, batch_size, length) for k, v in features.items()}
 
 
-def add_eos(x):
-  """Increase all ids by 1 and append EOS=1.
+def padded_vocab_size(vocab_size, divisor=128):
+  """Round up vocabulary size so that it is a multiple of divisor.
+
+  We can only split a dimension if it is a multiple of the mesh-dimension size.
 
   Args:
-    x: an unpadded 1d tensor of token ids, or a python list
-  Returns:
-    the same type as x
-  """
-  if isinstance(x, tf.Tensor):
-    return tf.concat([x + 1, [1]], 0)
-  elif isinstance(x, list):
-    return [i + 1 for i in x] + [1]
-  else:
-    raise ValueError("unsupported type for x=%s" % (x,))
-
-
-def clean_output(ids, vocab_size):
-  """Decrease all ids by 1, stop at EOS or padding or OOV.
-
-  Args:
-    ids: a list of integers
     vocab_size: an integer
+    divisor: an integer
   Returns:
-    a list of integers
+    an integer
   """
-  ret = []
-  for i in ids:
-    i -= 1
-    if i <= 0 or i >= vocab_size:
-      break
-    else:
-      ret.append(i)
-  return ret
-
-
-def get_dataset(tfds_name, data_dir, train, batch_size, length,
-                text2self=False):
-  """Get a tf.data.Dataset. for training/eval.
-
-  Args:
-    tfds_name: a string
-    data_dir: a string
-    train: a boolean
-    batch_size: an integer
-    length: an integer
-    text2self: a boolean
-  Returns:
-    a tf.data.Dataset
-  """
-  dataset = tfds.load(
-      tfds_name,
-      split=tfds.Split.TRAIN if train else tfds.Split.VALIDATION,
-      as_supervised=True,
-      data_dir=data_dir)
-  if train:
-    dataset = dataset.repeat()
-  def my_fn(inputs, targets):
-    if text2self:
-      return {"targets": add_eos(targets)}
-    else:
-      return {"inputs": add_eos(inputs), "targets": add_eos(targets)}
-  dataset = dataset.map(my_fn)
-  dataset = pack_dataset(dataset, length=length)
-  dataset = dataset.batch(batch_size, drop_remainder=False)
-  dataset = dataset.map(
-      functools.partial(trim_and_pad_all_features,
-                        batch_size=batch_size,
-                        length=length))
-  return dataset
-
-
-def padded_vocab_size(vocab_size):
-  # shift to make room for EOS=1
-  vocab_size += 1
-  # pad to multiple of 128
-  return vocab_size + (-vocab_size % 128)
-
-
-def inputs_encoder(tfds_name):
-  info = tfds.builder(tfds_name).info
-  return info.features[info.supervised_keys[0]].encoder
-
-
-def targets_encoder(tfds_name):
-  info = tfds.builder(tfds_name).info
-  return info.features[info.supervised_keys[1]].encoder
-
-
-def inputs_vocab_size(tfds_name):
-  info = tfds.builder(tfds_name).info
-  return info.features[info.supervised_keys[0]].encoder.vocab_size
-
-
-def targets_vocab_size(tfds_name):
-  info = tfds.builder(tfds_name).info
-  return info.features[info.supervised_keys[1]].encoder.vocab_size
+  return vocab_size + (-vocab_size % divisor)

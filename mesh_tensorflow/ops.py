@@ -26,7 +26,6 @@ import os
 import re
 
 from mesh_tensorflow import utils
-import numpy as np
 import six
 from six.moves import xrange  # pylint: disable=redefined-builtin
 
@@ -3939,11 +3938,13 @@ def sample_with_temperature(x, dim, temperature=1.0, dtype=tf.int32, name=None):
       # Note: we don't want to generate 0 or 1 because:
       # * -log(-log(0)) is -infinity
       # * -log(-log(1)) is +infinity.
+      # np.finfo(x.dtype.as_numpy_dtype).tiny doesn't work on bfloat16
+      tiny_val = 1e-9
       g = -log(-log(
           random_uniform(
               x.mesh,
               x.shape,
-              minval=np.finfo(x.dtype.as_numpy_dtype).tiny,
+              minval=tiny_val,
               maxval=1.,
               dtype=x.dtype)))
       x += g * temperature
