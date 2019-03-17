@@ -45,6 +45,8 @@ tf.flags.DEFINE_string('mesh_shape', 'all:8', 'mesh shape')
 tf.flags.DEFINE_string('layout', 'hidden_odd:all', 'layout rules')
 tf.flags.DEFINE_integer('iterations', 100,
                         'Number of iterations per training loop.')
+tf.flags.DEFINE_integer('step_with_nan', -1,
+                        'If >= 0, a NaN tensor is added in forward pass.')
 tf.flags.DEFINE_integer('train_steps', 10000, 'max steps')
 tf.flags.DEFINE_integer('steps_per_checkpoint', 200, 'steps_per_checkpoint')
 tf.flags.DEFINE_string(
@@ -125,6 +127,16 @@ def toy_model(features, mesh):
         slice_dtype=slice_dtype,
         name='layer_%d' % lnum)
   y = h
+  g = tf.train.get_global_step()
+  if FLAGS.step_with_nan >= 0:
+    # Trigger NaN in the forward pass, this is used for testing whether
+    # MeshTensorFlow can handle occasional NaN value.
+    y += mtf.import_tf_tensor(
+        mesh,
+        tf.divide(
+            0.0,
+            tf.cond(tf.equal(g, FLAGS.step_with_nan), lambda: 0., lambda: 1.)),
+        mtf.Shape([]))
 
   loss = mtf.reduce_mean(mtf.square(y - x))
   return y, loss
@@ -241,6 +253,7 @@ def run_toy_model_tpu():
       save_checkpoints_steps=None,  # Disable the default saver
       save_checkpoints_secs=None,  # Disable the default saver
       log_step_count_steps=iterations_per_loop,
+      save_summary_steps=iterations_per_loop,
       tpu_config=tpu_config.TPUConfig(
           num_shards=mesh_shape.size,
           iterations_per_loop=iterations_per_loop,
