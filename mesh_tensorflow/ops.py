@@ -3264,13 +3264,19 @@ def convert_nan_or_inf_to_zero(val, dtype):
       lambda: tf.cast(val, dtype))
 
 
-def assign_slice(variable, slice_var, val):
+def assign_slice_check_finite(variable, slice_var, val):
   return tf.assign(
       slice_var,
       tf.cond(
           tf.reduce_any(tf.logical_or(tf.is_nan(val), tf.is_inf(val))),
           lambda: slice_var,
           lambda: tf.cast(val, variable.slice_dtype)))
+
+
+def assign_slice(variable, slice_var, val):
+  return tf.assign(
+      slice_var,
+      tf.cast(val, variable.slice_dtype))
 
 
 def assign_add_slice(variable, slice_var, val):
@@ -3288,7 +3294,8 @@ def assign_sub_slice(variable, slice_var, val):
 class Assign(Operation):
   """Assign to one or more variables."""
 
-  def __init__(self, variables, new_values, assign_fn=assign_slice, name=None):
+  def __init__(self, variables, new_values, assign_fn=assign_slice_check_finite,
+               name=None):
     super(Assign, self).__init__(
         new_values, variables[0].mesh, name=name or "assign")
     self._variables = variables
@@ -3312,7 +3319,7 @@ class Assign(Operation):
     return self._variables
 
 
-def assign(var, new_val, assign_fn=assign_slice):
+def assign(var, new_val, assign_fn=assign_slice_check_finite):
   """Assign a new value to a variable.
 
   Args:
