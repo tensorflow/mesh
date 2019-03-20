@@ -522,7 +522,10 @@ class SimdMeshImpl(mtf.MeshImpl):
           "Tensors.  Try reshaping to new dimension names. "
           " x.shape = %s tensor_layout=%s"
           % (x.shape, tensor_layout))
-    return mtf.convert_nan_or_inf_to_zero(laid_out_x.one_slice, x.dtype)
+    ret = laid_out_x.one_slice
+    if x.dtype.is_floating:
+      ret = mtf.convert_nan_or_inf_to_zero(ret, x.dtype)
+    return ret
 
   def import_tf_tensor(self, x, tf_x):
     """Import a tf.Tensor, producing a LaidOutTensor.
