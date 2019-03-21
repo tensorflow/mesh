@@ -324,14 +324,12 @@ pip install --user .
 
 ## Run the Transfomer model (no Tensor2Tensor dependencies)
 
-Then run the following from the command line.
-
 ```sh
 pip install tensorflow_datasets
 
 cd mesh/
 DATA_DIR=gs://noam-mtf/data
-MODEL_DIR=gs://noam-mtf/ende_base
+MODEL_DIR=gs://noam-mtf/transformer_standalone
 TPU=noam-mtf-donut
 
 # MODEL HPARAMS AND DIRECTORY  (uncomment one)
@@ -357,7 +355,20 @@ python examples/transformer_standalone.py \
 python examples/transformer_standalone.py \
   --tpu=$TPU --data_dir=$DATA_DIR --model_dir=$MODEL_DIR --gin_file=$MODEL \
   --gin_file=$LAYOUT --gin_param="run.mode='evaluate'"
+```
 
+The above code will train on the LM1B language modeling benchmark, as specified
+in `examples/transformer_standalone_defaults.gin`. To train a
+sequence-to-sequence model on WMT14 en-de, change `utils.run.dataset` to
+`wmt_translate_ende/ende_subwords8k_t2t` and set `utils.run.mode` to `True`.
+Note that the `wmt_translate_ende/ende_subwords8k_t2t` dataset was removed from
+TensorFlow Datasets in
+[commit 211cb6f](https://github.com/tensorflow/datasets/commit/211cb6f082c5cc3c482e37d70234142a8fda2db3),
+so in order to train a model using this dataset you need to install a version of
+TFDS before this commit. Then, you can decode the WMT en-de development set
+and evaluate it using [SacreBLEU](https://github.com/mjpost/sacreBLEU) like so:
+
+```
 # INFER
 pip3 install sacrebleu
 mkdir ~/input ~/output
