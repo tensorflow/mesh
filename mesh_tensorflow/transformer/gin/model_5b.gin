@@ -1,0 +1,6 @@
+# -*-Python-*-
+model.num_layers = 16
+model.d_ff = 65536
+model.d_model = 1024
+model.num_heads = 32
+run.batch_size = 8

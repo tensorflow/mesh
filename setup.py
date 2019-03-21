@@ -19,6 +19,7 @@ setup(
         'six',
     ],
     extras_require={
+        'gin-config': ['gin-config>=0.1.4'],
         'tensorflow': ['tensorflow>=1.9.0'],
         'tensorflow_gpu': ['tensorflow-gpu>=1.9.0'],
         'tests': [

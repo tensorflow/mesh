@@ -1,0 +1,72 @@
+# -*-Python-*-
+# Default parameter values for the transformer standalone.
+
+import mesh_tensorflow.transformer.utils
+
+# Sampling temperature for inference.
+utils.tpu_estimator_model_fn.temperature = 0.0
+# Length adjustment for beam search (ignored when text2self=True).
+utils.tpu_estimator_model_fn.beam_size = 0.6
+# Use a value >1 for beam search (ignored when text2self=True).
+utils.tpu_estimator_model_fn.alpha = 1
+
+# Where to read/write decoding prompts.
+utils.decode_from_file.input_filename = ""
+utils.decode_from_file.output_filename = ""
+
+# Number of transformer layers.
+utils.model.num_layers = 6
+# Size of feed-forward hidden layers.
+utils.model.d_ff = 2048
+# Size of attention keys/values.
+utils.model.d_kv = 128
+# Size of hidden state.
+utils.model.d_model = 512
+# Heads per attention layer.
+utils.model.num_heads = 8
+# Dropout rate.
+utils.model.dropout = 0.1
+# Maximum sequence length (checkpoints depend on this).
+utils.model.max_length = 256
+# Actual sequence length - defaults to model.max_length.
+utils.model.length = 0
+# Label smoothing.
+utils.model.label_smoothing = 0.1
+# DISTRIBUTED LAYOUT
+# When running on TPU, make sure that the size of the mesh
+# (the product of all dimension sizes) equals the number of TPU cores.
+#
+# The layout specifies a partial mapping from tensor-dimension-names to
+# mesh-dimension names over which those tensor-dimensions are split.
+#
+# For our Transformer implementation, the reasonable model-dimensions
+# to split are:
+#   - "d_ff" (feed-forward hidden-layer size)
+#   - "heads" (number of attention heads)
+#   - "vocab" (vocabulary size)
+# For a model-parallel layout, all three of these dimensions should be split
+#   across the same mesh dimension - i.e. layout=d_ff:all,heads:all,vocab:all
+# For a data-parallel and model-parallel layout then split the batch along
+#   one mesh dimension and the model dimensions along the other:
+#   mesh_shape=rows:2,cols:4 layout=batch:rows,d_ff:cols,heads:cols,vocab:cols
+utils.model.layout = "batch:all"
+utils.model.mesh_shape = "all:8"
+
+# Whether to train a language model (True) or encoder-decoder text-to-text model
+# (False).
+utils.run.text2self = True
+# Must be train/evaluate/infer
+utils.run.mode = "train"
+# Steps per train loop.
+utils.run.iterations_per_loop = 100
+# Steps per checkpoint.
+utils.run.save_checkpoints_steps = 1000
+# Number of evaluation steps
+utils.run.eval_steps = 10
+# Total number of training steps.
+utils.run.train_steps = 10000000
+# Mini-batch size for the training. Note that this is the global batch size and
+# not the per-shard batch.
+utils.run.batch_size = 64
+# TensorFlow Datasets dataset name.
+utils.run.dataset = "lm1b/subwords32k"

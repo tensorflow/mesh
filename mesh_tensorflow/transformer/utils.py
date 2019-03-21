@@ -19,13 +19,20 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import gin
+
 import mesh_tensorflow as mtf
+from mesh_tensorflow.transformer import dataset as transformer_dataset
+from mesh_tensorflow.transformer import model_builder
+from mesh_tensorflow.transformer import transformer
 import numpy as np
 import tensorflow as tf
+from tensorflow.contrib.tpu.python.tpu import tpu_config
 from tensorflow.contrib.tpu.python.tpu import tpu_estimator
 
 
-def tpu_estimator_model_fn(model,
+@gin.configurable
+def tpu_estimator_model_fn(transformer_model,
                            model_dir,
                            use_tpu,
                            mesh_shape,
@@ -41,7 +48,7 @@ def tpu_estimator_model_fn(model,
   """Create a TPUEstimator model function.
 
   Args:
-    model: a transformer.Unitransformer or transformer.Bitransformer
+    transformer_model: a transformer.Unitransformer or transformer.Bitransformer
     model_dir: a string
     use_tpu: a boolean
     mesh_shape: a mtf.Shape
@@ -58,6 +65,7 @@ def tpu_estimator_model_fn(model,
   Returns:
     a function to be passed to TPUEstimator
   """
+
   def my_model_fn(features, labels, mode, params=None, config=None):
     """Estimator model function.
 
@@ -67,6 +75,7 @@ def tpu_estimator_model_fn(model,
       mode: a tf.estimator.ModeKeys
       params: something
       config: something
+
     Returns:
       something
     """
@@ -112,32 +121,27 @@ def tpu_estimator_model_fn(model,
         return None
       x = tf.to_int32(features[key])
       if not use_tpu:
-        x = tf.Print(x, [x], "import feature %s" % key, summarize=1000,
-                     first_n=1)
+        x = tf.Print(
+            x, [x], "import feature %s" % key, summarize=1000, first_n=1)
       return mtf.import_fully_replicated(mesh, x, mtf_shape, name=key)
 
     # PREDICT mode
     if mode == tf.estimator.ModeKeys.PREDICT:
       inputs = _import_feature("inputs")
       if text2self:
-        mtf_samples = model.sample_autoregressive(
-            inputs,
-            variable_dtype=variable_dtype,
-            temperature=temperature)
+        mtf_samples = transformer_model.sample_autoregressive(
+            inputs, variable_dtype=variable_dtype, temperature=temperature)
       else:
-        mtf_samples = model.decode(
+        mtf_samples = transformer_model.decode(
             inputs,
             variable_dtype=variable_dtype,
             beam_size=beam_size,
             alpha=alpha,
             temperature=temperature)
       mtf_samples = mtf.anonymize(mtf_samples)
-      lowering = mtf.Lowering(
-          graph, {mesh: mesh_impl}, autostack=autostack)
+      lowering = mtf.Lowering(graph, {mesh: mesh_impl}, autostack=autostack)
       outputs = lowering.export_to_tf_tensor(mtf_samples)
-      predictions = {
-          "outputs": outputs
-      }
+      predictions = {"outputs": outputs}
       return tpu_estimator.TPUEstimatorSpec(
           mode=tf.estimator.ModeKeys.PREDICT,
           predictions=predictions,
@@ -164,14 +168,13 @@ def tpu_estimator_model_fn(model,
           decoder_position=_import_feature("targets_position"),
       )
 
-    logits, loss = model.call_simple(
+    logits, loss = transformer_model.call_simple(
         inputs=inputs,
         targets=targets,
         compute_loss=True,
         mode=mode,
         variable_dtype=variable_dtype,
-        **position_kwargs
-    )
+        **position_kwargs)
 
     if use_tpu and logits is not None:
       logits = mtf.anonymize(logits)
@@ -188,8 +191,8 @@ def tpu_estimator_model_fn(model,
     tf_loss = lowering.export_to_tf_tensor(loss)
     tf_loss = tf.to_float(tf_loss)
     if not use_tpu:
-      tf_loss = tf.Print(
-          tf_loss, [tf_loss, tf.train.get_global_step()], "step, tf_loss")
+      tf_loss = tf.Print(tf_loss, [tf_loss, tf.train.get_global_step()],
+                         "step, tf_loss")
     if logits and mode != tf.estimator.ModeKeys.TRAIN:
       tf_logits = lowering.export_to_tf_tensor(logits)
 
@@ -211,10 +214,7 @@ def tpu_estimator_model_fn(model,
       tf.add_to_collection(tf.GraphKeys.SAVERS, saver)
       saver_listener = mtf.MtfCheckpointSaverListener(lowering)
       saver_hook = tf.train.CheckpointSaverHook(
-          model_dir,
-          save_steps=1000,
-          saver=saver,
-          listeners=[saver_listener])
+          model_dir, save_steps=1000, saver=saver, listeners=[saver_listener])
 
       if mode == tf.estimator.ModeKeys.TRAIN:
         if use_tpu:
@@ -225,14 +225,18 @@ def tpu_estimator_model_fn(model,
               training_hooks=[restore_hook, saver_hook])
         else:
           return tf.estimator.EstimatorSpec(
-              tf.estimator.ModeKeys.TRAIN, loss=tf_loss, train_op=train_op,
+              tf.estimator.ModeKeys.TRAIN,
+              loss=tf_loss,
+              train_op=train_op,
               training_chief_hooks=[restore_hook, saver_hook])
       elif mode == tf.estimator.ModeKeys.EVAL:
+
         def padded_neg_log_perplexity(logits, labels):
           weights = tf.to_float(tf.not_equal(labels, 0))
           xent = tf.nn.sparse_softmax_cross_entropy_with_logits(
               labels=labels, logits=logits)
           return {"neg_log_perplexity": tf.metrics.mean(-xent, weights)}
+
         labels = lowering.export_to_tf_tensor(anon_targets)
         eval_metrics = (padded_neg_log_perplexity, [tf_logits, labels])
         return tpu_estimator.TPUEstimatorSpec(
@@ -240,28 +244,30 @@ def tpu_estimator_model_fn(model,
             evaluation_hooks=[restore_hook],
             loss=tf_loss,
             eval_metrics=eval_metrics)
+
   return my_model_fn
 
 
+@gin.configurable
 def decode_from_file(estimator,
                      batch_size,
                      length,
-                     input_filename,
-                     output_filename,
                      inputs_encoder,
                      targets_encoder,
-                     text2self):
+                     text2self,
+                     input_filename=gin.REQUIRED,
+                     output_filename=gin.REQUIRED):
   """Decode from a text file.
 
   Args:
     estimator: a TPUEstimator
     batch_size: an integer
     length: an integer (maximum decode length)
-    input_filename: a string
-    output_filename: a string
     inputs_encoder: a mtf.transformer.dataset.Encoder
     targets_encoder: a mtf.transformer.dataset.Encoder
     text2self: a boolean
+    input_filename: a string
+    output_filename: a string
   """
   with tf.gfile.Open(input_filename) as f:
     text = f.read()
@@ -289,11 +295,13 @@ def decode_from_file(estimator,
   all_input_ids.extend([all_input_ids[0]] * (-n % batch_size))
   padded_n = len(all_input_ids)
   all_input_ids = np.array(all_input_ids, dtype=np.int32)
+
   def input_fn(params):
     del params
     dataset = tf.data.Dataset.from_tensor_slices({"inputs": all_input_ids})
     dataset = dataset.batch(batch_size, drop_remainder=True)
     return dataset
+
   result_iter = estimator.predict(input_fn)
   vocab_size = targets_encoder.vocab_size
   decodes = []
@@ -312,8 +320,10 @@ def decode_from_file(estimator,
   elif len(decodes) % padded_n == 0:
     num_cores = len(decodes) // padded_n
     tf.logging.info("output is repeated num_cores times - removing extras")
+
     def keep(i):
       return i % (batch_size * num_cores) < batch_size
+
     decodes = [d for i, d in enumerate(decodes) if keep(i)]
   else:
     raise ValueError("unexpected number of outputs")
@@ -331,6 +341,7 @@ def clean_decodes(ids, vocab_size):
   Args:
     ids: a list of integers
     vocab_size: an integer
+
   Returns:
     a list of integers
   """
@@ -341,3 +352,239 @@ def clean_decodes(ids, vocab_size):
     else:
       ret.append(i)
   return ret
+
+
+@gin.configurable()
+def model(input_vocab_size,
+          output_vocab_size,
+          text2self,
+          num_layers=gin.REQUIRED,
+          d_ff=gin.REQUIRED,
+          d_kv=gin.REQUIRED,
+          d_model=gin.REQUIRED,
+          num_heads=gin.REQUIRED,
+          dropout=gin.REQUIRED,
+          max_length=gin.REQUIRED,
+          length=gin.REQUIRED,
+          label_smoothing=gin.REQUIRED,
+          layout=gin.REQUIRED,
+          mesh_shape=gin.REQUIRED):
+  """Build a simple Transformer model.
+
+  Args:
+    input_vocab_size: an integer
+    output_vocab_size: an integer
+    text2self: a boolean meaning a language model (True) or encoder/decoder
+      (False)
+    num_layers: integer, number of transformer layers
+    d_ff: integer, size of feed-forward hidden layers
+    d_kv: integer, size of attention keys/values
+    d_model: integer, size of hidden state
+    num_heads: integer, heads per attention layer
+    dropout: float, dropout rate
+    max_length: maximum sequence length (checkpoints depend on this)
+    length: actual sequence length - defaults to max_length
+    label_smoothing: label smoothing
+    layout: a string
+    mesh_shape: a string
+
+  Returns:
+    a mtf.Unitransformer or mtf.Bitransformer
+  """
+  # Needed for Gin injection.
+  del length
+
+  def layer_stack(include_encdec_attention):
+    """Create a LayerStack.
+
+    TODO(noam): implement a way to configure custom layer stacks using
+    hyperparameters. (as in mtf_transformer2 in the tensor2tensor library).
+    That functionality should go in transformer/model_builder.py
+
+    Args:
+      include_encdec_attention: a boolean
+
+    Returns:
+      a transformer.LayerStack
+    """
+    return model_builder.simple_layer_stack(
+        include_encdec_attention=include_encdec_attention,
+        num_layers=num_layers,
+        d_ff=d_ff,
+        d_kv=d_kv,
+        num_heads=num_heads,
+        dropout_rate=dropout)
+
+  if text2self:
+    return transformer.Unitransformer(
+        layer_stack=layer_stack(include_encdec_attention=False),
+        d_model=d_model,
+        input_vocab_size=input_vocab_size,
+        output_vocab_size=output_vocab_size,
+        autoregressive=True,
+        max_length=max_length,
+        shared_embedding_and_softmax_weights=True,
+        label_smoothing=label_smoothing,
+        layout=layout,
+        mesh_shape=mesh_shape)
+  else:
+    return transformer.Bitransformer(
+        encoder_layer_stack=layer_stack(include_encdec_attention=False),
+        decoder_layer_stack=layer_stack(include_encdec_attention=True),
+        encoder_d_model=d_model,
+        decoder_d_model=d_model,
+        input_vocab_size=input_vocab_size,
+        output_vocab_size=output_vocab_size,
+        max_length=max_length,
+        shared_embedding=False,
+        shared_embedding_and_softmax_weights=True,
+        label_smoothing=label_smoothing,
+        layout=layout,
+        mesh_shape=mesh_shape)
+
+
+@gin.configurable
+def run(tpu_job_name,
+        data_dir,
+        master_dtype,
+        slice_dtype,
+        activation_dtype,
+        tpu,
+        gcp_project,
+        tpu_zone,
+        autostack,
+        model_dir,
+        mode=gin.REQUIRED,
+        iterations_per_loop=gin.REQUIRED,
+        save_checkpoints_steps=gin.REQUIRED,
+        eval_steps=gin.REQUIRED,
+        train_steps=gin.REQUIRED,
+        batch_size=gin.REQUIRED,
+        text2self=gin.REQUIRED,
+        dataset=gin.REQUIRED):
+  """Run training/eval/inference.
+
+  Args:
+    tpu_job_name: string, name of TPU worker binary
+    data_dir: string, data_dir for TensorFlow Datasets
+    master_dtype: string, datatype for checkpoints
+    slice_dtype: string, datatype for variables in memory
+    activation_dtype: string, datatype for activations
+    tpu: string, the Cloud TPU to use for training
+    gcp_project: string, project name for the Cloud TPU-enabled project
+    tpu_zone: string, GCE zone where the Cloud TPU is located in
+    autostack: boolean, internally combine variables
+    model_dir: string, estimator model_dir
+    mode: string, train/evaluate/infer
+    iterations_per_loop: integer, steps per train loop
+    save_checkpoints_steps: integer, steps per checkpoint
+    eval_steps: integer, number of evaluation steps
+    train_steps: Total number of training steps.
+    batch_size: Mini-batch size for the training. Note that this is the global
+      batch size and not the per-shard batch.
+    text2self: Whether to train a language model (True) or encoder-decoder
+      text-to-text model (False).
+    dataset: TensorFlow Datasets dataset name.
+  """
+  cluster = tf.contrib.cluster_resolver.TPUClusterResolver(
+      tpu if (tpu) else "", zone=tpu_zone, project=gcp_project)
+
+  my_tpu_config = tpu_config.TPUConfig(
+      tpu_job_name=tpu_job_name,
+      iterations_per_loop=iterations_per_loop,
+      num_cores_per_replica=1,
+      per_host_input_for_training=tpu_config.InputPipelineConfig.BROADCAST,
+  )
+
+  run_config = tpu_config.RunConfig(
+      cluster=cluster,
+      model_dir=model_dir,
+      save_checkpoints_steps=save_checkpoints_steps,
+      tpu_config=my_tpu_config)
+
+  dataset = transformer_dataset.TokenizedTFDSDataset(
+      dataset, text2self=text2self, data_dir=data_dir or None)
+
+  output_encoder = dataset.encoders["targets"]
+  if text2self:
+    input_encoder = output_encoder
+  else:
+    input_encoder = dataset.encoders["inputs"]
+
+  transformer_model = model(
+      input_vocab_size=transformer_dataset.padded_vocab_size(
+          input_encoder.vocab_size, 128),
+      output_vocab_size=transformer_dataset.padded_vocab_size(
+          output_encoder.vocab_size, 128),
+      text2self=text2self)
+  mesh_shape = mtf.convert_to_shape(gin.query_parameter("model.mesh_shape"))
+  layout_rules = mtf.convert_to_layout_rules(
+      gin.query_parameter("model.layout"))
+  # Data-types used for variables and activations
+  # See comments in the FLAGS
+  master_dtype = tf.as_dtype(master_dtype)
+  if slice_dtype:
+    slice_dtype = tf.as_dtype(slice_dtype)
+  elif not tpu or mode == "train":
+    slice_dtype = tf.float32
+  else:
+    slice_dtype = tf.bfloat16
+  if activation_dtype:
+    activation_dtype = tf.as_dtype(activation_dtype)
+  else:
+    activation_dtype = tf.bfloat16 if tpu else tf.float32
+  variable_dtype = mtf.VariableDType(
+      master_dtype=master_dtype,
+      slice_dtype=slice_dtype,
+      activation_dtype=activation_dtype)
+
+  length_from_config = gin.query_parameter(
+      "model.length") or gin.query_parameter("model.max_length")
+
+  model_fn = tpu_estimator_model_fn(
+      transformer_model=transformer_model,
+      model_dir=model_dir,
+      use_tpu=tpu,
+      mesh_shape=mesh_shape,
+      layout_rules=layout_rules,
+      text2self=text2self,
+      variable_dtype=variable_dtype,
+      batch_size=batch_size,
+      length=length_from_config,
+      autostack=autostack)
+
+  estimator = tpu_estimator.TPUEstimator(
+      model_fn=model_fn,
+      config=run_config,
+      train_batch_size=batch_size,
+      eval_batch_size=batch_size,
+      predict_batch_size=batch_size,
+      use_tpu=tpu,
+      export_to_tpu=False,
+      params={})
+
+  def input_fn(params):
+    del params
+    return dataset.load(
+        batch_size=batch_size,
+        length=length_from_config,
+        train=(mode == "train"),
+        pack=True)
+
+  if mode == "train":
+    estimator.train(input_fn=input_fn, max_steps=train_steps)
+  elif mode == "evaluate":
+    estimator.evaluate(
+        input_fn=input_fn,
+        steps=eval_steps,
+    )
+  elif mode == "infer":
+    decode_from_file(
+        estimator,
+        batch_size=batch_size,
+        length=length_from_config,
+        inputs_encoder=dataset.encoders["targets" if text2self else "inputs"],
+        targets_encoder=dataset.encoders["targets"],
+        text2self=text2self)
+  else:
+    raise ValueError("unknown mode %s - must be train/evaluate/infer" % mode)

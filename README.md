@@ -323,36 +323,40 @@ pip install --user .
 ```
 
 ## Run the Transfomer model (no Tensor2Tensor dependencies)
+
+Then run the following from the command line.
+
 ```sh
 pip install tensorflow_datasets
 
 cd mesh/
 DATA_DIR=gs://noam-mtf/data
+MODEL_DIR=gs://noam-mtf/ende_base
 TPU=noam-mtf-donut
 
 # MODEL HPARAMS AND DIRECTORY  (uncomment one)
 # base model
-MODEL="--model_dir=gs://noam-mtf/ende_base"
+MODEL=./transformer/gin/model_base.gin
 # 5B parameters (too big for this dataset, only trains with model-parallelism)
-# MODEL="--num_layers=16 --d_ff=65536 --d_model=1024 --num_heads=32  --batch_size=8 --model_dir=gs://noam-mtf/ende_5b"
+# MODEL=./transformer/gin/model_5b.gin
 
 # UNCOMMENT ONE OF THESE
 # Data-parallelism
-LAYOUT="--mesh_shape=all:8 --layout=batch:all"
+LAYOUT=./transformer/gin/layout_data_parallel.gin
 # Model-parallelism
-# LAYOUT="--mesh_shape=all:8 --layout=d_ff:all,heads:all,vocab:all"
+# LAYOUT=./transformer/gin/layout_model_parallel.gin
 # Data-parallelism and Model-Parallelism
-# LAYOUT="--mesh_shape=rows:2,cols:4 --layout=batch:rows,d_ff:cols,heads:cols,vocab:cols"
+# LAYOUT=./transformer/gin/layout_data_and_model_parallel.gin
 
 # TRAIN
 python examples/transformer_standalone.py \
-  --tpu=$TPU --data_dir=$DATA_DIR $MODEL $LAYOUT \
-  --mode=train
+  --tpu=$TPU --data_dir=$DATA_DIR --model_dir=$MODEL_DIR --gin_file=$MODEL \
+  --gin_file=$LAYOUT --gin_param="run.mode='train'"
 
 # EVAL
 python examples/transformer_standalone.py \
-  --tpu=$TPU --data_dir=$DATA_DIR $MODEL $LAYOUT \
-  --mode=train
+  --tpu=$TPU --data_dir=$DATA_DIR --model_dir=$MODEL_DIR --gin_file=$MODEL \
+  --gin_file=$LAYOUT --gin_param="run.mode='evaluate'"
 
 # INFER
 pip3 install sacrebleu
@@ -361,10 +365,11 @@ DECODE_INPUT=/home/$USER/input/ende.dev
 DECODE_OUTPUT=/home/$USER/output/ende.dev.out
 ~/.local/bin/sacrebleu -t wmt13 -l en-de --echo src > $DECODE_INPUT
 python examples/transformer_standalone.py \
-  --tpu=$TPU --data_dir=$DATA_DIR $MODEL $LAYOUT \
-  --input_file=$DECODE_INPUT \
-  --output_file=$DECODE_OUTPUT \
-  --mode=infer
+  --tpu=$TPU --data_dir=$DATA_DIR --model_dir=$MODEL_DIR --gin_file=$MODEL \
+  --gin_file=$LAYOUT \
+  --gin_param="decode_from_file.input_filename='$DECODE_INPUT'" \
+  --gin_param="decode_from_file.output_filename='$DECODE_OUTPUT'" \
+  --gin_param="run.mode='infer'"
 
 # Compute BLEU score for dev set
 cat $DECODE_OUTPUT | ~/.local/bin/sacrebleu -t wmt13 -l en-de -tok intl

@@ -1,0 +1,3 @@
+# -*-Python-*-
+model.mesh_shape = "rows:2,cols:4"
+model.layout = "batch:rows,d_ff:cols,heads:cols,vocab:cols"
