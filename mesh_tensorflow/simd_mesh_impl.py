@@ -39,7 +39,8 @@ class SimdMeshImpl(mtf.MeshImpl):
                layout,
                devices=None,
                device_assignment=None,
-               logical_to_physical=None):
+               logical_to_physical=None,
+               allreduce_in_bfloat16_max_group_size=64):
     """Create a SimdMeshImpl.
 
     Args:
@@ -52,6 +53,8 @@ class SimdMeshImpl(mtf.MeshImpl):
         from logical cores to "physical" cores, where the physical cores are
         listed in lexicographic order in the physical mesh, and the logical
         cores are listed in lexicographic order in the logical mesh.
+      allreduce_in_bfloat16_max_group_size: an integer.  Allreduces of bfloat16
+        tensors are done in float32 if the group size exceeds this value.
     """
     super(SimdMeshImpl, self).__init__(shape, layout)
     if devices is not None:
@@ -72,6 +75,8 @@ class SimdMeshImpl(mtf.MeshImpl):
     self._pnum_tensor = None
     self.graph_device_function_stacks = []
     self.copy_master_to_slice_ops = []
+    self._allreduce_in_bfloat16_max_group_size = (
+        allreduce_in_bfloat16_max_group_size)
 
   @property
   def pnum_tensor(self):
@@ -308,13 +313,21 @@ class SimdMeshImpl(mtf.MeshImpl):
     x = x.to_laid_out_tensor()
     if reduction_fn_string == "SUM":
       group_assignment = self._create_group_assignment(mesh_axes)
+      group_size = len(group_assignment[0])
       tf_in = x.one_slice
       dtype = tf_in.dtype
-      if not (dtype == tf.float32 or dtype == tf.bfloat16):
+      if dtype == tf.float32:
+        cast_to_float32 = False
+      elif dtype == tf.bfloat16:
+        cast_to_float32 = (
+            group_size > self._allreduce_in_bfloat16_max_group_size)
+      else:
         tf.logging.info("Casting %s to float32 for allreduce" % tf_in.dtype)
+        cast_to_float32 = True
+      if cast_to_float32:
         tf_in = tf.cast(tf_in, tf.float32)
       tf_out = tpu_ops.cross_replica_sum(tf_in, group_assignment)
-      if tf_out.dtype != dtype:
+      if cast_to_float32:
         tf_out = tf.cast(tf_out, dtype)
       return self.LaidOutTensor([tf_out])
     else:
