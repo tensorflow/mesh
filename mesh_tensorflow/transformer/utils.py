@@ -444,8 +444,25 @@ def model(input_vocab_size,
 
 
 @gin.configurable
+def get_tfds_dataset(dataset_name, data_dir, text2self=gin.REQUIRED):
+  """Loads the TFDS dataset specified by datatset_name.
+
+  Args:
+    dataset_name: TensorFlow Datasets dataset name.
+    data_dir: string, data_dir for TensorFlow Datasets
+    text2self: Whether to train a language model (True) or encoder-decoder
+      text-to-text model (False).
+
+  Returns:
+    A transformer_dataset.Dataset.
+  """
+  text2self = gin.query_parameter("run.text2self")
+  return transformer_dataset.TokenizedTFDSDataset(
+      dataset_name, text2self=text2self, data_dir=data_dir or None)
+
+
+@gin.configurable(blacklist=["dataset"])
 def run(tpu_job_name,
-        data_dir,
         master_dtype,
         slice_dtype,
         activation_dtype,
@@ -454,19 +471,18 @@ def run(tpu_job_name,
         tpu_zone,
         autostack,
         model_dir,
+        dataset,
         mode=gin.REQUIRED,
         iterations_per_loop=gin.REQUIRED,
         save_checkpoints_steps=gin.REQUIRED,
         eval_steps=gin.REQUIRED,
         train_steps=gin.REQUIRED,
         batch_size=gin.REQUIRED,
-        text2self=gin.REQUIRED,
-        dataset=gin.REQUIRED):
+        text2self=gin.REQUIRED):
   """Run training/eval/inference.
 
   Args:
     tpu_job_name: string, name of TPU worker binary
-    data_dir: string, data_dir for TensorFlow Datasets
     master_dtype: string, datatype for checkpoints
     slice_dtype: string, datatype for variables in memory
     activation_dtype: string, datatype for activations
@@ -475,6 +491,7 @@ def run(tpu_job_name,
     tpu_zone: string, GCE zone where the Cloud TPU is located in
     autostack: boolean, internally combine variables
     model_dir: string, estimator model_dir
+    dataset: A transformer_dataset.Dataset to read data from.
     mode: string, train/evaluate/infer
     iterations_per_loop: integer, steps per train loop
     save_checkpoints_steps: integer, steps per checkpoint
@@ -484,7 +501,6 @@ def run(tpu_job_name,
       batch size and not the per-shard batch.
     text2self: Whether to train a language model (True) or encoder-decoder
       text-to-text model (False).
-    dataset: TensorFlow Datasets dataset name.
   """
   cluster = tf.contrib.cluster_resolver.TPUClusterResolver(
       tpu if (tpu) else "", zone=tpu_zone, project=gcp_project)
@@ -501,9 +517,6 @@ def run(tpu_job_name,
       model_dir=model_dir,
       save_checkpoints_steps=save_checkpoints_steps,
       tpu_config=my_tpu_config)
-
-  dataset = transformer_dataset.TokenizedTFDSDataset(
-      dataset, text2self=text2self, data_dir=data_dir or None)
 
   output_encoder = dataset.encoders["targets"]
   if text2self:

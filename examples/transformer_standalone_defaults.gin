@@ -69,4 +69,4 @@ utils.run.train_steps = 10000000
 # not the per-shard batch.
 utils.run.batch_size = 64
 # TensorFlow Datasets dataset name.
-utils.run.dataset = "lm1b/subwords32k"
+utils.get_tfds_dataset.dataset_name = "lm1b/subwords32k"

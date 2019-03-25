@@ -88,7 +88,7 @@ class Encoder(object):
     raise NotImplementedError("Not implemented.")
 
 
-class TFDSEncoderWrapper(Encoder):
+class TFDSEncoder(Encoder):
   """Wrapper for tensorflow_datasets encoders.
 
   In the TFDS encoders, ID=0 is reserved for padding.
@@ -175,9 +175,16 @@ class Dataset(object):
     dataset = self.load_internal(train)
     if train:
       dataset = dataset.repeat()
-    def append_eos(features):
-      return {k: tf.concat([features[k], [1]], 0) for k in self.feature_keys}
-    dataset = dataset.map(append_eos)
+    def encode_and_append_eos(features):
+      ret = {}
+      for k in self.feature_keys:
+        v = features[k]
+        if v.dtype == tf.string:
+          v = self.encoders[k].encode_tf(v)
+        v = tf.concat([v, [1]], 0)
+        ret[k] = v
+      return ret
+    dataset = dataset.map(encode_and_append_eos)
     if pack:
       dataset = pack_dataset(dataset, length=length)
     dataset = dataset.batch(batch_size, drop_remainder=False)
@@ -189,6 +196,9 @@ class Dataset(object):
 
   def load_internal(self, train):
     """Get a tf.data.Dataset containing single examples with no EOS.
+
+    The values in the returned examples can either be raw (tf.string) or
+    tokenized (integer datatype).
 
     Args:
       train: a boolean
@@ -207,11 +217,11 @@ class TokenizedTFDSDataset(Dataset):
     self._data_dir = data_dir
     info = tfds.builder(tfds_name).info
     self._encoders = {
-        "targets": TFDSEncoderWrapper(
+        "targets": TFDSEncoder(
             info.features[info.supervised_keys[1]].encoder)
     }
     if not text2self:
-      self._encoders["inputs"] = TFDSEncoderWrapper(
+      self._encoders["inputs"] = TFDSEncoder(
           info.features[info.supervised_keys[0]].encoder)
 
   def load_internal(self, train):

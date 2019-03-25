@@ -99,9 +99,10 @@ def main(_):
   gin.parse_config_file(
       os.path.join(os.path.dirname(__file__), _DEFAULT_CONFIG_FILE))
   gin.parse_config_files_and_bindings(FLAGS.gin_file, FLAGS.gin_param)
+  dataset = utils.get_tfds_dataset(data_dir=FLAGS.data_dir)
   utils.run(
+      dataset=dataset,
       tpu_job_name=FLAGS.tpu_job_name,
-      data_dir=FLAGS.data_dir,
       master_dtype=FLAGS.master_dtype,
       slice_dtype=FLAGS.slice_dtype,
       activation_dtype=FLAGS.activation_dtype,
