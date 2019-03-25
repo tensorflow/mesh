@@ -37,14 +37,14 @@ class LayoutValidator(object):
   Usage Example:
     mtf_graph = mtf.Graph()
     # Add operations to mtf_graph using Mesh TensorFlow.
-    mesh_shape = mtf.Shape([('m1', 4), ('m2', 2)])
+    mesh_shape = mtf.Shape([("m1", 4), ("m2", 2)])
     layout_validator = valid_layouts.LayoutValidator(mtf_graph, mesh_shape)
 
     print(layout_validator.splittable_mtf_dimension_names)
     # Set of names of Mesh TensorFlow dimensions that may be assigned to mesh
     # dimensions.
 
-    print(layout_validator.IsValidAssignment('batch', 'm1'))
+    print(layout_validator.is_valid_assignment("batch", "m1"))
     # Whether the 'batch' Mesh TensorFlow dimension may be assigned to the 'm1'
     # mesh dimension. Unlike the previous method, this ensures that every
     # occurrence of the 'batch' dimension has a size that is evenly divisible by
@@ -65,11 +65,11 @@ class LayoutValidator(object):
           interest.
       mesh_shape: an mtf.Shape, representing the mesh of interest.
     """
-    self._splittable_mtf_dimension_names = self._InitializeSplittableDimensions(
+    self._splittable_mtf_dimension_names = self._initialize_splittable_dimensions(
         mtf_graph)
     self._mtf_dimension_name_to_size_gcd = (
-        self._InitializeMtfDimensionNameToSizeGcd(mtf_graph))
-    self._mesh_dimension_name_to_size = self._InitializeMeshDimensionNameToSize(
+        self._initialize_mtf_dimension_name_to_size_gcd(mtf_graph))
+    self._mesh_dimension_name_to_size = self._initialize_mesh_dimension_name_to_size(
         mesh_shape)
 
   @property
@@ -80,7 +80,7 @@ class LayoutValidator(object):
   def mesh_dimension_name_to_size(self):
     return self._mesh_dimension_name_to_size
 
-  def IsValidAssignment(self, mtf_dimension_name, mesh_dimension_name):
+  def is_valid_assignment(self, mtf_dimension_name, mesh_dimension_name):
     """Whether this MTF dimension may be assigned to this mesh dimension.
 
     Args:
@@ -94,7 +94,7 @@ class LayoutValidator(object):
             (self._mtf_dimension_name_to_size_gcd[mtf_dimension_name] %
              self._mesh_dimension_name_to_size[mesh_dimension_name] == 0))
 
-  def _InitializeSplittableDimensions(self, mtf_graph):
+  def _initialize_splittable_dimensions(self, mtf_graph):
     """Initializer for self._splittable_mtf_dimension_names.
 
     Args:
@@ -117,7 +117,7 @@ class LayoutValidator(object):
 
     return all_mtf_dimension_names - unsplittable_mtf_dimension_names
 
-  def _InitializeMtfDimensionNameToSizeGcd(self, mtf_graph):
+  def _initialize_mtf_dimension_name_to_size_gcd(self, mtf_graph):
     """Initializer for self._mtf_dimension_name_to_size_gcd.
 
     Args:
@@ -139,7 +139,7 @@ class LayoutValidator(object):
 
     return mtf_dimension_name_to_size_gcd
 
-  def _InitializeMeshDimensionNameToSize(self, mesh_shape):
+  def _initialize_mesh_dimension_name_to_size(self, mesh_shape):
     """Initializer for self._mesh_dimension_name_to_size.
 
     Args:

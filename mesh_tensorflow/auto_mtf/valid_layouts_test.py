@@ -29,44 +29,44 @@ class LayoutValidatorTest(tf.test.TestCase):
   def setUp(self):
     super(LayoutValidatorTest, self).setUp()
     graph = mtf.Graph()
-    mesh = mtf.Mesh(graph, 'my_mesh')
+    mesh = mtf.Mesh(graph, "my_mesh")
 
-    a_dim = mtf.Dimension('a', 5)
-    b_dim = mtf.Dimension('b', 10)
-    concat_dim1 = mtf.Dimension('concat', 15)
-    concat_dim2 = mtf.Dimension('concat', 20)
+    a_dim = mtf.Dimension("a", 5)
+    b_dim = mtf.Dimension("b", 10)
+    concat_dim1 = mtf.Dimension("concat", 15)
+    concat_dim2 = mtf.Dimension("concat", 20)
 
     x1 = mtf.zeros(mesh, mtf.Shape([a_dim, b_dim, concat_dim1]))
     x2 = mtf.zeros(mesh, mtf.Shape([a_dim, b_dim, concat_dim2]))
-    mtf.ConcatOperation([x1, x2], 'concat')
+    mtf.ConcatOperation([x1, x2], "concat")
 
     # We add a tensor with anonymous shape, which is supposed to be
     # unsplittable (i.e. none of its dimensions show up during
     # test_SplittableMtfDimensionNames).
     _ = mtf.zeros(mesh, mtf.anonymous_shape(mtf.Shape([a_dim, b_dim])))
 
-    mesh_shape = mtf.Shape([('m1', 4), ('m2', 2)])
+    mesh_shape = mtf.Shape([("m1", 4), ("m2", 2)])
     self.valid_layouts = valid_layouts.LayoutValidator(graph, mesh_shape)
 
   def test_SplittableMtfDimensionNames(self):
     self.assertEqual(self.valid_layouts.splittable_mtf_dimension_names,
-                     set(['a', 'b']))
+                     set(["a", "b"]))
 
   def test_MeshDimensionNameToSize(self):
     self.assertEqual(self.valid_layouts.mesh_dimension_name_to_size,
-                     {'m1': 4, 'm2': 2})
+                     {"m1": 4, "m2": 2})
 
-  def test_IsValidAssignment(self):
+  def test_is_valid_assignment(self):
     # Due to divisibility, the a dimension cannot be assigned to m1 or m2.
-    self.assertFalse(self.valid_layouts.IsValidAssignment('a', 'm1'))
-    self.assertFalse(self.valid_layouts.IsValidAssignment('a', 'm2'))
+    self.assertFalse(self.valid_layouts.is_valid_assignment("a", "m1"))
+    self.assertFalse(self.valid_layouts.is_valid_assignment("a", "m2"))
     # The b dimension can only be assigned to m2.
-    self.assertFalse(self.valid_layouts.IsValidAssignment('b', 'm1'))
-    self.assertTrue(self.valid_layouts.IsValidAssignment('b', 'm2'))
+    self.assertFalse(self.valid_layouts.is_valid_assignment("b", "m1"))
+    self.assertTrue(self.valid_layouts.is_valid_assignment("b", "m2"))
     # Due to ConcatOperation, the concat dimension may not be assigned.
-    self.assertFalse(self.valid_layouts.IsValidAssignment('concat', 'm1'))
-    self.assertFalse(self.valid_layouts.IsValidAssignment('concat', 'm2'))
+    self.assertFalse(self.valid_layouts.is_valid_assignment("concat", "m1"))
+    self.assertFalse(self.valid_layouts.is_valid_assignment("concat", "m2"))
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
   tf.test.main()
