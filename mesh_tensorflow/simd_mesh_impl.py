@@ -40,7 +40,8 @@ class SimdMeshImpl(mtf.MeshImpl):
                devices=None,
                device_assignment=None,
                logical_to_physical=None,
-               allreduce_in_bfloat16_max_group_size=64):
+               allreduce_in_bfloat16_max_group_size=64,
+              ):
     """Create a SimdMeshImpl.
 
     Args:
@@ -554,6 +555,17 @@ class SimdMeshImpl(mtf.MeshImpl):
   @property
   def supports_control_dependencies(self):
     return False
+
+  def einsum(self, equation, *slices):
+    """Override this for custom einsum implementation.
+
+    Args:
+      equation: a string
+      *slices: a list of tf.Tensor
+    Returns:
+      a tf.Tensor
+    """
+    return tf.einsum(equation, *slices)
 
 
 def _ring_2d(m, n):

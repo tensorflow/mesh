@@ -1178,6 +1178,15 @@ class MeshImpl(object):
     """
     raise NotImplementedError("Import not implemented")
 
+  def einsum(self, equation, *slices):
+    """Override this for custom einsum implementation.
+
+    Args:
+      equation: a string
+      *slices: a list of tf.Tensor
+    """
+    return tf.einsum(equation, *slices)
+
 
 class LazyAllreduceSum(object):
   """Represents a LaidOutTensor with a lazy allreduce.
@@ -2371,7 +2380,7 @@ def _einsum_helper(input_shapes, output_shape, mesh_impl):
     equation = _einsum_equation(input_shapes, output_shape)
     def einsum_slice_fn(*slices):
       if slices[0].dtype.is_floating:
-        return tf.einsum(equation, *slices)
+        return mesh_impl.einsum(equation, *slices)
       else:
         return einsum_slice_fn_naive(*slices)
   return einsum_slice_fn, reduced_mesh_axes
