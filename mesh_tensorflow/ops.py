@@ -3257,29 +3257,10 @@ def read_variable(var):
   return ReadVariable(var).outputs[0]
 
 
-def convert_nan_or_inf_to_zero(val, dtype):
-  """Cast input tensor to dtype and zero out it if val contains NaN or Inf.
-
-  Args:
-    val: Input tensor.
-    dtype: a VariableDType or a tf.DType
-
-  Returns:
-    a Tensor with the dtype equal to input dtype.
-  """
-  return tf.cond(
-      tf.reduce_any(tf.logical_or(tf.is_nan(val), tf.is_inf(val))),
-      lambda: tf.zeros_like(val, dtype=dtype),
-      lambda: tf.cast(val, dtype))
-
-
 def assign_slice_check_finite(variable, slice_var, val):
-  return tf.assign(
-      slice_var,
-      tf.cond(
-          tf.reduce_any(tf.logical_or(tf.is_nan(val), tf.is_inf(val))),
-          lambda: slice_var,
-          lambda: tf.cast(val, variable.slice_dtype)))
+  val = tf.cast(val, variable.slice_dtype)
+  val = tf.where(tf.is_finite(val), val, slice_var)
+  return tf.assign(slice_var, val)
 
 
 def assign_slice(variable, slice_var, val):
@@ -3289,15 +3270,15 @@ def assign_slice(variable, slice_var, val):
 
 
 def assign_add_slice(variable, slice_var, val):
-  return tf.assign(
-      slice_var,
-      slice_var + convert_nan_or_inf_to_zero(val, variable.slice_dtype))
+  val = tf.cast(val, variable.slice_dtype)
+  val = tf.where(tf.is_finite(val), val, tf.zeros_like(val))
+  return tf.assign(slice_var, slice_var + val)
 
 
 def assign_sub_slice(variable, slice_var, val):
-  return tf.assign(
-      slice_var,
-      slice_var - convert_nan_or_inf_to_zero(val, variable.slice_dtype))
+  val = tf.cast(val, variable.slice_dtype)
+  val = tf.where(tf.is_finite(val), val, tf.zeros_like(val))
+  return tf.assign(slice_var, slice_var - val)
 
 
 class Assign(Operation):

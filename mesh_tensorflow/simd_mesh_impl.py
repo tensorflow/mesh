@@ -538,7 +538,7 @@ class SimdMeshImpl(mtf.MeshImpl):
           % (x.shape, tensor_layout))
     ret = laid_out_x.one_slice
     if x.dtype.is_floating:
-      ret = mtf.convert_nan_or_inf_to_zero(ret, x.dtype)
+      ret = tf.where(tf.is_finite(ret), ret, tf.zeros_like(ret))
     return ret
 
   def import_tf_tensor(self, x, tf_x):
