@@ -337,7 +337,7 @@ def _pack_with_tf_ops(dataset, keys, length):
   """
   empty_example = {}
   for k in keys:
-    empty_example[k] = tf.zeros([0], dtype=tf.int64)
+    empty_example[k] = tf.zeros([0], dtype=tf.int32)
     empty_example[k + "_position"] = tf.zeros([0], dtype=tf.int32)
   keys_etc = empty_example.keys()
 
@@ -367,7 +367,7 @@ def _pack_with_tf_ops(dataset, keys, length):
     outputs = {}
     for k in keys:
       outputs[k] = tf.TensorArray(
-          tf.int64, size=0, dynamic_size=True, element_shape=[length])
+          tf.int32, size=0, dynamic_size=True, element_shape=[length])
       outputs[k + "_position"] = tf.TensorArray(
           tf.int32, size=0, dynamic_size=True, element_shape=[length])
     def cond_fn(i, partial, outputs):
