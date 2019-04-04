@@ -596,11 +596,21 @@ def _ring_2d(m, n):
 
 
 def tile_2d(physical_shape, tile_shape,
-            outer_name="outer", inner_name="inner"):
+            outer_name="outer",
+            inner_name="inner",
+            cores_name=None):
   """2D tiling of a 3d physical mesh.
 
+  The "outer" mesh dimension corresponds to which tile.
   The "inner" mesh dimension corresponds to the position within a tile
-  of processors.  The "outer" mesh dimension corresponds to which processor.
+  of processors.
+
+  Optionally, if cores_name is specified, then a 3 dimensional logical mesh
+  is returned, with the third dimension representing the two different
+  cores within a chip.  If cores_name is not specified, then the
+  cores-in-a-chip dimension is folded into the inner dimension.
+
+  TODO(noam): explain this better.
 
   Example:
 
@@ -613,10 +623,11 @@ def tile_2d(physical_shape, tile_shape,
   tiles in the mesh.
 
   Args:
-    physical_shape: a triple
+    physical_shape: a triple of integers [X, Y, cores]
     tile_shape: a pair
     outer_name: a string
     inner_name: a string
+    cores_name: an optional string
 
   Returns:
     mesh_shape: a mtf.Shape
@@ -641,7 +652,13 @@ def tile_2d(physical_shape, tile_shape,
   assert sorted(logical_to_physical) == list(range(p0 * p1  * p2))
   tile_size = t0 * t1 * p2
   num_tiles = p0 * p1 // (t0 * t1)
-  mesh_shape = mtf.Shape(
-      [mtf.Dimension(outer_name, int(num_tiles)),
-       mtf.Dimension(inner_name, int(tile_size))])
+  if cores_name:
+    mesh_shape = mtf.Shape(
+        [mtf.Dimension(outer_name, int(num_tiles)),
+         mtf.Dimension(inner_name, int(t0 * t1)),
+         mtf.Dimension(cores_name, int(p2))])
+  else:
+    mesh_shape = mtf.Shape(
+        [mtf.Dimension(outer_name, int(num_tiles)),
+         mtf.Dimension(inner_name, int(tile_size))])
   return mesh_shape, logical_to_physical
