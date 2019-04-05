@@ -73,6 +73,14 @@ class GraphInterface(object):
     self._tensor_name_to_ids = self._initialize_tensor_name_to_ids()
     self._final_tensors = set()  # set(tf.Tensor or mtf.Tensor)
 
+  def get_num_operations(self):
+    """The number of operations in the graph.
+
+    Returns:
+      an integer, the number of operations.
+    """
+    return len(self._operations)
+
   def get_all_operation_names(self):
     """Generates the names of all operations in the graph.
 
