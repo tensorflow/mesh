@@ -307,8 +307,7 @@ def decode_from_file(estimator,
   decodes = []
   for i, result in enumerate(result_iter):
     output_ids = clean_decodes(list(result["outputs"]), vocab_size)
-    # First convert output_ids to int from numpy.int32
-    output_string = targets_encoder.decode([int(x) for x in output_ids])
+    output_string = targets_encoder.decode(output_ids)
     decodes.append(output_string)
     if i < 3:
       # LOG THE FIRST FEW DECODES
@@ -351,7 +350,7 @@ def clean_decodes(ids, vocab_size):
     if i <= 1 or i >= vocab_size:
       break
     else:
-      ret.append(i)
+      ret.append(int(i))
   return ret
 
 
