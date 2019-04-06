@@ -1,0 +1,4 @@
+# -*-Python-*-
+
+utils.run.mesh_shape = "all:8"
+utils.run.layout_rules = "batch:all"

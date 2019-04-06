@@ -22,8 +22,6 @@ from __future__ import print_function
 import gin
 
 import mesh_tensorflow as mtf
-from mesh_tensorflow.transformer import dataset as transformer_dataset
-from mesh_tensorflow.transformer import model_builder
 from mesh_tensorflow.transformer import transformer
 import numpy as np
 import tensorflow as tf
@@ -31,35 +29,89 @@ from tensorflow.contrib.tpu.python.tpu import tpu_config
 from tensorflow.contrib.tpu.python.tpu import tpu_estimator
 
 
+# TODO(noam): maybe add gin-config to mtf.get_variable so we can delete
+#  this stupid VariableDtype class and stop passing it all over creation.
 @gin.configurable
-def tpu_estimator_model_fn(transformer_model,
+def get_variable_dtype(
+    master_dtype=tf.bfloat16,
+    slice_dtype=tf.float32,
+    activation_dtype=tf.float32):
+  """Datatypes to use for the run.
+
+  Args:
+    master_dtype: string, datatype for checkpoints
+      keep this the same between training and eval/inference
+    slice_dtype: string, datatype for variables in memory
+      must be tf.float32 for training
+    activation_dtype: string, datatype for activations
+      less memory usage if tf.bfloat16 but possible numerical issues
+  Returns:
+    a mtf.VariableDtype
+  """
+  return mtf.VariableDType(
+      master_dtype=master_dtype,
+      slice_dtype=slice_dtype,
+      activation_dtype=activation_dtype)
+
+
+def build_model(model_type="bitransformer",
+                vocab_size=gin.REQUIRED):
+  """Build a transformer model.
+
+  Currently, three types of models are supported:
+
+  "bitransformer": The traditional encoder-decoder architecture from
+     "attention is all you need".  Requires a non-text2self dataset.
+
+  "lm": an autoregressive language model (one layer stack).  This is similar
+     to the decoder part of a bitransformer, but with no attention over an
+     encoder, since there is no encoder.  Requires a text2self dataset,
+     with targets, but no inputs.
+
+  "aligned": a non-autoregressive single-stack model (like BERT).  Requires
+     a non-text2self dataset with inputs and targets.  The targets are
+     aligned with the inputs.
+
+  Args:
+    model_type: a string - "bitransformer", "lm" or "aligned"
+    vocab_size: an integer
+  Returns:
+    a Unitransformer or Bitransformer
+  """
+  if model_type == "bitransformer":
+    return transformer.make_bitransformer(
+        input_vocab_size=vocab_size,
+        output_vocab_size=vocab_size)
+  elif model_type == "lm" or model_type == "aligned":
+    return transformer.Unitransformer(
+        autoregressive=model_type == "lm",
+        layer_stack=transformer.make_layer_stack(),
+        input_vocab_size=vocab_size,
+        output_vocab_size=vocab_size)
+  else:
+    raise ValueError("unknown model_type")
+
+
+def tpu_estimator_model_fn(model_type,
+                           transformer_model,
                            model_dir,
                            use_tpu,
                            mesh_shape,
                            layout_rules,
-                           text2self,
-                           variable_dtype,
                            batch_size,
-                           length,
-                           temperature=0.0,
-                           beam_size=1,
-                           alpha=0.0,
-                           autostack=True):
+                           sequence_length,
+                           autostack):
   """Create a TPUEstimator model function.
 
   Args:
+    model_type: a string
     transformer_model: a transformer.Unitransformer or transformer.Bitransformer
     model_dir: a string
     use_tpu: a boolean
     mesh_shape: a mtf.Shape
     layout_rules: a mtf.LayoutRules
-    text2self: a boolean
-    variable_dtype: a mtf.VariableDType
     batch_size: an integer
-    length: an integer
-    temperature: a float between 0 and 1 (for inference)
-    beam_size: a positive integer (for inference)
-    alpha: a float (for inference)
+    sequence_length: an integer
     autostack: a boolean
 
   Returns:
@@ -105,20 +157,27 @@ def tpu_estimator_model_fn(transformer_model,
     graph = mtf.Graph()
     mesh = mtf.Mesh(graph, "my_mesh", var_placer)
 
-    def _import_feature(key):
+    def _import_feature(key, allow_missing=False):
       """Import a feature from the features dictionary into a mtf.Tensor.
 
       Args:
         key: a string
+        allow_missing: a boolean
 
       Returns:
         a mtf.Tensor with dtype int32 and shape [batch_dim, length_dim]
       """
       batch_dim = mtf.Dimension("batch", batch_size)
-      length_dim = mtf.Dimension("length", length)
+      length_dim = mtf.Dimension("length", sequence_length)
       mtf_shape = mtf.Shape([batch_dim, length_dim])
       if key not in features:
-        return None
+        if allow_missing:
+          return None
+        else:
+          raise ValueError(
+              "feature not found %s - features %s = " % (key, features))
+      tf.logging.info("Import feature %s: %s" % (key, features[key]))
+
       x = tf.to_int32(features[key])
       if not use_tpu:
         x = tf.Print(
@@ -128,16 +187,14 @@ def tpu_estimator_model_fn(transformer_model,
     # PREDICT mode
     if mode == tf.estimator.ModeKeys.PREDICT:
       inputs = _import_feature("inputs")
-      if text2self:
+      if isinstance(transformer_model, transformer.Unitransformer):
         mtf_samples = transformer_model.sample_autoregressive(
-            inputs, variable_dtype=variable_dtype, temperature=temperature)
-      else:
+            inputs, variable_dtype=get_variable_dtype())
+      elif isinstance(transformer_model, transformer.Bitransformer):
         mtf_samples = transformer_model.decode(
-            inputs,
-            variable_dtype=variable_dtype,
-            beam_size=beam_size,
-            alpha=alpha,
-            temperature=temperature)
+            inputs, variable_dtype=get_variable_dtype())
+      else:
+        raise ValueError("unrecognized class")
       mtf_samples = mtf.anonymize(mtf_samples)
       lowering = mtf.Lowering(graph, {mesh: mesh_impl}, autostack=autostack)
       outputs = lowering.export_to_tf_tensor(mtf_samples)
@@ -149,31 +206,33 @@ def tpu_estimator_model_fn(transformer_model,
 
     targets = _import_feature("targets")
     anon_targets = mtf.anonymize(targets)
-    if text2self:
+    if model_type == "lm":
       _, length_dim = targets.shape
       inputs = mtf.shift(targets, offset=1, dim=length_dim, wrap=False)
     else:
       inputs = _import_feature("inputs")
 
-    if text2self:
+    if isinstance(transformer_model, transformer.Unitransformer):
       position_kwargs = dict(
-          sequence_id=_import_feature("targets_segmentation"),
-          position=_import_feature("targets_position"),
+          sequence_id=_import_feature("targets_segmentation", True),
+          position=_import_feature("targets_position", True),
+      )
+    elif isinstance(transformer_model, transformer.Bitransformer):
+      position_kwargs = dict(
+          encoder_sequence_id=_import_feature("inputs_segmentation", True),
+          decoder_sequence_id=_import_feature("targets_segmentation", True),
+          encoder_position=_import_feature("inputs_position", True),
+          decoder_position=_import_feature("targets_position", True),
       )
     else:
-      position_kwargs = dict(
-          encoder_sequence_id=_import_feature("inputs_segmentation"),
-          decoder_sequence_id=_import_feature("targets_segmentation"),
-          encoder_position=_import_feature("inputs_position"),
-          decoder_position=_import_feature("targets_position"),
-      )
+      raise ValueError("unrecognized class")
 
     logits, loss = transformer_model.call_simple(
         inputs=inputs,
         targets=targets,
         compute_loss=True,
         mode=mode,
-        variable_dtype=variable_dtype,
+        variable_dtype=get_variable_dtype(),
         **position_kwargs)
 
     if use_tpu and logits is not None:
@@ -250,22 +309,22 @@ def tpu_estimator_model_fn(transformer_model,
 
 @gin.configurable
 def decode_from_file(estimator,
+                     vocabulary,
+                     model_type,
                      batch_size,
-                     length,
-                     inputs_encoder,
-                     targets_encoder,
-                     text2self,
+                     sequence_length,
+                     checkpoint_path="",
                      input_filename=gin.REQUIRED,
                      output_filename=gin.REQUIRED):
   """Decode from a text file.
 
   Args:
     estimator: a TPUEstimator
+    vocabulary: a mtf.transformer.vocabulary.Vocabulary
+    model_type: a string
     batch_size: an integer
-    length: an integer (maximum decode length)
-    inputs_encoder: a mtf.transformer.dataset.Encoder
-    targets_encoder: a mtf.transformer.dataset.Encoder
-    text2self: a boolean
+    sequence_length: an integer (maximum decode length)
+    checkpoint_path: an optional string
     input_filename: a string
     output_filename: a string
   """
@@ -280,18 +339,18 @@ def decode_from_file(estimator,
   # encode all inputs
   all_input_ids = []
   for line in inputs:
-    ids = inputs_encoder.encode(line.strip())
-    if not text2self:
+    ids = vocabulary.encode(line.strip())
+    if model_type != "lm":
       # for text2self problems, the inputs represent a partial sequence
       # to be continued, and should not be terminated by EOS.
       # for sequence-to-sequence problems, the input needs to be EOS-terminated
       ids += [1]
-    if len(ids) > length:
-      ids = ids[:length]
+    if len(ids) > sequence_length:
+      ids = ids[:sequence_length]
     else:
-      ids.extend([0] * (length - len(ids)))
-    all_input_ids.append(ids)
-  # pad to make an integral number of batches
+      ids.extend([0] * (sequence_length - len(ids)))
+      all_input_ids.append(ids)
+      # pad to make an integral number of batches
   all_input_ids.extend([all_input_ids[0]] * (-n % batch_size))
   padded_n = len(all_input_ids)
   all_input_ids = np.array(all_input_ids, dtype=np.int32)
@@ -302,12 +361,12 @@ def decode_from_file(estimator,
     dataset = dataset.batch(batch_size, drop_remainder=True)
     return dataset
 
-  result_iter = estimator.predict(input_fn)
-  vocab_size = targets_encoder.vocab_size
+  result_iter = estimator.predict(input_fn, checkpoint_path=checkpoint_path)
+  vocab_size = vocabulary.vocab_size
   decodes = []
   for i, result in enumerate(result_iter):
     output_ids = clean_decodes(list(result["outputs"]), vocab_size)
-    output_string = targets_encoder.decode(output_ids)
+    output_string = vocabulary.decode([int(x) for x in output_ids])
     decodes.append(output_string)
     if i < 3:
       # LOG THE FIRST FEW DECODES
@@ -354,154 +413,93 @@ def clean_decodes(ids, vocab_size):
   return ret
 
 
-@gin.configurable()
-def model(input_vocab_size,
-          output_vocab_size,
-          text2self,
-          num_layers=gin.REQUIRED,
-          d_ff=gin.REQUIRED,
-          d_kv=gin.REQUIRED,
-          d_model=gin.REQUIRED,
-          num_heads=gin.REQUIRED,
-          dropout=gin.REQUIRED,
-          max_length=gin.REQUIRED,
-          length=gin.REQUIRED,
-          label_smoothing=gin.REQUIRED,
-          layout=gin.REQUIRED,
-          mesh_shape=gin.REQUIRED):
-  """Build a simple Transformer model.
+@gin.configurable
+def auto_batch_size(sequence_length,
+                    mesh_shape,
+                    layout_rules,
+                    tokens_per_split=2048):
+  """Automatically compute batch size.
 
   Args:
-    input_vocab_size: an integer
-    output_vocab_size: an integer
-    text2self: a boolean meaning a language model (True) or encoder/decoder
-      (False)
-    num_layers: integer, number of transformer layers
-    d_ff: integer, size of feed-forward hidden layers
-    d_kv: integer, size of attention keys/values
-    d_model: integer, size of hidden state
-    num_heads: integer, heads per attention layer
-    dropout: float, dropout rate
-    max_length: maximum sequence length (checkpoints depend on this)
-    length: actual sequence length - defaults to max_length
-    label_smoothing: label smoothing
-    layout: a string
-    mesh_shape: a string
-
+    sequence_length: an integer
+    mesh_shape: an input to mtf.convert_to_shape()
+    layout_rules: an input to mtf.convert_to_layout_rules()
+    tokens_per_split: an integer
   Returns:
-    a mtf.Unitransformer or mtf.Bitransformer
+    an integer
   """
-  # Needed for Gin injection.
-  del length
-
-  def layer_stack(include_encdec_attention):
-    """Create a LayerStack.
-
-    TODO(noam): implement a way to configure custom layer stacks using
-    hyperparameters. (as in mtf_transformer2 in the tensor2tensor library).
-    That functionality should go in transformer/model_builder.py
-
-    Args:
-      include_encdec_attention: a boolean
-
-    Returns:
-      a transformer.LayerStack
-    """
-    return model_builder.simple_layer_stack(
-        include_encdec_attention=include_encdec_attention,
-        num_layers=num_layers,
-        d_ff=d_ff,
-        d_kv=d_kv,
-        num_heads=num_heads,
-        dropout_rate=dropout)
-
-  if text2self:
-    return transformer.Unitransformer(
-        layer_stack=layer_stack(include_encdec_attention=False),
-        d_model=d_model,
-        input_vocab_size=input_vocab_size,
-        output_vocab_size=output_vocab_size,
-        autoregressive=True,
-        max_length=max_length,
-        shared_embedding_and_softmax_weights=True,
-        label_smoothing=label_smoothing,
-        layout=layout,
-        mesh_shape=mesh_shape)
-  else:
-    return transformer.Bitransformer(
-        encoder_layer_stack=layer_stack(include_encdec_attention=False),
-        decoder_layer_stack=layer_stack(include_encdec_attention=True),
-        encoder_d_model=d_model,
-        decoder_d_model=d_model,
-        input_vocab_size=input_vocab_size,
-        output_vocab_size=output_vocab_size,
-        max_length=max_length,
-        shared_embedding=False,
-        shared_embedding_and_softmax_weights=True,
-        label_smoothing=label_smoothing,
-        layout=layout,
-        mesh_shape=mesh_shape)
+  num_splits = mtf.tensor_dim_to_mesh_dim_size(
+      layout_rules, mesh_shape, mtf.Dimension("batch", 0))
+  ret = (tokens_per_split // sequence_length) * num_splits
+  tf.logging.info(
+      "AUTO_BATCH_SIZE tokens_per_split=%s num_splits=%s"
+      " sequence_length=%s batch_size=%s"
+      % (tokens_per_split, num_splits, sequence_length, ret))
+  return ret
 
 
 @gin.configurable
-def get_tfds_dataset(dataset_name, data_dir, text2self=gin.REQUIRED):
-  """Loads the TFDS dataset specified by datatset_name.
-
-  Args:
-    dataset_name: TensorFlow Datasets dataset name.
-    data_dir: string, data_dir for TensorFlow Datasets
-    text2self: Whether to train a language model (True) or encoder-decoder
-      text-to-text model (False).
-
-  Returns:
-    A transformer_dataset.Dataset.
-  """
-  text2self = gin.query_parameter("run.text2self")
-  return transformer_dataset.TokenizedTFDSDataset(
-      dataset_name, text2self=text2self, data_dir=data_dir or None)
-
-
-@gin.configurable(blacklist=["dataset"])
 def run(tpu_job_name,
-        master_dtype,
-        slice_dtype,
-        activation_dtype,
         tpu,
         gcp_project,
         tpu_zone,
-        autostack,
         model_dir,
-        dataset,
-        mode=gin.REQUIRED,
-        iterations_per_loop=gin.REQUIRED,
-        save_checkpoints_steps=gin.REQUIRED,
-        eval_steps=gin.REQUIRED,
-        train_steps=gin.REQUIRED,
-        batch_size=gin.REQUIRED,
-        text2self=gin.REQUIRED):
+        model_type="bitransformer",
+        vocabulary=gin.REQUIRED,
+        dataset_fn=gin.REQUIRED,
+        dataset_split="train",
+        autostack=True,
+        checkpoint_path="",
+        mode="train",
+        iterations_per_loop=100,
+        save_checkpoints_steps=1000,
+        eval_steps=10,
+        train_steps=1000000,
+        batch_size=auto_batch_size,
+        sequence_length=gin.REQUIRED,
+        mesh_shape=gin.REQUIRED,
+        layout_rules=gin.REQUIRED):
   """Run training/eval/inference.
 
   Args:
     tpu_job_name: string, name of TPU worker binary
-    master_dtype: string, datatype for checkpoints
-    slice_dtype: string, datatype for variables in memory
-    activation_dtype: string, datatype for activations
     tpu: string, the Cloud TPU to use for training
     gcp_project: string, project name for the Cloud TPU-enabled project
     tpu_zone: string, GCE zone where the Cloud TPU is located in
-    autostack: boolean, internally combine variables
     model_dir: string, estimator model_dir
-    dataset: A transformer_dataset.Dataset to read data from.
+    model_type: a string - either "bitransformer", "lm" or "aligned"
+    vocabulary: a vocabulary.Vocabulary
+    dataset_fn: A function returning a tf.data.Dataset
+    dataset_split: a string
+    autostack: boolean, internally combine variables
+    checkpoint_path: a string - which checkpoint to load for inference
     mode: string, train/evaluate/infer
     iterations_per_loop: integer, steps per train loop
     save_checkpoints_steps: integer, steps per checkpoint
     eval_steps: integer, number of evaluation steps
     train_steps: Total number of training steps.
-    batch_size: Mini-batch size for the training. Note that this is the global
-      batch size and not the per-shard batch.
-    text2self: Whether to train a language model (True) or encoder-decoder
-      text-to-text model (False).
+    batch_size: An integer or a function with the same signature as
+      auto_batch_size().  Mini-batch size for the training. Note that this is
+      the global batch size and not the per-shard batch size.
+    sequence_length: an integer
+    mesh_shape: an input to mtf.convert_to_shape()
+    layout_rules: an input to mtf.convert_to_layout_rules()
   """
+  if not isinstance(batch_size, int):
+    batch_size = batch_size(sequence_length, mesh_shape, layout_rules)
+
+  tf.logging.info("mode=%s" % mode,)
+  tf.logging.info("batch_size=%s" % batch_size,)
+  tf.logging.info("sequence_length=%s" % sequence_length,)
+  tf.logging.info("mesh_shape=%s" % mesh_shape,)
+  tf.logging.info("layout_rules=%s" % layout_rules,)
+
+  if mode == "train" and dataset_split != "train":
+    raise ValueError("mode==\"train\" requires dataset_split==\"train\"")
+
+  mesh_shape = mtf.convert_to_shape(mesh_shape)
+  layout_rules = mtf.convert_to_layout_rules(layout_rules)
+
   cluster = tf.contrib.cluster_resolver.TPUClusterResolver(
       tpu if (tpu) else "", zone=tpu_zone, project=gcp_project)
 
@@ -518,52 +516,19 @@ def run(tpu_job_name,
       save_checkpoints_steps=save_checkpoints_steps,
       tpu_config=my_tpu_config)
 
-  output_encoder = dataset.encoders["targets"]
-  if text2self:
-    input_encoder = output_encoder
-  else:
-    input_encoder = dataset.encoders["inputs"]
-
-  transformer_model = model(
-      input_vocab_size=transformer_dataset.padded_vocab_size(
-          input_encoder.vocab_size, 128),
-      output_vocab_size=transformer_dataset.padded_vocab_size(
-          output_encoder.vocab_size, 128),
-      text2self=text2self)
-  mesh_shape = mtf.convert_to_shape(gin.query_parameter("model.mesh_shape"))
-  layout_rules = mtf.convert_to_layout_rules(
-      gin.query_parameter("model.layout"))
-  # Data-types used for variables and activations
-  # See comments in the FLAGS
-  master_dtype = tf.as_dtype(master_dtype)
-  if slice_dtype:
-    slice_dtype = tf.as_dtype(slice_dtype)
-  elif not tpu or mode == "train":
-    slice_dtype = tf.float32
-  else:
-    slice_dtype = tf.bfloat16
-  if activation_dtype:
-    activation_dtype = tf.as_dtype(activation_dtype)
-  else:
-    activation_dtype = tf.bfloat16 if tpu else tf.float32
-  variable_dtype = mtf.VariableDType(
-      master_dtype=master_dtype,
-      slice_dtype=slice_dtype,
-      activation_dtype=activation_dtype)
-
-  length_from_config = gin.query_parameter(
-      "model.length") or gin.query_parameter("model.max_length")
+  transformer_model = build_model(
+      model_type=model_type,
+      vocab_size=vocabulary.vocab_size)
 
   model_fn = tpu_estimator_model_fn(
+      model_type=model_type,
       transformer_model=transformer_model,
       model_dir=model_dir,
       use_tpu=tpu,
       mesh_shape=mesh_shape,
       layout_rules=layout_rules,
-      text2self=text2self,
-      variable_dtype=variable_dtype,
       batch_size=batch_size,
-      length=length_from_config,
+      sequence_length=sequence_length,
       autostack=autostack)
 
   estimator = tpu_estimator.TPUEstimator(
@@ -578,11 +543,11 @@ def run(tpu_job_name,
 
   def input_fn(params):
     del params
-    return dataset.load(
-        batch_size=batch_size,
-        length=length_from_config,
-        train=(mode == "train"),
-        pack=True)
+    dataset = dataset_fn(batch_size=batch_size,
+                         sequence_length=sequence_length,
+                         vocabulary=vocabulary,
+                         dataset_split=dataset_split)
+    return dataset
 
   if mode == "train":
     estimator.train(input_fn=input_fn, max_steps=train_steps)
@@ -590,14 +555,14 @@ def run(tpu_job_name,
     estimator.evaluate(
         input_fn=input_fn,
         steps=eval_steps,
-    )
+        checkpoint_path=checkpoint_path)
   elif mode == "infer":
     decode_from_file(
         estimator,
+        vocabulary=vocabulary,
+        model_type=model_type,
         batch_size=batch_size,
-        length=length_from_config,
-        inputs_encoder=dataset.encoders["targets" if text2self else "inputs"],
-        targets_encoder=dataset.encoders["targets"],
-        text2self=text2self)
+        sequence_length=sequence_length,
+        checkpoint_path=checkpoint_path)
   else:
     raise ValueError("unknown mode %s - must be train/evaluate/infer" % mode)

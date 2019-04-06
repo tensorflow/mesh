@@ -48,6 +48,7 @@ from __future__ import division
 from __future__ import print_function
 
 import json
+import gin
 import mesh_tensorflow as mtf
 
 import tensorflow as tf
@@ -263,6 +264,7 @@ class Context(object):
           mtf.not_equal(self.sequence_id, 0), self.activation_dtype)
 
 
+@gin.configurable
 class LayerStack(TransformerLayer):
   """A stack of layers with residual connections and layer norms."""
 
@@ -327,6 +329,7 @@ class LayerStack(TransformerLayer):
     return self._layers
 
 
+@gin.configurable
 class Unitransformer(object):
   """A Transformer model with only one layer stack, e.g. a language model.
 
@@ -336,22 +339,25 @@ class Unitransformer(object):
 
   def __init__(self,
                layer_stack,
-               d_model,
-               input_vocab_size,
-               output_vocab_size,
-               autoregressive,
-               max_length,
+               d_model=1024,
+               input_vocab_size=gin.REQUIRED,
+               output_vocab_size=gin.REQUIRED,
+               autoregressive=gin.REQUIRED,
+               max_length=gin.REQUIRED,
                shared_embedding_and_softmax_weights=False,
                label_smoothing=0.0,
                z_loss=1e-4,
                name="transformer",
                layout=None,
-               mesh_shape=None):
+               mesh_shape=None,
+               vocab_divisor=128):
     self.layer_stack = layer_stack
     self.model_dim = mtf.Dimension("d_model", d_model)
-    self.input_vocab_dim = mtf.Dimension("vocab", input_vocab_size)
+    self.input_vocab_dim = mtf.Dimension(
+        "vocab", _round_up_to_multiple(input_vocab_size, vocab_divisor))
     if output_vocab_size:
-      self.output_vocab_dim = mtf.Dimension("vocab", output_vocab_size)
+      self.output_vocab_dim = mtf.Dimension(
+          "vocab", _round_up_to_multiple(output_vocab_size, vocab_divisor))
     else:
       self.output_vocab_dim = None
       if autoregressive:
@@ -490,6 +496,7 @@ class Unitransformer(object):
       loss = None
     return logits, loss
 
+  @gin.configurable(module="Unitransformer")
   def sample_autoregressive(self,
                             partial_sequences,
                             stop_at_token=1,
@@ -515,7 +522,8 @@ class Unitransformer(object):
       partial_sequences: an int32 Tensor with shape [<batch_dims>, length_dim]
       stop_at_token: an optional integer eos id.  Stop when we produce it.
       max_steps: an optional integer
-      temperature: an optional floating point value between 0 and 1
+      temperature: an optional floating point value between 0.0 and 1.0
+        0.0 means argmax, 1.0 means sample according to predicted distribution.
       variable_dtype: a mtf.VariableDType
       encoder_output: an optional Tensor
       encoder_sequence_id: an optional Tensor
@@ -713,49 +721,20 @@ class Unitransformer(object):
         beams, mtf.constant(inputs.mesh, 0, dtype=tf.int32), beam_dim)
 
 
+@gin.configurable
 class Bitransformer(object):
-  """A Transformer model with only one layer stack, e.g. a language model."""
+  """A Transformer sequence-to-sequence model with two layer stacks."""
 
-  def __init__(self,
-               encoder_layer_stack,
-               decoder_layer_stack,
-               encoder_d_model,
-               decoder_d_model,
-               input_vocab_size,
-               output_vocab_size,
-               max_length,
-               shared_embedding=True,
-               shared_embedding_and_softmax_weights=False,
-               label_smoothing=0.0,
-               z_loss=1e-4,
-               encoder_name="encoder",
-               decoder_name="decoder",
-               layout=None,
-               mesh_shape=None):
-    self.encoder = Unitransformer(
-        encoder_layer_stack,
-        encoder_d_model,
-        input_vocab_size=input_vocab_size,
-        output_vocab_size=None,
-        autoregressive=False,
-        max_length=max_length,
-        name=encoder_name,
-        layout=layout,
-        mesh_shape=mesh_shape)
-    self.decoder = Unitransformer(
-        decoder_layer_stack,
-        decoder_d_model,
-        input_vocab_size=output_vocab_size,
-        output_vocab_size=output_vocab_size,
-        autoregressive=True,
-        max_length=max_length,
-        label_smoothing=label_smoothing,
-        shared_embedding_and_softmax_weights=(
-            shared_embedding_and_softmax_weights),
-        z_loss=z_loss,
-        name=decoder_name,
-        layout=layout,
-        mesh_shape=mesh_shape)
+  def __init__(self, encoder, decoder, shared_embedding=True):
+    """Create a Bitransformer.
+
+    Args:
+      encoder: a mtf.unitransformer
+      decoder: a mtf.unitransformer
+      shared_embedding: a boolean
+    """
+    self.encoder = encoder
+    self.decoder = decoder
     self.shared_embedding = shared_embedding
 
   def _shared_params(self, mesh, variable_dtype):
@@ -772,7 +751,8 @@ class Bitransformer(object):
       with tf.variable_scope("shared"):
         compatible = (
             self.encoder.model_dim == self.decoder.model_dim and
-            self.encoder.input_vocab_dim == self.decoder.input_vocab_dim)
+            self.encoder.input_vocab_dim == self.decoder.input_vocab_dim and
+            self.encoder.max_length_dim == self.decoder.max_length_dim)
         if not compatible:
           raise ValueError(
               "shared_embedding requires encoder and decoder to have identical"
@@ -852,12 +832,13 @@ class Bitransformer(object):
       loss += encoder_loss
     return logits, loss
 
+  @gin.configurable(module="Unitransformer")
   def decode(self,
              inputs,
              variable_dtype=mtf.VariableDType(tf.float32),
              beam_size=1,
              alpha=0.6,
-             temperature=1.0,
+             temperature=0.0,
              decode_length_multiplier=1.5,
              decode_length_constant=10):
     """Sampling or beam search.
@@ -871,6 +852,7 @@ class Bitransformer(object):
       beam_size: an integer >= 1
       alpha: a floating point value (length bonus for beam search)
       temperature: a value between 0 and 1 (must be 0 if beam_size > 1)
+        0.0 means argmax, 1.0 means sample according to predicted distribution.
       decode_length_multiplier: a float
       decode_length_constant: a float
 
@@ -927,3 +909,61 @@ class Bitransformer(object):
           encoder_sequence_id=encoder_sequence_id,
           alpha=alpha,
           shared_params=shared_params)
+
+
+# gin-configurable constructors
+@gin.configurable
+def make_layer_stack(layers=gin.REQUIRED, num_layers=6):
+  """Configurable layer stack.
+
+  Args:
+    layers: a list of subclasses of TransformerLayer
+    num_layers: an integer
+  Returns:
+    a LayerStack
+  """
+  return LayerStack([cls() for cls in layers] * num_layers)
+
+
+@gin.configurable
+def make_bitransformer(
+    input_vocab_size=gin.REQUIRED,
+    output_vocab_size=gin.REQUIRED):
+  """Gin-configurable bitransformer constructor.
+
+  In your config file you need to set the encoder and decoder layers like this:
+  encoder/make_layer_stack.layers = [
+    @transformer_layers.SelfAttention,
+    @transformer_layers.DenseReluDense,
+  ]
+  decoder/make_layer_stack.layers = [
+    @transformer_layers.SelfAttention,
+    @transformer_layers.EncDecAttention,
+    @transformer_layers.DenseReluDense,
+  ]
+
+  Args:
+    input_vocab_size: a integer
+    output_vocab_size: an integer
+  Returns:
+    a Bitransformer
+  """
+  with gin.config_scope("encoder"):
+    encoder = Unitransformer(
+        layer_stack=make_layer_stack(),
+        input_vocab_size=input_vocab_size,
+        output_vocab_size=None,
+        autoregressive=False,
+        name="encoder")
+  with gin.config_scope("decoder"):
+    decoder = Unitransformer(
+        layer_stack=make_layer_stack(),
+        input_vocab_size=output_vocab_size,
+        output_vocab_size=output_vocab_size,
+        autoregressive=True,
+        name="decoder")
+  return Bitransformer(encoder, decoder)
+
+
+def _round_up_to_multiple(n, divisor):
+  return n + -n % divisor

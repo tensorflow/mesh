@@ -15,6 +15,72 @@
 
 r"""Dataset utilities for Transformer example.
 
+During training/eval, transformer gets input from a tf.data.Dataset.  The
+utilities in this file are for loading such tf.data.Datasets from various data
+sources.
+
+Format:
+
+The tf.data.Dataset outputs a dictionary of features, each of which is
+an integer tensor with fixed shape [batch_size, sequence_length].
+
+The keys of the dictionary (some of which are optional) are:
+{
+  "inputs"
+  "inputs_segmentation"
+  "inputs_position"
+  "targets"
+  "targets_segmentation"
+  "targets_position"
+}
+
+We follow the convention that ID=0 represents padding and ID=1 represents EOS.
+All sequences are terminated by EOS.  There is no BOS token included.
+
+"inputs" represents the input sequences in a sequence-to-sequence problem.  A
+language-modeling problem has no "inputs" feature.
+
+"targets" represents the target sequences of a sequence-to-sequence problem or
+the sequences in a language-modeling problem.
+
+A dataset may be "packed", in which case each row in the tensors represents
+multiple training examples concatenated together (each terminated by EOS=1).
+In this case, the output dictionary will contain additional features:
+
+"inputs_segmentation" (if "inputs" is present)
+"targets_segmentation"
+"inputs_position" (if "inputs" is present)
+"targets_position"
+
+"inputs_segmentation" and "inputs_position" are both aligned with "inputs".
+
+"inputs_segmentation" specifies which of the original examples a particular
+token belongs to.  "inputs_position" specifies the position of this token in the
+original sequence.  "targets_segmentation" and "targets_position" are similarly
+defined.
+
+Example:
+
+Two original sequence-pairs are packed together to form the first combined
+example in the batch:
+
+The original sequence-pairs are:
+  {"inputs": [8, 7, 1=EOS], "targets": [4, 1=EOS]}
+  {"inputs": [2, 3, 4, 1=EOS], "targets": [5, 6, 1=EOS]}
+
+The output dictionary looks like this:
+{
+               "inputs": [[8, 7, 1, 2, 3, 4, 1, 0, 0, 0], ...]
+  "inputs_segmentation": [[1, 1, 1, 2, 2, 2, 2, 0, 0, 0], ...]
+      "inputs_position": [[0, 1, 2, 0, 1, 2, 3, 0, 0, 0], ...]
+              "targets": [[4, 1, 5, 6, 1, 0, 0, 0, 0, 0], ...]
+ "targets_segmentation": [[1, 1, 2, 2, 2, 0, 0, 0, 0, 0], ...]
+     "targets_position": [[0, 1, 0, 1, 2, 0, 0, 0, 0, 0], ...]
+}
+
+The "_segmentation" tensors have 1s and 2s to demacrate these two original
+examples, and 0s for padding.  The "_position" tensors contain the positions
+within the two original examples.
 """
 
 from __future__ import absolute_import
@@ -22,239 +88,283 @@ from __future__ import division
 from __future__ import print_function
 
 import functools
+import os
+import gin
 import tensorflow as tf
 import tensorflow_datasets as tfds
 
 
-class Encoder(object):
-  """Abstract class for encoding strings as lists of integers.
+@gin.configurable
+def pack_and_batch(dataset, batch_size, length, pack=True):
+  """Create a tf.data.Dataset which emits training batches.
 
-  We will subclass this and wrap multiple implementations of text encoders.
-  We follow the convention that ids 0=PAD and 1=EOS are reserved.
+  The input dataset emits feature-dictionaries where each feature is a vector
+  of integers ending in EOS=1
+
+  The tensors in the returned tf.data.Dataset have shape
+  [batch_size, length].  Zeros indicate padding.
+
+  length indicates the length of the emitted examples.  Examples with
+  inputs/targets longer than length get truncated.
+
+  TODO(noam): for text2self problems, we should just chop too-long
+  sequences into multiple parts and train on all of them.
+
+  If pack=False, then each emitted example will contain one
+  example emitted by load_internal().
+
+  If pack=True, then multiple examples emitted by load_internal() are
+  concatenated to form one combined example with the given length.
+  See comments in the function pack_dataset().
+
+  batch_size indicates the number of (combined) examples per batch,
+  across all cores.
+
+  Args:
+    dataset: a tf.data.Dataset
+    batch_size: an integer
+    length: an integer
+    pack: a boolean
+  Returns:
+    a tf.data.Dataset where all features have fixed shape [batch, length].
   """
-
-  @property
-  def vocab_size(self):
-    """Number of ids (including 0=PAD and 1=EOS).
-
-    Returns:
-      an integer
-    """
-    raise NotImplementedError("Not implemented.")
-
-  def encode(self, s):
-    """Encode a python string as a list of integers.
-
-    Args:
-      s: a string
-    Returns:
-      a list of integers (not terminated by EOS)
-    """
-    raise NotImplementedError("Not implemented.")
-
-  def decode(self, ids):
-    """Decode a list of integers to a python string.
-
-    Args:
-      ids: a list of integers (not terminated by EOS)
-    Returns:
-      a string
-    """
-    raise NotImplementedError("Not implemented.")
-
-  def encode_tf(self, s):
-    """Encode a tf.Scalar string to a tf.Tensor.
-
-    This will be necessary for on-the-fly tokenization.
-
-    Args:
-      s: a tf.Scalar with dtype tf.string
-    Returns:
-      a 1d tf.Tensor with dtype tf.int32
-    """
-    raise NotImplementedError("Not implemented.")
-
-  def decode_tf(self, ids):
-    """Decode in TensorFlow.
-
-    I don't know when we will use this, but it seems logical to
-    have if we can.
-
-    Args:
-      ids: a 1d tf.Tensor with dtype tf.int32
-    Returns:
-      a tf Scalar with dtype tf.string
-    """
-    raise NotImplementedError("Not implemented.")
+  if pack:
+    dataset = pack_dataset(dataset, length=length)
+  dataset = dataset.batch(batch_size, drop_remainder=False)
+  dataset = dataset.map(
+      functools.partial(trim_and_pad_all_features,
+                        batch_size=batch_size,
+                        length=length),
+      num_parallel_calls=tf.data.experimental.AUTOTUNE)
+  dataset = dataset.prefetch(100)
+  return dataset
 
 
-class TFDSEncoder(Encoder):
-  """Wrapper for tensorflow_datasets encoders.
+def encode_dataset(dataset, vocabulary):
+  """Encode from strings to token ids.
 
-  In the TFDS encoders, ID=0 is reserved for padding.
-  We want to also reserve ID=1 for EOS, so we shift all IDs up by 1.
+  Args:
+    dataset: a tf.data.Dataset with string values.
+    vocabulary: a mesh_tensorflow.transformer.Vocabulary
+  Returns:
+    a tf.data.Dataset with integer-vector values ending in EOS=1
   """
-
-  def __init__(self, tfds_encoder):
-    self._tfds_encoder = tfds_encoder
-
-  @property
-  def vocab_size(self):
-    """Number of ids (including 0=PAD and 1=EOS).
-
-    Returns:
-      an integer
-    """
-    return self._tfds_encoder.vocab_size + 1
-
-  def encode(self, s):
-    """Encode a python string as a list of integers.
-
-    Args:
-      s: a string
-    Returns:
-      a list of integers (not terminated by EOS)
-    """
-    # shift IDs up by 1 to make room for EOS=1 (see class docstring)
-    return [i + 1 for i in self._tfds_encoder.encode(s)]
-
-  def decode(self, ids):
-    """Decode a list of integers to a python string.
-
-    Args:
-      ids: a list of integers (not terminated by EOS)
-    Returns:
-      a string
-    """
-    return self._tfds_encoder.decode([i - 1 for i in ids])
+  def encode(features):
+    return {k: vocabulary.encode_tf(v) for k, v in features.items()}
+  return dataset.map(encode, num_parallel_calls=tf.data.experimental.AUTOTUNE)
 
 
-class Dataset(object):
-  """Abstract dataset class."""
+@gin.configurable
+def pretokenized_tfds_dataset(dataset_name=gin.REQUIRED,
+                              text2self=gin.REQUIRED,
+                              tfds_data_dir=gin.REQUIRED,
+                              dataset_split=gin.REQUIRED,
+                              batch_size=gin.REQUIRED,
+                              sequence_length=gin.REQUIRED,
+                              vocabulary=None):
+  """Reads a tensorflow_datasets dataset.
 
-  @property
-  def feature_keys(self):
-    return self.encoders.keys()
-
-  @property
-  def encoders(self):
-    """A dictionary from feature key to Encoder.
-
-    Returns:
-       a dictionary from string to Encoder.
-    """
-    raise NotImplementedError("Not implemented")
-
-  def load(self, batch_size, length, train, pack):
-    """Get a tf.data.Dataset. for training/eval.
-
-    The tensors in the returned tf.data.Dataset have shape
-    [batch_size, length].  Zeros indicate padding.
-
-    length indicates the length of the emitted examples.  Examples with
-    inputs/targets longer than length get truncated.
-
-    If pack=False, then each emitted example will contain one
-    example emitted by load_internal().
-
-    If pack=True, then multiple examples emitted by load_internal() are
-    concatenated to form one combined example with the given length.
-    See comments in the function pack_dataset().
-
-    batch_size indicates the number of (combined) examples per batch,
-    across all cores.
-
-    Args:
-      batch_size: an integer
-      length: an integer
-      train: a boolean
-      pack: a boolean
-    Returns:
-      a tf.data.Dataset
-    """
-    dataset = self.load_internal(train)
-    if train:
-      dataset = dataset.repeat()
-    def encode_and_append_eos(features):
-      ret = {}
-      for k in self.feature_keys:
-        v = features[k]
-        if v.dtype == tf.string:
-          v = self.encoders[k].encode_tf(v)
-        v = tf.concat([v, [1]], 0)
-        ret[k] = v
-      return ret
-    dataset = dataset.map(encode_and_append_eos)
-    if pack:
-      dataset = pack_dataset(dataset, length=length)
-    dataset = dataset.batch(batch_size, drop_remainder=False)
-    dataset = dataset.map(
-        functools.partial(trim_and_pad_all_features,
-                          batch_size=batch_size,
-                          length=length))
-    return dataset
-
-  def load_internal(self, train):
-    """Get a tf.data.Dataset containing single examples with no EOS.
-
-    The values in the returned examples can either be raw (tf.string) or
-    tokenized (integer datatype).
-
-    Args:
-      train: a boolean
-    Returns:
-      a tf.data.Dataset
-    """
-    raise NotImplementedError("Not implemented")
+  Args:
+    dataset_name: a string
+    text2self: a boolean
+    tfds_data_dir: a boolean
+    dataset_split: a string
+    batch_size: an integer
+    sequence_length: an integer
+    vocabulary: ignored
+  Returns:
+    a tf.data.Dataset of batches
+  """
+  del vocabulary
+  dataset = tfds.load(
+      dataset_name,
+      split=dataset_split,
+      as_supervised=True,
+      data_dir=tfds_data_dir)
+  if dataset_split == "train":
+    dataset = dataset.repeat()
+    dataset = dataset.shuffle(1000)
+  def shift_and_append_eos(t):
+    # tfds encoder does not reserve an EOS token, so we need to shift
+    # in order to do so.  We also append EOS=1.
+    return tf.concat([t + 1, [1]], 0)
+  def feature_map(inputs, targets):
+    if text2self:
+      return {"targets": shift_and_append_eos(targets)}
+    else:
+      return {"inputs": shift_and_append_eos(inputs),
+              "targets": shift_and_append_eos(targets)}
+  dataset = dataset.map(feature_map,
+                        num_parallel_calls=tf.data.experimental.AUTOTUNE)
+  return pack_and_batch(dataset, batch_size, sequence_length)
 
 
-class TokenizedTFDSDataset(Dataset):
-  """Wrapper around pre-tokenized TFDS dataset."""
+@gin.configurable
+def untokenized_tfds_dataset(dataset_name=gin.REQUIRED,
+                             text2self=gin.REQUIRED,
+                             tfds_data_dir=gin.REQUIRED,
+                             dataset_split=gin.REQUIRED,
+                             batch_size=gin.REQUIRED,
+                             sequence_length=gin.REQUIRED,
+                             vocabulary=gin.REQUIRED):
+  """Reads a tensorflow_datasets dataset.
 
-  def __init__(self, tfds_name, text2self=False, data_dir=None):
-    self._tfds_name = tfds_name
-    self._text2self = text2self
-    self._data_dir = data_dir
-    info = tfds.builder(tfds_name).info
-    self._encoders = {
-        "targets": TFDSEncoder(
-            info.features[info.supervised_keys[1]].encoder)
-    }
-    if not text2self:
-      self._encoders["inputs"] = TFDSEncoder(
-          info.features[info.supervised_keys[0]].encoder)
+  Returns a tf.data.Dataset containing single tokenized examples where each
+  feature ends in EOS=1.
 
-  def load_internal(self, train):
-    """Get a tf.data.Dataset containing single examples with no EOS.
-
-    Args:
-      train: a boolean
-    Returns:
-      a tf.data.Dataset
-    """
-    dataset = tfds.load(
-        self._tfds_name,
-        split=tfds.Split.TRAIN if train else tfds.Split.VALIDATION,
-        as_supervised=True,
-        data_dir=self._data_dir)
-    def feature_map(inputs, targets):
-      if self._text2self:
-        return {"targets": targets + 1}
-      else:
-        return {"inputs": inputs + 1, "targets": targets + 1}
-    return dataset.map(feature_map)
-
-  @property
-  def encoders(self):
-    """A dictionary from feature key to Encoder.
-
-    Returns:
-       a dictionary from string to Encoder.
-    """
-    return self._encoders
+  Args:
+    dataset_name: a string
+    text2self: a boolean
+    tfds_data_dir: a boolean
+    dataset_split: a string
+    batch_size: an integer
+    sequence_length: an integer
+    vocabulary: a vocabulary.Vocabulary
+  Returns:
+    a tf.data.Dataset of batches
+  """
+  dataset = tfds.load(
+      dataset_name, split=dataset_split,
+      as_supervised=True, data_dir=tfds_data_dir)
+  if dataset_split == "train":
+    dataset = dataset.repeat()
+    dataset = dataset.shuffle(1000)
+  dataset = supervised_to_dict(dataset, text2self)
+  dataset = encode_all_features(dataset, vocabulary)
+  return pack_and_batch(dataset, batch_size, sequence_length)
 
 
-def pack_dataset(dataset, length, keys=None):
+def supervised_to_dict(dataset, text2self):
+  """Turns a supervised dataset into a dataset with a feature dictionary.
+
+  if text2self, then the features dictionary contains a "targets" key.
+  else, the features dictionary contains "inputs" and "targets" keys.
+
+  Args:
+    dataset: a tf.data.Dataset
+    text2self: a boolean
+  Returns:
+    a tf.data.Dataset
+  """
+  def my_fn(inputs, targets):
+    if text2self:
+      return {"targets": targets}
+    else:
+      return {"inputs": inputs, "targets": targets}
+  return dataset.map(my_fn, num_parallel_calls=tf.data.experimental.AUTOTUNE)
+
+
+def encode_all_features(dataset, vocabulary):
+  """Encode all features.
+
+  Args:
+    dataset: a tf.data.Dataset
+    vocabulary: a vocabulary.Vocabulary
+  Returns:
+    a tf.data.Dataset
+  """
+  def my_fn(features):
+    ret = {}
+    for k, v in features.items():
+      v = vocabulary.encode_tf(v)
+      v = tf.concat([tf.to_int64(v), [1]], 0)
+      ret[k] = v
+    return ret
+  return dataset.map(my_fn, num_parallel_calls=tf.data.experimental.AUTOTUNE)
+
+
+def pretokenized_tfrecord_dataset(filenames,
+                                  text2self,
+                                  eos_included,
+                                  repeat,
+                                  batch_size,
+                                  sequence_length):
+  """Reads tensor2tensor-style data files.
+
+  The dataset is defined by sets of TFRecord files of TFExample protos.
+  There should be a "targets" feature (a 1d tensor of integers)
+  If not text2self, there should also be an "inputs" feature.
+  Other features get ignored.
+
+  eos_included specifies whether the inputs and targets were written with an
+  EOS token, as in tensor2tensor
+
+  Args:
+    filenames: a list of strings
+    text2self: a boolean
+    eos_included: a boolean
+    repeat: a boolean
+    batch_size: an integer
+    sequence_length: an integer
+  Returns:
+    A tf.data.Dataset of batches
+  """
+  dataset = tf.data.TFRecordDataset(filenames, buffer_size=64 * 1024 * 1024)
+  if repeat:
+    dataset = dataset.repeat()
+  keys = ["targets"] if text2self else ["inputs", "targets"]
+  def decode_example(serialized_example):
+    """Return a dict of Tensors from a serialized tensorflow.Example."""
+    data_fields = {}
+    data_items_to_decoders = {}
+    for k in keys:
+      data_fields[k] = tf.VarLenFeature(tf.int64)
+      data_items_to_decoders[k] = tf.contrib.slim.tfexample_decoder.Tensor(k)
+    decoder = tf.contrib.slim.tfexample_decoder.TFExampleDecoder(
+        data_fields, data_items_to_decoders)
+    decode_items = list(sorted(data_items_to_decoders))
+    decoded = decoder.decode(serialized_example, items=decode_items)
+    if not eos_included:
+      decoded = [tf.concat([v, [1]], 0) for v in decoded]
+    return dict(zip(decode_items, decoded))
+  dataset = dataset.map(decode_example,
+                        num_parallel_calls=tf.data.experimental.AUTOTUNE)
+  return pack_and_batch(dataset, batch_size, sequence_length)
+
+
+@gin.configurable
+def pretokenized_t2t_dataset(dataset_name=gin.REQUIRED,
+                             text2self=False,
+                             data_dir=gin.REQUIRED,
+                             dataset_split="train",
+                             batch_size=gin.REQUIRED,
+                             sequence_length=gin.REQUIRED,
+                             vocabulary=None):
+  """Loads the Tensor2tensor dataset specified by datatset_name.
+
+  Args:
+    dataset_name: TensorFlow Datasets dataset name.
+    text2self: a boolean
+    data_dir: string, data_dir for TensorFlow Datasets
+    dataset_split: a string - "train" or "dev"
+    batch_size: an integer
+    sequence_length: an integer
+    vocabulary: ignored
+
+  Returns:
+    A tf.data.Dataset of batches
+  """
+  del vocabulary
+  filepattern = os.path.join(
+      data_dir, dataset_name + "-" + dataset_split + "-*")
+  filenames = tf.gfile.Glob(filepattern)
+  tf.logging.info("Found %s files matching %s" % (len(filenames), filepattern))
+  if not filenames:
+    raise ValueError("No matching files found")
+  dataset = pretokenized_tfrecord_dataset(
+      filenames=filenames,
+      text2self=text2self,
+      eos_included=True,
+      repeat=dataset_split == "train",
+      batch_size=batch_size,
+      sequence_length=sequence_length)
+  if dataset_split == "train":
+    dataset = dataset.shuffle(1000)
+  return dataset
+
+
+@gin.configurable
+def pack_dataset(dataset, length, keys=None, use_custom_ops=False):
   """Creates a 'packed' version of a dataset on-the-fly.
 
   Borrowed from the tensor2tensor library.
@@ -296,6 +406,8 @@ def pack_dataset(dataset, length, keys=None):
     dataset: a tf.data.Dataset
     length: an integer
     keys: a list of strings (e.g. ["inputs", "targets"])
+    use_custom_ops: a boolean - custom ops are faster but require a custom-built
+      binary, which is not currently possible on cloud-tpu.
 
   Returns:
     a tf.data.Dataset
@@ -311,13 +423,17 @@ def pack_dataset(dataset, length, keys=None):
       raise ValueError("Tensors to be packed must be one-dimensional.")
 
   # trim to length
-  dataset = dataset.map(lambda x: {k: x[k][:length] for k in keys})
+  dataset = dataset.map(lambda x: {k: x[k][:length] for k in keys},
+                        num_parallel_calls=tf.data.experimental.AUTOTUNE)
   # Setting batch_size=length ensures that the concatenated sequences (if they
   # have length >=1) are sufficient to fill at least one packed example.
   batch_size = length
   dataset = dataset.padded_batch(
       batch_size, padded_shapes={k: [-1] for k in keys})
-  return _pack_with_tf_ops(dataset, keys, length)
+  if use_custom_ops and len(keys) <= 2:
+    return _pack_with_custom_ops(dataset, keys, length)
+  else:
+    return _pack_with_tf_ops(dataset, keys, length)
 
 
 def _pack_with_tf_ops(dataset, keys, length):
@@ -430,6 +546,54 @@ def _pack_with_tf_ops(dataset, keys, length):
   return dataset
 
 
+def _pack_with_custom_ops(dataset, keys, length):
+  """Helper-function for packing a dataset which has already been batched.
+
+  See pack_dataset()
+
+  Relies on custom ops which require a custom compiled binary.
+  Faster than _pack_with_tf_ops(), and denser packing.
+
+  Args:
+    dataset: a dataset containing padded batches of examples.
+    keys: a list of strings (must have length 1 or 2)
+    length: an integer
+
+  Returns:
+    a dataset.
+  """
+  from tensor2tensor.data_generators.ops import pack_sequences_ops  # pylint: disable=g-import-not-at-top
+  # faster and better packing but requires custom-built binary.
+  if len(keys) == 1:
+    k1, = keys
+    k2 = k1
+  elif len(keys) == 2:
+    k1, k2 = keys
+  else:
+    raise ValueError("must have 1 or 2 keys")
+  def map_fn_custom(x):
+    """Map-function."""
+    (k1_packed, k1_segmengation, k1_position,
+     k2_packed, k2_segmentation, k2_position) = (
+         pack_sequences_ops.pack_sequences2(x[k1], x[k2], length))
+    packed = {
+        k1: k1_packed,
+        k1 + "_segmentation": k1_segmengation,
+        k1 + "_position": k1_position,
+    }
+    if len(keys) == 2:
+      packed.update({
+          k2: k2_packed,
+          k2 + "_segmentation": k2_segmentation,
+          k2 + "_position": k2_position,
+      })
+    return packed
+  dataset = dataset.map(map_fn_custom,
+                        num_parallel_calls=tf.data.experimental.AUTOTUNE)
+  dataset = dataset.flat_map(tf.data.Dataset.from_tensor_slices)
+  return dataset
+
+
 def _trim_and_pad(t, batch_size, length):
   """Trim/pad to get a tf.Tensor with shape [batch_size, length].
 
@@ -450,17 +614,3 @@ def _trim_and_pad(t, batch_size, length):
 def trim_and_pad_all_features(features, batch_size, length):
   """Trim and pad all features."""
   return {k: _trim_and_pad(v, batch_size, length) for k, v in features.items()}
-
-
-def padded_vocab_size(vocab_size, divisor=128):
-  """Round up vocabulary size so that it is a multiple of divisor.
-
-  We can only split a dimension if it is a multiple of the mesh-dimension size.
-
-  Args:
-    vocab_size: an integer
-    divisor: an integer
-  Returns:
-    an integer
-  """
-  return vocab_size + (-vocab_size % divisor)

@@ -20,6 +20,7 @@ from __future__ import division
 from __future__ import print_function
 
 import copy
+import gin
 
 import mesh_tensorflow as mtf
 from mesh_tensorflow.transformer import attention
@@ -28,10 +29,11 @@ from mesh_tensorflow.transformer import transformer
 import tensorflow as tf
 
 
+@gin.configurable
 class DenseReluDense(transformer.TransformerLayer):
   """Two fully-connected layers with feed-forward activation."""
 
-  def __init__(self, hidden_size=2048, dropout_rate=0.0):
+  def __init__(self, hidden_size=4096, dropout_rate=0.0):
     """Create a DenseReluDense.
 
     Args:
@@ -114,6 +116,7 @@ def attention_params(context,
       shared_kv=shared_kv)
 
 
+@gin.configurable
 class SelfAttention(transformer.TransformerLayer):
   """Multi-head self-attention layer."""
 
@@ -122,6 +125,7 @@ class SelfAttention(transformer.TransformerLayer):
                num_memory_heads=0,
                key_value_size=128,
                shared_kv=False,
+               dropout_rate=0.0,
                attention_kwargs=None):
     """Create a SelfAttention Layer.
 
@@ -130,18 +134,19 @@ class SelfAttention(transformer.TransformerLayer):
       num_memory_heads: an optional integer
       key_value_size: an integer
       shared_kv: a boolean
+      dropout_rate: a float
       attention_kwargs: a dictionary of kwargs for attention.attention
     """
     self.num_heads = num_heads
     self.num_memory_heads = num_memory_heads
     self.key_value_size = key_value_size
     self.shared_kv = shared_kv
+    self.dropout_rate = dropout_rate
     self.attention_kwargs = attention_kwargs or {}
 
   def attention_kwargs_from_context(self, context):
     kwargs = copy.copy(self.attention_kwargs)
-    if not context.train:
-      kwargs["dropout_rate"] = 0.0
+    kwargs["dropout_rate"] = self.dropout_rate if context.train else 0.0
     if "dropout_broadcast_dims" not in kwargs:
       kwargs["dropout_broadcast_dims"] = [context.length_dim]
     return kwargs
@@ -245,6 +250,7 @@ class SelfAttention(transformer.TransformerLayer):
     return 0 if context.autoregressive else None
 
 
+@gin.configurable
 class EncDecAttention(SelfAttention):
   """Multi-head attention over encoder output."""
 
@@ -287,6 +293,7 @@ class EncDecAttention(SelfAttention):
     return params.compute_output(o, output_shape=x.shape)
 
 
+@gin.configurable
 class LocalSelfAttention(SelfAttention):
   """Multi-head local self-attention layer."""
 
@@ -296,12 +303,14 @@ class LocalSelfAttention(SelfAttention):
                num_memory_heads=0,
                key_value_size=128,
                shared_kv=False,
+               dropout_rate=0.0,
                attention_kwargs=None,):
     super(LocalSelfAttention, self).__init__(
         num_heads,
         num_memory_heads,
         key_value_size,
         shared_kv,
+        dropout_rate,
         attention_kwargs)
     self.radius = radius
 

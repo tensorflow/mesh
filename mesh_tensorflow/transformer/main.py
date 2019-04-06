@@ -23,6 +23,7 @@ The core transformer model code is in the mesh_tensorflow/transformer/
 directory of this repository.
 
 Instructions for running this on cloud TPU are in the README .
+TODO(noam): instructions are obsolete and need updating.
 """
 
 from __future__ import absolute_import
@@ -41,25 +42,7 @@ tf.flags.DEFINE_string(
     " default tpu_worker.")
 tf.flags.DEFINE_string(
     "model_dir", "/tmp/transformer_standalone", "Estimator model_dir")
-tf.flags.DEFINE_string(
-    "data_dir",
-    ""
-    ,
-    "data_dir for TensorFlow Datasets")
 
-# DATA TYPES (each should be float32 or bfloat16)
-# master_dtype must be the same between training and eval/inference
-# slice_dtype should be float32 for training (otherwise bad quality)
-tf.flags.DEFINE_string("master_dtype", "bfloat16", "datatype for checkpoints")
-tf.flags.DEFINE_string(
-    "slice_dtype", "", "datatype for variables in memory. "
-    "Defaults to float32 during training and on non-TPU. "
-    "Defaults to bfloat16 during non-training on TPU. ")
-tf.flags.DEFINE_string(
-    "activation_dtype", "",
-    "datatype for activations.  Defaults to bfloat16 on TPU else float32")
-
-# MISC
 
 tf.flags.DEFINE_string(
     "tpu",
@@ -79,9 +62,6 @@ tf.flags.DEFINE_string(
     help="GCE zone where the Cloud TPU is located in. If not specified, we "
     "will attempt to automatically detect the GCE project from metadata.")
 
-# Enable this to speed up compilation on large clusters.
-tf.flags.DEFINE_boolean("autostack", True, "Internally combine variables")
-
 # GIN PARAMETERS
 tf.flags.DEFINE_multi_string("gin_file", None,
                              "List of paths to the config files.")
@@ -90,7 +70,7 @@ tf.flags.DEFINE_multi_string(
 
 FLAGS = tf.flags.FLAGS
 
-_DEFAULT_CONFIG_FILE = "./transformer_standalone_defaults.gin"
+_DEFAULT_CONFIG_FILE = "./gin/defaults.gin"
 
 
 def main(_):
@@ -99,17 +79,11 @@ def main(_):
   gin.parse_config_file(
       os.path.join(os.path.dirname(__file__), _DEFAULT_CONFIG_FILE))
   gin.parse_config_files_and_bindings(FLAGS.gin_file, FLAGS.gin_param)
-  dataset = utils.get_tfds_dataset(data_dir=FLAGS.data_dir)
   utils.run(
-      dataset=dataset,
       tpu_job_name=FLAGS.tpu_job_name,
-      master_dtype=FLAGS.master_dtype,
-      slice_dtype=FLAGS.slice_dtype,
-      activation_dtype=FLAGS.activation_dtype,
       tpu=FLAGS.tpu,
       gcp_project=FLAGS.gcp_project,
       tpu_zone=FLAGS.tpu_zone,
-      autostack=FLAGS.autostack,
       model_dir=FLAGS.model_dir)
 
 

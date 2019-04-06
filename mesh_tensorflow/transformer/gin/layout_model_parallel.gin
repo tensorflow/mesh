@@ -1,3 +1,0 @@
-# -*-Python-*-
-model.mesh_shape = "all:8"
-model.layout = "d_ff:all,heads:all,vocab:all"
