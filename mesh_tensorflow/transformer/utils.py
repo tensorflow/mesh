@@ -49,9 +49,9 @@ def get_variable_dtype(
     a mtf.VariableDtype
   """
   return mtf.VariableDType(
-      master_dtype=master_dtype,
-      slice_dtype=slice_dtype,
-      activation_dtype=activation_dtype)
+      master_dtype=tf.as_dtype(master_dtype),
+      slice_dtype=tf.as_dtype(slice_dtype),
+      activation_dtype=tf.as_dtype(activation_dtype))
 
 
 def build_model(model_type="bitransformer",
@@ -368,10 +368,10 @@ def decode_from_file(estimator,
     output_ids = clean_decodes(list(result["outputs"]), vocab_size)
     output_string = vocabulary.decode([int(x) for x in output_ids])
     decodes.append(output_string)
-    if i < 3:
-      # LOG THE FIRST FEW DECODES
-      tf.logging.info(inputs[i])
-      tf.logging.info(output_string)
+    if i & (i - 1) == 0:
+      # LOG every power of 2
+      tf.logging.info("decode %d input = %s" % (i, inputs[i]))
+      tf.logging.info("          output = %s" % output_string)
   # BUG WORKAROUND - on TF1.13 and earlier, the output for each batch is
   # repeated a number of times equal to the number of cores.
   if len(decodes) == padded_n:
