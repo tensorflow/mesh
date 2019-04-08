@@ -289,7 +289,7 @@ def tpu_estimator_model_fn(model_type,
               train_op=train_op,
               training_chief_hooks=[restore_hook, saver_hook])
       elif mode == tf.estimator.ModeKeys.EVAL:
-
+        # TODO(katherinelee): specify eval_metrics.
         def padded_neg_log_perplexity(logits, labels):
           weights = tf.to_float(tf.not_equal(labels, 0))
           xent = tf.nn.sparse_softmax_cross_entropy_with_logits(
@@ -555,7 +555,10 @@ def run(tpu_job_name,
     estimator.evaluate(
         input_fn=input_fn,
         steps=eval_steps,
-        checkpoint_path=checkpoint_path)
+    )
+  elif mode == "continuous_eval":
+    eval_args = {"eval": (input_fn, eval_steps)}
+    continuous_eval(estimator, eval_args)
   elif mode == "infer":
     decode_from_file(
         estimator,
@@ -565,4 +568,58 @@ def run(tpu_job_name,
         sequence_length=sequence_length,
         checkpoint_path=checkpoint_path)
   else:
-    raise ValueError("unknown mode %s - must be train/evaluate/infer" % mode)
+    raise ValueError(
+        "unknown mode %s - must be train/evaluate/continuous_eval/infer" % mode)
+
+
+def continuous_eval(estimator, eval_args):
+  """Runs evaluation whenever there's a new checkpoint & logs to tensorboard.
+
+  Args:
+    estimator: A tf.Estimator object.
+    eval_args: Dictionary of {eval_name: (input_fn, eval_steps)} where eval_name
+      is the name of the evaluation set, e.g. "train" or "val", input_fn is an
+      input function returning a tuple (features, labels), and eval_steps is the
+      number of steps for which to evaluate the model. If None, evaluates until
+      input_fn raises an end-of-input exception.
+  """
+  for _ in tf.contrib.training.checkpoints_iterator(estimator.model_dir):
+    _ = evaluate(estimator, eval_args)
+
+
+def evaluate(estimator, eval_args):
+  """Runs evaluation on the latest model checkpoint & logs to tensorboard.
+
+  Args:
+    estimator: A tf.Estimator object.
+    eval_args: Dictionary of {eval_name: (input_fn, eval_steps)} where eval_name
+      is the name of the evaluation set, e.g. "train" or "val", input_fn is an
+      input function returning a tuple (features, labels), and eval_steps is the
+      number of steps for which to evaluate the model. If None, evaluates until
+      input_fn raises an end-of-input exception.
+
+  Returns:
+    A dict of metric values from the evaluation. May be empty, e.g. if the
+    training job has not yet saved a checkpoint or the checkpoint is deleted by
+    the time the TPU worker initializes.
+  """
+  values = {}  # Default return value if evaluation fails.
+
+  checkpoint_path = estimator.latest_checkpoint()
+  if not checkpoint_path:
+    # This is expected if the training job has not yet saved a checkpoint.
+    return values
+
+  tf.logging.info("Starting evaluation on checkpoint %s", checkpoint_path)
+  for eval_name in eval_args:
+    input_fn, eval_steps = eval_args[eval_name]
+    metric_values = estimator.evaluate(
+        input_fn,
+        steps=eval_steps,
+        name=eval_name,
+        checkpoint_path=checkpoint_path)
+    for key, val in metric_values.iteritems():
+      values[eval_name + "/" + key] = val
+
+  tf.logging.info(values)
+  return values
