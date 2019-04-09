@@ -1,6 +1,0 @@
-# -*-Python-*-
-make_layer_stack.num_layers = 16
-DenseReluDense.hidden_size = 65536
-Unitransformer.d_model = 1024
-SelfAttention.num_heads = 32
-EncDecAttention.num_heads = 32

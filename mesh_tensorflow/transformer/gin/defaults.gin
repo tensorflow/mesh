@@ -2,7 +2,7 @@
 
 import mesh_tensorflow.transformer.transformer_layers
 
-# for Unitransforemer models (e.g. language-model)
+# for Unitransformer models (e.g. language-model)
 transformer.make_layer_stack.layers = [
     @mesh_tensorflow.transformer.transformer_layers.SelfAttention,
     @mesh_tensorflow.transformer.transformer_layers.DenseReluDense,
@@ -18,6 +18,19 @@ decoder/transformer.make_layer_stack.layers = [
     @mesh_tensorflow.transformer.transformer_layers.EncDecAttention,
     @mesh_tensorflow.transformer.transformer_layers.DenseReluDense,
 ]
+
+# Model sizes
+num_layers = 6
+d_model = 1024
+d_ff = 4096
+num_heads = 8
+d_kv = 128
+
+transformer.make_layer_stack.num_layers = %num_layers
+Unitransformer.d_model = %d_model
+DenseReluDense.hidden_size = %d_ff
+SelfAttention.num_heads = %num_heads
+SelfAttention.key_value_size = %d_kv
 
 # dropout
 dropout_rate = 0.1
