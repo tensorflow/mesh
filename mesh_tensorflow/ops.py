@@ -2261,7 +2261,7 @@ class StackOperation(Operation):
     lowering.set_tensor_lowering(self.outputs[0], ret)
 
 
-def stack(xs, dim_name, axis, name=None):
+def stack(xs, dim_name, axis=0, name=None):
   """Stack multiple Tensors to make a new dimension.
 
   Args:

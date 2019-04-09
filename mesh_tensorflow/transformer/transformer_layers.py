@@ -254,9 +254,13 @@ class SelfAttention(transformer.TransformerLayer):
 class EncDecAttention(SelfAttention):
   """Multi-head attention over encoder output."""
 
+  def _get_memory_antecedent(self, context):
+    return context.encoder_output
+
   def call(self, context, x, losses=None):
     """Call the layer."""
-    memory_input_dim = context.encoder_output.shape[-1]
+    memory_antecedent = self._get_memory_antecedent(context)
+    memory_input_dim = memory_antecedent.shape[-1]
     if memory_input_dim != context.model_dim:
       raise NotImplementedError(
           "TODO(noam): support different model_dim in encoder and decoder.")
@@ -265,7 +269,7 @@ class EncDecAttention(SelfAttention):
     if context.mode == "incremental":
       k, v, memory_length = context.get_constant_state()
     else:
-      m = context.encoder_output
+      m = memory_antecedent
       if self.shared_kv:
         kv = params.compute_kv(m)
         k = kv
@@ -291,6 +295,98 @@ class EncDecAttention(SelfAttention):
         mask,
         **self.attention_kwargs_from_context(context))
     return params.compute_output(o, output_shape=x.shape)
+
+
+@gin.configurable
+class TransparentEncDecAttention(EncDecAttention):
+  """Transparent multi-head attention over encoder output."""
+
+  def __init__(self,
+               layers_per_encoder_module=gin.REQUIRED,
+               layers_per_decoder_module=gin.REQUIRED,
+               encoder_num_modules=gin.REQUIRED,
+               decoder_num_modules=gin.REQUIRED,
+               dropout_rate=0.0,
+               **kwargs):
+    """Create a transparent attention EncDec Layer.
+
+    Args:
+      layers_per_encoder_module: positive integer telling how many layer are in
+        each repeated module in the encoder
+      layers_per_decoder_module: positive integer telling how many layer are in
+        each repeated module in the decoder
+      encoder_num_modules: positive integer of how many repeated modules there
+        are in the encoder
+      decoder_num_modules: positive integer of how many repeated modules there
+        are in the decoder
+      dropout_rate: positive float, the dropout rate for the matrix relating
+        encoder outputs to decoder inputs
+      **kwargs: additional constructor params
+    """
+    super(TransparentEncDecAttention, self).__init__(**kwargs)
+    self.layers_per_encoder_module = layers_per_encoder_module
+    self.layers_per_decoder_module = layers_per_decoder_module
+    self.encoder_num_modules = encoder_num_modules
+    self.decoder_num_modules = decoder_num_modules
+    self.dropout_rate = dropout_rate
+
+  def _get_memory_antecedent(self, context):
+    decoder_module_index = context.layer_index // self.layers_per_decoder_module
+    decoder_inputs = self._get_decoder_inputs(context)
+    return decoder_inputs[decoder_module_index]
+
+  def _get_decoder_inputs(self, context):
+    """Computes the inputs to the decoder when using transparent attention.
+
+    We must cache on the context in order to ensure that we are not replicating
+    variables when the layer's call function is called in different tf variable
+    scopes.
+
+    Args:
+      context: a Context
+
+    Returns:
+      a list containing `self.num_decoder_modules` of tensors with shape
+        [<batch_dims>, length_dim, output_vocab_dim]
+    """
+    if hasattr(context, "decoder_layers_per_module"):
+      return context.decoder_layers_per_module
+
+    encoder_layer_outputs = [
+        mtf.layers.rename_length_to_memory_length(output)
+        for output in context.encoder_layer_outputs
+    ]
+
+    layers_per_module = self.layers_per_encoder_module
+    encoder_module_outputs_dim = mtf.Dimension(
+        "encoder_module_outputs", size=self.encoder_num_modules + 1)
+    decoder_module_inputs_dim = mtf.Dimension(
+        "decoder_module_inputs", size=self.decoder_num_modules)
+    encoder_module_outputs = mtf.stack(
+        [encoder_layer_outputs[0]] +
+        encoder_layer_outputs[layers_per_module::layers_per_module],
+        dim_name="encoder_module_outputs")
+    w = mtf.get_variable(
+        context.mesh,
+        "w",
+        mtf.Shape([encoder_module_outputs_dim, decoder_module_inputs_dim]),
+        initializer=tf.random_normal_initializer(
+            stddev=(encoder_module_outputs_dim.size *
+                    decoder_module_inputs_dim.size)**-0.5),
+        dtype=context.variable_dtype)
+    if context.train and self.dropout_rate != 0.0:
+      w = mtf.dropout(w, 1.0 - self.dropout_rate)
+    s = mtf.softmax(w, reduced_dim=encoder_module_outputs_dim)
+    z = mtf.einsum([s, encoder_module_outputs],
+                   reduced_dims=[encoder_module_outputs_dim])
+    input_per_decoder = mtf.split(
+        z,
+        split_dim=decoder_module_inputs_dim,
+        num_or_size_splits=decoder_module_inputs_dim.size)
+    context.decoder_layers_per_module = [
+        mtf.reshape(inpt, z.shape.dims[1:]) for inpt in input_per_decoder
+    ]
+    return context.decoder_layers_per_module
 
 
 @gin.configurable

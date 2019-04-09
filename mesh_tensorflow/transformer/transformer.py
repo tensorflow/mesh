@@ -133,7 +133,8 @@ class Context(object):
                constant_states=None,
                shared_params=None,
                layout=None,
-               mesh_shape=None):
+               mesh_shape=None,
+               encoder_layer_outputs=None):
     """Create a context.
 
     Args:
@@ -172,6 +173,8 @@ class Context(object):
         encoder and decoder Unitransformers in a Bitransformer.
       layout: optional - an input to mtf.convert_to_layout_rules
       mesh_shape: optional - an input to mtf.convert_to_shape
+      encoder_layer_outputs: optional - readonly list of tensor activations when
+        decoding, one per each input layer + the embedding layer
     """
     self.mesh = mesh
     self.batch_dims = batch_dims
@@ -200,6 +203,8 @@ class Context(object):
     self.shared_params = shared_params or {}
     self.layout = layout
     self.mesh_shape = mesh_shape
+    self.layer_index = 0
+    self.encoder_layer_outputs = encoder_layer_outputs
 
   @property
   def train(self):
@@ -268,10 +273,7 @@ class Context(object):
 class LayerStack(TransformerLayer):
   """A stack of layers with residual connections and layer norms."""
 
-  def __init__(self,
-               layers,
-               dropout_rate=0.0,
-               norm_epsilon=1e-6):
+  def __init__(self, layers, dropout_rate=0.0, norm_epsilon=1e-6):
     """Create a LayerStack.
 
     Args:
@@ -299,6 +301,7 @@ class LayerStack(TransformerLayer):
         x += self._dropout(context, y)
       if context.layer_outputs is not None:
         context.layer_outputs.append(x)
+      context.layer_index += 1
     x = self._layer_norm(context, x, name="final_layer_norm")
     x = self._dropout(context, x)
     return x
@@ -438,26 +441,27 @@ class Unitransformer(object):
       context.losses.append(loss)
     return logits
 
-  def call_simple(
-      self,
-      inputs,
-      targets,
-      compute_loss,
-      mode=tf.estimator.ModeKeys.TRAIN,
-      variable_dtype=mtf.VariableDType(tf.float32),
-      sequence_id=None,
-      position=None,
-      encoder_output=None,
-      encoder_sequence_id=None,
-      shared_params=None):
+  def call_simple(self,
+                  inputs,
+                  targets,
+                  compute_loss,
+                  mode=tf.estimator.ModeKeys.TRAIN,
+                  variable_dtype=mtf.VariableDType(tf.float32),
+                  sequence_id=None,
+                  position=None,
+                  encoder_output=None,
+                  encoder_sequence_id=None,
+                  shared_params=None,
+                  layer_outputs=None,
+                  encoder_layer_outputs=None):
     """Compute logits based on inputs (all positions in parallel).
 
     This is called during training and evaluation.
 
     Args:
-      inputs: an int32 Tensor with shape [<batch_dims>, length_dim]
-        For training autoregressive models this should be equal to
-        mtf.shift(targets, offset=1, dim=length_dim, wrap=False)
+      inputs: an int32 Tensor with shape [<batch_dims>, length_dim] For training
+        autoregressive models this should be equal to mtf.shift(targets,
+        offset=1, dim=length_dim, wrap=False)
       targets: an optional int32 Tensor with shape [<batch_dims>, length_dim]
       compute_loss: a boolean
       mode: a tf.estimator.ModeKeys
@@ -467,6 +471,9 @@ class Unitransformer(object):
       encoder_output: an optional Tensor
       encoder_sequence_id: an optional Tensor
       shared_params: an optional dictionary
+      layer_outputs: an optional list to append Tensor layer activations to
+      encoder_layer_outputs: optional - readonly list of tensor activations when
+        decoding, one per each input layer + the embedding layer
 
     Returns:
       logits: a Tensor with shape [<batch_dims>, output_vocab_dim]
@@ -487,7 +494,9 @@ class Unitransformer(object):
         encoder_sequence_id=encoder_sequence_id,
         shared_params=shared_params,
         layout=self.layout,
-        mesh_shape=self.mesh_shape)
+        mesh_shape=self.mesh_shape,
+        layer_outputs=layer_outputs,
+        encoder_layer_outputs=encoder_layer_outputs)
     with tf.variable_scope(self.name):
       logits = self._call_internal(context, inputs, targets)
     if compute_loss:
@@ -506,7 +515,8 @@ class Unitransformer(object):
                             encoder_output=None,
                             encoder_sequence_id=None,
                             shared_params=None,
-                            has_partial_sequences=True):
+                            has_partial_sequences=True,
+                            encoder_layer_outputs=None):
     """Sample randomly one token at a time.
 
     The partial_sequences represent partial sequences to be continued.  The
@@ -522,13 +532,15 @@ class Unitransformer(object):
       partial_sequences: an int32 Tensor with shape [<batch_dims>, length_dim]
       stop_at_token: an optional integer eos id.  Stop when we produce it.
       max_steps: an optional integer
-      temperature: an optional floating point value between 0.0 and 1.0
-        0.0 means argmax, 1.0 means sample according to predicted distribution.
+      temperature: an optional floating point value between 0.0 and 1.0 0.0
+        means argmax, 1.0 means sample according to predicted distribution.
       variable_dtype: a mtf.VariableDType
       encoder_output: an optional Tensor
       encoder_sequence_id: an optional Tensor
       shared_params: an optional dictionary
       has_partial_sequences: a boolean
+      encoder_layer_outputs: optional - readonly list of tensor activations when
+        decoding, one per each input layer + the embedding layer
 
     Returns:
       a Tensor with shape [<batch_dims>, length_dim]
@@ -560,7 +572,8 @@ class Unitransformer(object):
         constant_states=[],
         shared_params=shared_params,
         layout=self.layout,
-        mesh_shape=self.mesh_shape)
+        mesh_shape=self.mesh_shape,
+        encoder_layer_outputs=encoder_layer_outputs)
 
     shifted_inputs = mtf.shift(inputs, offset=1, dim=length_dim, wrap=False)
     with tf.variable_scope(self.name):
@@ -603,7 +616,8 @@ class Unitransformer(object):
           constant_states=constant_states,
           shared_params=shared_params,
           layout=self.layout,
-          mesh_shape=self.mesh_shape)
+          mesh_shape=self.mesh_shape,
+          encoder_layer_outputs=encoder_layer_outputs)
       inputs_this_step = mtf.gather(ids, position - 1, length_dim)
       with tf.variable_scope(self.name, reuse=True):
         logits = self._call_internal(context_incremental, inputs_this_step)
@@ -626,18 +640,21 @@ class Unitransformer(object):
                   encoder_output=None,
                   encoder_sequence_id=None,
                   alpha=0.6,
-                  shared_params=None):
+                  shared_params=None,
+                  encoder_layer_outputs=None):
     """Beam search.
 
     Args:
-      inputs: an int32 zero-Tensor with shape
-         [<batch_dims>, beam_dim, length_dim].
+      inputs: an int32 zero-Tensor with shape [<batch_dims>, beam_dim,
+        length_dim].
       decode_length: an int32 mtf scalar.  Maximum decode length.
       variable_dtype: a mtf.VariableDType
       encoder_output: an optional Tensor
       encoder_sequence_id: an optional Tensor
       alpha: a floating point value (length bonus)
       shared_params: an optional dictionary
+      encoder_layer_outputs: optional - readonly list of tensor activations when
+        decoding, one per each input layer + the embedding layer
 
     Returns:
       a Tensor with shape [<batch_dims>, beam_dim, length_dim]
@@ -671,7 +688,8 @@ class Unitransformer(object):
         constant_states=[],
         shared_params=shared_params,
         layout=self.layout,
-        mesh_shape=self.mesh_shape)
+        mesh_shape=self.mesh_shape,
+        encoder_layer_outputs=encoder_layer_outputs)
 
     shifted_inputs = mtf.shift(inputs, offset=1, dim=length_dim, wrap=False)
     with tf.variable_scope(self.name):
@@ -701,7 +719,8 @@ class Unitransformer(object):
           constant_states=constant_states,
           shared_params=shared_params,
           layout=self.layout,
-          mesh_shape=self.mesh_shape)
+          mesh_shape=self.mesh_shape,
+          encoder_layer_outputs=encoder_layer_outputs)
       inputs_this_step = mtf.gather(ids, step_num - 1, length_dim)
       with tf.variable_scope(self.name, reuse=True):
         logits = self._call_internal(context_incremental, inputs_this_step)
@@ -798,6 +817,7 @@ class Bitransformer(object):
       logits: a Tensor with shape [<batch_dims>, output_vocab_dim]
       loss: an optional Scalar (if compute_loss=True)
     """
+    encoder_layer_outputs = []
     shared_params = self._shared_params(inputs.mesh, variable_dtype)
     encoder_output, encoder_loss = self.encoder.call_simple(
         inputs,
@@ -807,7 +827,8 @@ class Bitransformer(object):
         variable_dtype=variable_dtype,
         sequence_id=encoder_sequence_id,
         position=encoder_position,
-        shared_params=shared_params)
+        shared_params=shared_params,
+        layer_outputs=encoder_layer_outputs)
     encoder_output = mtf.layers.rename_length_to_memory_length(encoder_output)
     if encoder_sequence_id is not None:
       encoder_sequence_id = mtf.layers.rename_length_to_memory_length(
@@ -827,7 +848,8 @@ class Bitransformer(object):
         encoder_output=encoder_output,
         encoder_sequence_id=encoder_sequence_id,
         position=decoder_position,
-        shared_params=shared_params)
+        shared_params=shared_params,
+        encoder_layer_outputs=encoder_layer_outputs)
     if loss is not None and encoder_loss is not None:
       loss += encoder_loss
     return logits, loss
@@ -859,6 +881,7 @@ class Bitransformer(object):
     Returns:
       a Tensor with shape [<batch_dims>, beam_dim, length_dim]
     """
+    encoder_layer_outputs = []
     shared_params = self._shared_params(inputs.mesh, variable_dtype)
     encoder_sequence_id = mtf.minimum(inputs, 1)
     encoder_output, encoder_loss = self.encoder.call_simple(
@@ -868,7 +891,8 @@ class Bitransformer(object):
         mode=tf.estimator.ModeKeys.PREDICT,
         variable_dtype=variable_dtype,
         sequence_id=encoder_sequence_id,
-        shared_params=shared_params)
+        shared_params=shared_params,
+        layer_outputs=encoder_layer_outputs)
     del encoder_loss
     encoder_output = mtf.layers.rename_length_to_memory_length(encoder_output)
     encoder_sequence_id = mtf.layers.rename_length_to_memory_length(
@@ -883,7 +907,8 @@ class Bitransformer(object):
           encoder_output=encoder_output,
           encoder_sequence_id=encoder_sequence_id,
           shared_params=shared_params,
-          has_partial_sequences=False)
+          has_partial_sequences=False,
+          encoder_layer_outputs=encoder_layer_outputs)
     else:
       if temperature != 0:
         raise ValueError(
@@ -908,7 +933,8 @@ class Bitransformer(object):
           encoder_output=encoder_output,
           encoder_sequence_id=encoder_sequence_id,
           alpha=alpha,
-          shared_params=shared_params)
+          shared_params=shared_params,
+          encoder_layer_outputs=encoder_layer_outputs)
 
 
 # gin-configurable constructors
