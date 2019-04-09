@@ -19,6 +19,8 @@ decoder/transformer.make_layer_stack.layers = [
     @mesh_tensorflow.transformer.transformer_layers.DenseReluDense,
 ]
 
+Unitransformer.shared_embedding_and_softmax_weights = True
+
 # Model sizes
 num_layers = 6
 d_model = 1024
