@@ -438,7 +438,7 @@ def auto_batch_size(sequence_length,
   """
   num_splits = mtf.tensor_dim_to_mesh_dim_size(
       layout_rules, mesh_shape, mtf.Dimension("batch", 0))
-  ret = (tokens_per_split // sequence_length) * num_splits
+  ret = max(1, tokens_per_split // sequence_length) * num_splits
   tf.logging.info(
       "AUTO_BATCH_SIZE tokens_per_split=%s num_splits=%s"
       " sequence_length=%s batch_size=%s"

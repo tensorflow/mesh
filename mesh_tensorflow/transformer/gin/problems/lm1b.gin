@@ -13,3 +13,6 @@ dataset.get_tfds_vocabulary.dataset_name = %dataset_name
 
 # Model
 run.model_type = "lm"
+
+# No custom ops required:
+dataset.pack_dataset.use_custom_ops = False
