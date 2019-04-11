@@ -80,8 +80,6 @@ class PlacementMeshImpl(mtf.MeshImpl):
       slice_shape = mesh_impl.slice_shape(shape)
       base_name = variable.name
       if self.slice_is_master:
-        tf.logging.info(
-            "Single slice is identical to master - avoid creating extra vars.")
         slices = [variable.get_master()]
         self._laid_out_tensor = mesh_impl.LaidOutTensor(slices)
         self._copy_slices_to_master = tf.group([])
