@@ -309,11 +309,11 @@ class PlacementMeshImpl(mtf.MeshImpl):
       return self.LaidOutTensor(ret)
 
   def random(self, shape, tf_fn, kwargs):
-    """Call a random tf operation (e.g. tf.random.uniform).
+    """Call a random tf operation (e.g. random_uniform).
 
     Args:
       shape: a Shape
-      tf_fn: a function such as tf.random.uniform
+      tf_fn: a function such as tf.random_uniform
       kwargs: kwargs to pass to tf_fn, except for seed
 
     Returns:
