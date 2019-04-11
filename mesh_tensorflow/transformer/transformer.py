@@ -172,7 +172,9 @@ class Context(object):
         parameters that are shared between Transformers - e.g. between the
         encoder and decoder Unitransformers in a Bitransformer.
       layout: optional - an input to mtf.convert_to_layout_rules
+        Some layers (e.g. MoE layers) cheat by looking at layout and mesh_shape
       mesh_shape: optional - an input to mtf.convert_to_shape
+        Some layers (e.g. MoE layers) cheat by looking at layout and mesh_shape
       encoder_layer_outputs: optional - readonly list of tensor activations when
         decoding, one per each input layer + the embedding layer
     """
@@ -954,7 +956,9 @@ def make_layer_stack(layers=gin.REQUIRED, num_layers=6):
 @gin.configurable
 def make_bitransformer(
     input_vocab_size=gin.REQUIRED,
-    output_vocab_size=gin.REQUIRED):
+    output_vocab_size=gin.REQUIRED,
+    layout=None,
+    mesh_shape=None):
   """Gin-configurable bitransformer constructor.
 
   In your config file you need to set the encoder and decoder layers like this:
@@ -971,6 +975,10 @@ def make_bitransformer(
   Args:
     input_vocab_size: a integer
     output_vocab_size: an integer
+    layout: optional - an input to mtf.convert_to_layout_rules
+      Some layers (e.g. MoE layers) cheat by looking at layout and mesh_shape
+    mesh_shape: optional - an input to mtf.convert_to_shape
+      Some layers (e.g. MoE layers) cheat by looking at layout and mesh_shape
   Returns:
     a Bitransformer
   """
@@ -980,14 +988,18 @@ def make_bitransformer(
         input_vocab_size=input_vocab_size,
         output_vocab_size=None,
         autoregressive=False,
-        name="encoder")
+        name="encoder",
+        layout=layout,
+        mesh_shape=mesh_shape)
   with gin.config_scope("decoder"):
     decoder = Unitransformer(
         layer_stack=make_layer_stack(),
         input_vocab_size=output_vocab_size,
         output_vocab_size=output_vocab_size,
         autoregressive=True,
-        name="decoder")
+        name="decoder",
+        layout=layout,
+        mesh_shape=mesh_shape)
   return Bitransformer(encoder, decoder)
 
 

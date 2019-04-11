@@ -55,7 +55,9 @@ def get_variable_dtype(
 
 
 def build_model(model_type="bitransformer",
-                vocab_size=gin.REQUIRED):
+                vocab_size=gin.REQUIRED,
+                layout_rules=None,
+                mesh_shape=None):
   """Build a transformer model.
 
   Currently, three types of models are supported:
@@ -75,19 +77,25 @@ def build_model(model_type="bitransformer",
   Args:
     model_type: a string - "bitransformer", "lm" or "aligned"
     vocab_size: an integer
+    layout_rules: optional - an input to mtf.convert_to_layout_rules
+    mesh_shape: optional - an input to mtf.convert_to_shape
   Returns:
     a Unitransformer or Bitransformer
   """
   if model_type == "bitransformer":
     return transformer.make_bitransformer(
         input_vocab_size=vocab_size,
-        output_vocab_size=vocab_size)
+        output_vocab_size=vocab_size,
+        mesh_shape=mesh_shape,
+        layout=layout_rules)
   elif model_type == "lm" or model_type == "aligned":
     return transformer.Unitransformer(
         autoregressive=model_type == "lm",
         layer_stack=transformer.make_layer_stack(),
         input_vocab_size=vocab_size,
-        output_vocab_size=vocab_size)
+        output_vocab_size=vocab_size,
+        mesh_shape=mesh_shape,
+        layout=layout_rules)
   else:
     raise ValueError("unknown model_type")
 
@@ -518,7 +526,9 @@ def run(tpu_job_name,
 
   transformer_model = build_model(
       model_type=model_type,
-      vocab_size=vocabulary.vocab_size)
+      vocab_size=vocabulary.vocab_size,
+      layout_rules=layout_rules,
+      mesh_shape=mesh_shape)
 
   model_fn = tpu_estimator_model_fn(
       model_type=model_type,

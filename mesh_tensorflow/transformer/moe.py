@@ -21,10 +21,11 @@ without notice.
 TODO(noam): Remove the other copy of this code from tensor2tensor.
 TODO(noam): Write a new, simpler, cleaner version of this code.
 """
-
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
+
+import gin
 
 import mesh_tensorflow as mtf
 from mesh_tensorflow.transformer import transformer
@@ -32,6 +33,7 @@ from mesh_tensorflow.transformer import transformer
 import tensorflow as tf
 
 
+@gin.configurable
 class MoE1D(transformer.TransformerLayer):
   """Mixture of Experts Layer."""
 
