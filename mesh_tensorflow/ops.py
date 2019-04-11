@@ -1642,12 +1642,12 @@ def _rsqrt_grad(op, dy):
 
 def rsqrt(x, name="rsqrt"):
   return cwise(
-      tf.rsqrt, [x], name=name, grad_function=_rsqrt_grad)
+      tf.math.rsqrt, [x], name=name, grad_function=_rsqrt_grad)
 
 
 def log(x, name="log"):
   return cwise(
-      tf.log, [x], name=name,
+      tf.math.log, [x], name=name,
       grad_function=lambda op, dy: [dy / op.inputs[0]])
 
 
@@ -1686,7 +1686,7 @@ def logical_not(x, name="logical_not"):
 
 def reciprocal(x, name="reciprocal"):
   return cwise(
-      tf.reciprocal, [x], name=name,
+      tf.math.reciprocal, [x], name=name,
       grad_function=lambda op, dy: [negative(dy * square(op.outputs[0]))])
 
 
@@ -3257,12 +3257,6 @@ def read_variable(var):
   return ReadVariable(var).outputs[0]
 
 
-def assign_slice_check_finite(variable, slice_var, val):
-  val = tf.cast(val, variable.slice_dtype)
-  val = tf.where(tf.is_finite(val), val, slice_var)
-  return tf.assign(slice_var, val)
-
-
 def assign_slice(variable, slice_var, val):
   return tf.assign(
       slice_var,
@@ -3271,20 +3265,18 @@ def assign_slice(variable, slice_var, val):
 
 def assign_add_slice(variable, slice_var, val):
   val = tf.cast(val, variable.slice_dtype)
-  val = tf.where(tf.is_finite(val), val, tf.zeros_like(val))
   return tf.assign(slice_var, slice_var + val)
 
 
 def assign_sub_slice(variable, slice_var, val):
   val = tf.cast(val, variable.slice_dtype)
-  val = tf.where(tf.is_finite(val), val, tf.zeros_like(val))
   return tf.assign(slice_var, slice_var - val)
 
 
 class Assign(Operation):
   """Assign to one or more variables."""
 
-  def __init__(self, variables, new_values, assign_fn=assign_slice_check_finite,
+  def __init__(self, variables, new_values, assign_fn=assign_slice,
                name=None):
     super(Assign, self).__init__(
         new_values, variables[0].mesh, name=name or "assign")
@@ -3309,7 +3301,7 @@ class Assign(Operation):
     return self._variables
 
 
-def assign(var, new_val, assign_fn=assign_slice_check_finite):
+def assign(var, new_val, assign_fn=assign_slice):
   """Assign a new value to a variable.
 
   Args:
@@ -4597,7 +4589,7 @@ class MtfRestoreHook(tf.train.SessionRunHook):
 
 
 class RandomOperation(Operation):
-  """Random operation such as tf.random_uniform."""
+  """Random operation such as tf.random.uniform."""
 
   def __init__(self, mesh, shape, tf_fn, **kwargs):
     super(RandomOperation, self).__init__(
@@ -4622,13 +4614,13 @@ def random_uniform(mesh, shape, **kwargs):
   Args:
     mesh: a Mesh
     shape: a Shape
-    **kwargs: keyword args for tf.random_uniform, except seed
+    **kwargs: keyword args for tf.random.uniform, except seed
 
   Returns:
     a Tensor
   """
   shape = convert_to_shape(shape)
-  return RandomOperation(mesh, shape, tf.random_uniform, **kwargs).outputs[0]
+  return RandomOperation(mesh, shape, tf.random.uniform, **kwargs).outputs[0]
 
 
 def dropout(x, keep_prob, noise_shape=None, name=None):
