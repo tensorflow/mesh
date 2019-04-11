@@ -1,0 +1,8 @@
+# -*-Python-*-
+run.batch_size = 2
+
+d_model=128
+d_ff=512
+num_heads=4
+d_kv=32
+num_layers=2
