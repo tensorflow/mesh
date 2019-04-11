@@ -502,7 +502,7 @@ def _pack_with_tf_ops(dataset, keys, length):
       can_append = True
       one_example = {}
       for k in keys:
-        val = x[k][i]
+        val = tf.to_int32(x[k][i])
         val = val[:tf.reduce_sum(tf.to_int32(tf.not_equal(val, 0)))]
         one_example[k] = val
       for k in keys:
@@ -540,10 +540,10 @@ def _pack_with_tf_ops(dataset, keys, length):
       packed[k + "_segmentation"] = (
           tf.cumsum(tf.to_int32(tf.equal(packed[k + "_position"], 0)), axis=1) *
           tf.to_int32(tf.not_equal(packed[k], 0)))
-
-    return tf.data.Dataset.from_tensor_slices(packed)
-  dataset = dataset.flat_map(map_fn)
-  return dataset
+    return packed
+  dataset = dataset.map(map_fn,
+                        num_parallel_calls=tf.data.experimental.AUTOTUNE)
+  return dataset.flat_map(tf.data.Dataset.from_tensor_slices)
 
 
 def _pack_with_custom_ops(dataset, keys, length):
