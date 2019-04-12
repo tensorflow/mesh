@@ -495,7 +495,7 @@ class SimdMeshImpl(mtf.MeshImpl):
 
     Args:
       shape: a Shape
-      tf_fn: a function such as tf.random_uniform
+      tf_fn: a function such as tf.random.uniform
       kwargs: kwargs to pass to tf_fn, except for seed
 
     Returns:
@@ -536,10 +536,7 @@ class SimdMeshImpl(mtf.MeshImpl):
           "Tensors.  Try reshaping to new dimension names. "
           " x.shape = %s tensor_layout=%s"
           % (x.shape, tensor_layout))
-    ret = laid_out_x.one_slice
-    if x.dtype.is_floating:
-      ret = tf.where(tf.is_finite(ret), ret, tf.zeros_like(ret))
-    return ret
+    return laid_out_x.one_slice
 
   def import_tf_tensor(self, x, tf_x):
     """Import a tf.Tensor, producing a LaidOutTensor.
