@@ -22,9 +22,11 @@ from __future__ import print_function
 import gin
 
 import mesh_tensorflow as mtf
+from mesh_tensorflow.transformer import metric_utils
 from mesh_tensorflow.transformer import transformer
 import numpy as np
 import tensorflow as tf
+
 from tensorflow.contrib.tpu.python.tpu import tpu_config
 from tensorflow.contrib.tpu.python.tpu import tpu_estimator
 
@@ -108,7 +110,8 @@ def tpu_estimator_model_fn(model_type,
                            layout_rules,
                            batch_size,
                            sequence_length,
-                           autostack):
+                           autostack,
+                           metric_names):
   """Create a TPUEstimator model function.
 
   Args:
@@ -121,11 +124,12 @@ def tpu_estimator_model_fn(model_type,
     batch_size: an integer
     sequence_length: an integer
     autostack: a boolean
+    metric_names: list of strings giving the metric names. If None, then
+      computes padded_neg_log_perplexity
 
   Returns:
     a function to be passed to TPUEstimator
   """
-
   def my_model_fn(features, labels, mode, params=None, config=None):
     """Estimator model function.
 
@@ -297,15 +301,16 @@ def tpu_estimator_model_fn(model_type,
               train_op=train_op,
               training_chief_hooks=[restore_hook, saver_hook])
       elif mode == tf.estimator.ModeKeys.EVAL:
-        # TODO(katherinelee): specify eval_metrics.
-        def padded_neg_log_perplexity(logits, labels):
-          weights = tf.to_float(tf.not_equal(labels, 0))
-          xent = tf.nn.sparse_softmax_cross_entropy_with_logits(
-              labels=labels, logits=logits)
-          return {"neg_log_perplexity": tf.metrics.mean(-xent, weights)}
-
         labels = lowering.export_to_tf_tensor(anon_targets)
-        eval_metrics = (padded_neg_log_perplexity, [tf_logits, labels])
+
+        # metric_names becomes locally scoped if we simply assign
+        # ["padded_neg_log_perplexity"] to it conditioned on if it's None.
+        local_metric_names = metric_names or ["padded_neg_log_perplexity"]
+
+        # l: labels, p: predictions
+        def metric_fn(l, p):
+          return metric_utils.get_metric_fns(local_metric_names, l, p)
+        eval_metrics = (metric_fn, [labels, tf_logits])
         return tpu_estimator.TPUEstimatorSpec(
             tf.estimator.ModeKeys.EVAL,
             evaluation_hooks=[restore_hook],
@@ -466,7 +471,8 @@ def run(tpu_job_name,
         batch_size=auto_batch_size,
         sequence_length=gin.REQUIRED,
         mesh_shape=gin.REQUIRED,
-        layout_rules=gin.REQUIRED):
+        layout_rules=gin.REQUIRED,
+        get_components_fn=None):
   """Run training/eval/inference.
 
   Args:
@@ -477,7 +483,7 @@ def run(tpu_job_name,
     model_dir: string, estimator model_dir
     model_type: a string - either "bitransformer", "lm" or "aligned"
     vocabulary: a vocabulary.Vocabulary
-    dataset_fn: A function returning a tf.data.Dataset
+    dataset_fn: A function returning a tf.data.Dataset.
     dataset_split: a string
     autostack: boolean, internally combine variables
     checkpoint_path: a string - which checkpoint to load for inference
@@ -492,6 +498,9 @@ def run(tpu_job_name,
     sequence_length: an integer
     mesh_shape: an input to mtf.convert_to_shape()
     layout_rules: an input to mtf.convert_to_layout_rules()
+    get_components_fn: an optional function that gets a list of tuples of
+      (metric_names, component) for each component. Required if mode is
+      "continuous_eval"
   """
   if not isinstance(batch_size, int):
     batch_size = batch_size(sequence_length, mesh_shape, layout_rules)
@@ -539,7 +548,8 @@ def run(tpu_job_name,
       layout_rules=layout_rules,
       batch_size=batch_size,
       sequence_length=sequence_length,
-      autostack=autostack)
+      autostack=autostack,
+      metric_names=None)
 
   estimator = tpu_estimator.TPUEstimator(
       model_fn=model_fn,
@@ -551,24 +561,55 @@ def run(tpu_job_name,
       export_to_tpu=False,
       params={})
 
-  def input_fn(params):
-    del params
-    dataset = dataset_fn(batch_size=batch_size,
-                         sequence_length=sequence_length,
-                         vocabulary=vocabulary,
-                         dataset_split=dataset_split)
-    return dataset
-
   if mode == "train":
+    def input_fn(params):
+      del params
+      dataset = dataset_fn(batch_size=batch_size,
+                           sequence_length=sequence_length,
+                           vocabulary=vocabulary,
+                           dataset_split=dataset_split)
+      return dataset
+
     estimator.train(input_fn=input_fn, max_steps=train_steps)
-  elif mode == "evaluate":
-    estimator.evaluate(
-        input_fn=input_fn,
-        steps=eval_steps,
-    )
   elif mode == "continuous_eval":
-    eval_args = {"eval": (input_fn, eval_steps)}
-    continuous_eval(estimator, eval_args)
+    if get_components_fn is None:
+      raise ValueError("must provide get_components_fn through gin for eval.")
+    metrics_inputs = get_components_fn()
+    for _ in tf.contrib.training.checkpoints_iterator(estimator.model_dir):
+      for metric_names, component in metrics_inputs:
+        # Regenerate the estimator
+        model_fn = tpu_estimator_model_fn(
+            model_type=model_type,
+            transformer_model=transformer_model,
+            model_dir=model_dir,
+            use_tpu=tpu,
+            mesh_shape=mesh_shape,
+            layout_rules=layout_rules,
+            batch_size=batch_size,
+            sequence_length=sequence_length,
+            autostack=autostack,
+            metric_names=metric_names)
+        estimator = tpu_estimator.TPUEstimator(
+            model_fn=model_fn,
+            config=run_config,
+            train_batch_size=batch_size,
+            eval_batch_size=batch_size,
+            predict_batch_size=batch_size,
+            use_tpu=tpu,
+            export_to_tpu=False,
+            params={})
+        def input_fn(params):
+          del params
+          dataset = dataset_fn(component,  # pylint: disable=cell-var-from-loop
+                               batch_size=batch_size,
+                               sequence_length=sequence_length,
+                               vocabulary=vocabulary,
+                               dataset_split=dataset_split)
+          return dataset
+
+        eval_args = {"eval": (input_fn, eval_steps)}
+        _ = evaluate(estimator, eval_args)
+
   elif mode == "infer":
     decode_from_file(
         estimator,
@@ -580,21 +621,6 @@ def run(tpu_job_name,
   else:
     raise ValueError(
         "unknown mode %s - must be train/evaluate/continuous_eval/infer" % mode)
-
-
-def continuous_eval(estimator, eval_args):
-  """Runs evaluation whenever there's a new checkpoint & logs to tensorboard.
-
-  Args:
-    estimator: A tf.Estimator object.
-    eval_args: Dictionary of {eval_name: (input_fn, eval_steps)} where eval_name
-      is the name of the evaluation set, e.g. "train" or "val", input_fn is an
-      input function returning a tuple (features, labels), and eval_steps is the
-      number of steps for which to evaluate the model. If None, evaluates until
-      input_fn raises an end-of-input exception.
-  """
-  for _ in tf.contrib.training.checkpoints_iterator(estimator.model_dir):
-    _ = evaluate(estimator, eval_args)
 
 
 def evaluate(estimator, eval_args):
