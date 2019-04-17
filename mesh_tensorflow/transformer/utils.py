@@ -459,7 +459,8 @@ def run(tpu_job_name,
         model_dir,
         model_type="bitransformer",
         vocabulary=gin.REQUIRED,
-        dataset_fn=gin.REQUIRED,
+        train_dataset_fn=None,
+        eval_dataset_fn=None,
         dataset_split="train",
         autostack=True,
         checkpoint_path="",
@@ -483,7 +484,10 @@ def run(tpu_job_name,
     model_dir: string, estimator model_dir
     model_type: a string - either "bitransformer", "lm" or "aligned"
     vocabulary: a vocabulary.Vocabulary
-    dataset_fn: A function returning a tf.data.Dataset.
+    train_dataset_fn: A function returning a tf.data.Dataset. Must be provided
+      for mode=train
+    eval_dataset_fn: A function returning a tf.data.Dataset. Must be provided
+      for model=eval
     dataset_split: a string
     autostack: boolean, internally combine variables
     checkpoint_path: a string - which checkpoint to load for inference
@@ -562,18 +566,22 @@ def run(tpu_job_name,
       params={})
 
   if mode == "train":
+    if train_dataset_fn is None:
+      raise ValueError("Must provide train_dataset_fn through gin for train.")
     def input_fn(params):
       del params
-      dataset = dataset_fn(batch_size=batch_size,
-                           sequence_length=sequence_length,
-                           vocabulary=vocabulary,
-                           dataset_split=dataset_split)
+      dataset = train_dataset_fn(batch_size=batch_size,
+                                 sequence_length=sequence_length,
+                                 vocabulary=vocabulary,
+                                 dataset_split=dataset_split)
       return dataset
 
     estimator.train(input_fn=input_fn, max_steps=train_steps)
   elif mode == "continuous_eval":
     if get_components_fn is None:
-      raise ValueError("must provide get_components_fn through gin for eval.")
+      raise ValueError("Must provide get_components_fn through gin for eval.")
+    if eval_dataset_fn is None:
+      raise ValueError("Must provide eval_dataset_fn through gin for eval.")
     metrics_inputs = get_components_fn()
     for _ in tf.contrib.training.checkpoints_iterator(estimator.model_dir):
       for metric_names, component in metrics_inputs:
@@ -600,11 +608,11 @@ def run(tpu_job_name,
             params={})
         def input_fn(params):
           del params
-          dataset = dataset_fn(component,  # pylint: disable=cell-var-from-loop
-                               batch_size=batch_size,
-                               sequence_length=sequence_length,
-                               vocabulary=vocabulary,
-                               dataset_split=dataset_split)
+          dataset = eval_dataset_fn(component,  # pylint: disable=cell-var-from-loop
+                                    batch_size=batch_size,
+                                    sequence_length=sequence_length,
+                                    vocabulary=vocabulary,
+                                    dataset_split=dataset_split)
           return dataset
 
         eval_args = {"eval": (input_fn, eval_steps)}
