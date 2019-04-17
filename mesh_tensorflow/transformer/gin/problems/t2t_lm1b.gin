@@ -4,7 +4,7 @@
 import mesh_tensorflow.transformer.t2t_vocabulary
 
 # Dataset
-utils.run.dataset_fn = @mesh_tensorflow.transformer.dataset.pretokenized_t2t_dataset
+utils.run.train_dataset_fn = @mesh_tensorflow.transformer.dataset.pretokenized_t2t_dataset
 dataset.pretokenized_t2t_dataset.dataset_name = "languagemodel_lm1b32k"
 dataset.pretokenized_t2t_dataset.text2self = True
 

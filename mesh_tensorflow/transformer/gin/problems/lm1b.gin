@@ -3,7 +3,7 @@
 
 # Dataset
 dataset_name = "lm1b/subwords32k"
-utils.run.dataset_fn = @mesh_tensorflow.transformer.dataset.pretokenized_tfds_dataset
+utils.run.train_dataset_fn = @mesh_tensorflow.transformer.dataset.pretokenized_tfds_dataset
 dataset.pretokenized_tfds_dataset.dataset_name = %dataset_name
 dataset.pretokenized_tfds_dataset.text2self = True
 
