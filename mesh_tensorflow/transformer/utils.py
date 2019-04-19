@@ -196,7 +196,6 @@ def tpu_estimator_model_fn(model_type,
             x, [x], "import feature %s" % key, summarize=1000, first_n=1)
       return mtf.import_fully_replicated(mesh, x, mtf_shape, name=key)
 
-    # PREDICT mode
     if mode == tf.estimator.ModeKeys.PREDICT:
       inputs = _import_feature("inputs")
       if isinstance(transformer_model, transformer.Unitransformer):
@@ -223,6 +222,39 @@ def tpu_estimator_model_fn(model_type,
       inputs = mtf.shift(targets, offset=1, dim=length_dim, wrap=False)
     else:
       inputs = _import_feature("inputs")
+
+    if mode == tf.estimator.ModeKeys.EVAL:
+      if isinstance(transformer_model, transformer.Unitransformer):
+        mtf_samples = transformer_model.sample_autoregressive(
+            inputs, variable_dtype=get_variable_dtype())
+      elif isinstance(transformer_model, transformer.Bitransformer):
+        mtf_samples = transformer_model.decode(
+            inputs, variable_dtype=get_variable_dtype())
+      else:
+        raise ValueError("unrecognized class")
+      mtf_samples = mtf.anonymize(mtf_samples)
+      lowering = mtf.Lowering(graph, {mesh: mesh_impl}, autostack=autostack)
+      outputs = lowering.export_to_tf_tensor(mtf_samples)
+      labels = lowering.export_to_tf_tensor(anon_targets)
+      restore_hook = mtf.MtfRestoreHook(lowering)
+
+      # metric_names becomes locally scoped if we simply assign
+      # ["padded_neg_log_perplexity"] to it conditioned on if it's None.
+      local_metric_names = metric_names or ["token_accuracy"]
+
+      def metric_fn(labels, outputs):
+        return metric_utils.get_metric_fns(
+            local_metric_names, labels, outputs
+        )
+      eval_metrics = (metric_fn, [labels, outputs])
+      return tpu_estimator.TPUEstimatorSpec(
+          tf.estimator.ModeKeys.EVAL,
+          # Unfortunately TPUEstimatorSpec requires us to provide a value for
+          # loss when in EVAL mode. Since we are sampling or decoding from the
+          # model, we don't have a loss to report.
+          loss=tf.constant(0.),
+          evaluation_hooks=[restore_hook],
+          eval_metrics=eval_metrics)
 
     if isinstance(transformer_model, transformer.Unitransformer):
       position_kwargs = dict(
@@ -264,8 +296,6 @@ def tpu_estimator_model_fn(model_type,
     if not use_tpu:
       tf_loss = tf.Print(tf_loss, [tf_loss, tf.train.get_global_step()],
                          "step, tf_loss")
-    if logits and mode != tf.estimator.ModeKeys.TRAIN:
-      tf_logits = lowering.export_to_tf_tensor(logits)
 
     if mode == tf.estimator.ModeKeys.TRAIN:
       tf_update_ops = [lowering.lowered_operation(op) for op in update_ops]
@@ -300,22 +330,6 @@ def tpu_estimator_model_fn(model_type,
               loss=tf_loss,
               train_op=train_op,
               training_chief_hooks=[restore_hook, saver_hook])
-      elif mode == tf.estimator.ModeKeys.EVAL:
-        labels = lowering.export_to_tf_tensor(anon_targets)
-
-        # metric_names becomes locally scoped if we simply assign
-        # ["padded_neg_log_perplexity"] to it conditioned on if it's None.
-        local_metric_names = metric_names or ["padded_neg_log_perplexity"]
-
-        # l: labels, p: predictions
-        def metric_fn(l, p):
-          return metric_utils.get_metric_fns(local_metric_names, l, p)
-        eval_metrics = (metric_fn, [labels, tf_logits])
-        return tpu_estimator.TPUEstimatorSpec(
-            tf.estimator.ModeKeys.EVAL,
-            evaluation_hooks=[restore_hook],
-            loss=tf_loss,
-            eval_metrics=eval_metrics)
 
   return my_model_fn
 
@@ -585,6 +599,8 @@ def run(tpu_job_name,
     metrics_inputs = get_components_fn()
     for _ in tf.contrib.training.checkpoints_iterator(estimator.model_dir):
       for metric_names, component in metrics_inputs:
+        tf.logging.info("Evaluating {}".format(component.__dict__))
+        tf.logging.info("on split {}".format(dataset_split))
         # Regenerate the estimator
         model_fn = tpu_estimator_model_fn(
             model_type=model_type,
@@ -612,7 +628,8 @@ def run(tpu_job_name,
                                     batch_size=batch_size,
                                     sequence_length=sequence_length,
                                     vocabulary=vocabulary,
-                                    dataset_split=dataset_split)
+                                    dataset_split=dataset_split,
+                                    pack=False)
           return dataset
 
         eval_args = {"eval": (input_fn, eval_steps)}

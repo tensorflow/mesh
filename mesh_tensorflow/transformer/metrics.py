@@ -24,17 +24,42 @@ from tensor2tensor.utils import bleu_hook
 import tensorflow as tf
 
 
-def padded_neg_log_perplexity(labels, logits):
-  weights = tf.to_float(tf.not_equal(labels, 0))
-  xent = tf.nn.sparse_softmax_cross_entropy_with_logits(
-      labels=labels, logits=logits)
-  return tf.metrics.mean(-xent, weights)
-
-
 # TODO(katherinelee): Look at other bleu implementations.
-def bleu(labels, logits):
-  outputs = tf.to_int32(tf.argmax(logits, axis=-1))
-  # Convert the outputs and labels to a [batch_size, input_length] tensor.
+def bleu(labels, outputs):
   bleu_score = tf.py_function(
       bleu_hook.compute_bleu, (labels, outputs), tf.float32)
   return bleu_score, tf.constant(1.0)
+
+
+def token_accuracy(labels, outputs):
+  """Compute tokenwise (elementwise) accuracy.
+
+  Args:
+    labels: ground-truth labels, shape=(batch, seq_length)
+    outputs: predicted tokens, shape=(batch, seq_length)
+  Returns:
+    Two ops, one for getting the current average accuracy and another for
+    updating the running average estimate.
+  """
+  weights = tf.to_float(tf.not_equal(labels, 0))
+  return tf.metrics.accuracy(labels, outputs, weights=weights)
+
+
+def sequence_accuracy(labels, outputs):
+  """Compute the sequence-level accuracy.
+
+  A sequence is only considered correct if all of its entries were predicted
+  correctly.
+
+  Args:
+    labels: ground-truth labels, shape=(batch, packed_seq_length)
+    outputs: predicted tokens, shape=(batch, seq_length)
+  Returns:
+    Two ops, one for getting the current average accuracy and another for
+    updating the running average estimate.
+  """
+  # A sequence is correct if all of the non-padded entries are correct
+  all_correct = tf.reduce_all(
+      tf.logical_or(tf.equal(labels, outputs), tf.equal(labels, 0)), axis=-1
+  )
+  return tf.metrics.mean(all_correct)

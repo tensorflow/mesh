@@ -23,32 +23,25 @@ from __future__ import print_function
 import gin
 from mesh_tensorflow.transformer import metrics
 
-METRICS = {
-    "padded_neg_log_perplexity": metrics.padded_neg_log_perplexity,
-    "bleu": metrics.bleu,
-}
-
 
 @gin.configurable
-def get_metric_fns(metric_names, labels, logits):
+def get_metric_fns(metric_names, labels, outputs):
   """Generate a dictionary of metric name to metric function.
 
   Args:
     metric_names: list of strings enumerating the different metrics.
     labels: a tensor where batch is the first dimension.
-    logits: a tensor with one more dimension than labels and where the batch is
-      the first dimension.
+    outputs: a tensor of model predictions, same dimensionality as labels.
 
   Returns:
     metric_fns: dict of metric functions keyed by their name.
   """
   metric_fns = {}
   for metric_name in metric_names:
-    metric_fn = METRICS.get(metric_name)
-    if metric_fn:
-      metric_fns[metric_name] = metric_fn(labels, logits)
+    if hasattr(metrics, metric_name):
+      metric_fn = getattr(metrics, metric_name)
+      metric_fns[metric_name] = metric_fn(labels, outputs)
     else:
       raise ValueError("Metric {} is not implemented".format(metric_name))
 
   return metric_fns
-

@@ -130,12 +130,22 @@ def pack_and_batch(dataset, batch_size, length, pack=True):
   """
   if pack:
     dataset = pack_dataset(dataset, length=length)
-  dataset = dataset.batch(batch_size, drop_remainder=False)
+  # Pad/trim length of each example to length
   dataset = dataset.map(
-      functools.partial(trim_and_pad_all_features,
-                        batch_size=batch_size,
-                        length=length),
-      num_parallel_calls=tf.data.experimental.AUTOTUNE)
+      functools.partial(trim_and_pad_all_features, length=length),
+      num_parallel_calls=tf.data.experimental.AUTOTUNE
+  )
+  dataset = dataset.batch(batch_size, drop_remainder=False)
+  # Pad batch size of each batch to batch_size
+  dataset = dataset.map(
+      functools.partial(trim_and_pad_all_features, length=batch_size),
+      num_parallel_calls=tf.data.experimental.AUTOTUNE
+  )
+  # Remind TensorFlow of the shape
+  dataset = dataset.map(
+      lambda x: {k: tf.reshape(v, (batch_size, length)) for k, v in x.items()},
+      num_parallel_calls=tf.data.experimental.AUTOTUNE
+  )
   dataset = dataset.prefetch(100)
   return dataset
 
@@ -595,23 +605,21 @@ def _pack_with_custom_ops(dataset, keys, length):
   return dataset
 
 
-def _trim_and_pad(t, batch_size, length):
-  """Trim/pad to get a tf.Tensor with shape [batch_size, length].
+def _trim_and_pad(t, length):
+  """Trim/pad to the first axis of t to be of size length.
 
   Args:
-    t: a 2d tf.Tensor
-    batch_size: an integer
+    t: a tf.Tensor
     length: an integer
   Returns:
-    a 2d Tensor
+    a tf.Tensor
   """
-  t = t[:batch_size, :length]
-  paddings = [
-      [0, batch_size - tf.shape(t)[0]], [0, length - tf.shape(t)[1]]]
+  t = t[:length]
+  paddings = [[0, length - tf.shape(t)[0]]] + [[0, 0]]*(t.get_shape().ndims - 1)
   t = tf.pad(t, paddings)
-  return tf.reshape(t, [batch_size, length])
+  return t
 
 
-def trim_and_pad_all_features(features, batch_size, length):
-  """Trim and pad all features."""
-  return {k: _trim_and_pad(v, batch_size, length) for k, v in features.items()}
+def trim_and_pad_all_features(features, length):
+  """Trim and pad first dimension of all features to size length."""
+  return {k: _trim_and_pad(v, length) for k, v in features.items()}
