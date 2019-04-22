@@ -29,7 +29,9 @@ def get_metric_fns(metric_names, labels, outputs):
   """Generate a dictionary of metric name to metric function.
 
   Args:
-    metric_names: list of strings enumerating the different metrics.
+    metric_names: list of strings in the format "prefix/metric_function_name".
+      metric_function_name should refer to a function name in metrics.py. The
+      prefix will be included in the key in the returned dict.
     labels: a tensor where batch is the first dimension.
     outputs: a tensor of model predictions, same dimensionality as labels.
 
@@ -38,10 +40,11 @@ def get_metric_fns(metric_names, labels, outputs):
   """
   metric_fns = {}
   for metric_name in metric_names:
-    if hasattr(metrics, metric_name):
-      metric_fn = getattr(metrics, metric_name)
+    metric_fn_name = metric_name.split("/")[-1]
+    if hasattr(metrics, metric_fn_name):
+      metric_fn = getattr(metrics, metric_fn_name)
       metric_fns[metric_name] = metric_fn(labels, outputs)
     else:
-      raise ValueError("Metric {} is not implemented".format(metric_name))
+      raise ValueError("Metric {} is not implemented".format(metric_fn_name))
 
   return metric_fns

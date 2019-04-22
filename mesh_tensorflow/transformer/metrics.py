@@ -20,15 +20,13 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-from tensor2tensor.utils import bleu_hook
 import tensorflow as tf
 
 
-# TODO(katherinelee): Look at other bleu implementations.
+# TODO(rohananil): Replace this with your C++ BLEU eval.
 def bleu(labels, outputs):
-  bleu_score = tf.py_function(
-      bleu_hook.compute_bleu, (labels, outputs), tf.float32)
-  return bleu_score, tf.constant(1.0)
+  del labels, outputs
+  return tf.constant(0.), tf.constant(1.0)
 
 
 def token_accuracy(labels, outputs):

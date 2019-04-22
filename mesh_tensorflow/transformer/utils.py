@@ -538,6 +538,9 @@ def run(tpu_job_name,
   cluster = tf.contrib.cluster_resolver.TPUClusterResolver(
       tpu if (tpu) else "", zone=tpu_zone, project=gcp_project)
 
+  tf.logging.info(
+      "Building TPUConfig with tpu_job_name={}".format(tpu_job_name)
+  )
   my_tpu_config = tpu_config.TPUConfig(
       tpu_job_name=tpu_job_name,
       iterations_per_loop=iterations_per_loop,
@@ -601,6 +604,10 @@ def run(tpu_job_name,
       for metric_names, component in metrics_inputs:
         tf.logging.info("Evaluating {}".format(component.__dict__))
         tf.logging.info("on split {}".format(dataset_split))
+        # Prepend eval tag and split name to metric names
+        metric_names = [
+            "eval/{}/{}".format(dataset_split, n) for n in metric_names
+        ]
         # Regenerate the estimator
         model_fn = tpu_estimator_model_fn(
             model_type=model_type,
