@@ -49,13 +49,14 @@ def layout(mtf_graph, mesh_shape, mtf_outputs=()):
 
   Args:
     mtf_graph: a mtf.Graph.
-    mesh_shape: an mtf.Shape.
+    mesh_shape: an mtf.Shape, str, or listlike of mtf.Dimension.
     mtf_outputs: an optional iterable of mtf.Tensor, representing the outputs
         of the computation.
 
   Returns:
     a mtf.LayoutRules
   """
+  mesh_shape = mtf.convert_to_shape(mesh_shape)
   estimator = memory_estimator.MemoryEstimator(mtf_graph, mesh_shape,
                                                mtf_outputs)
   optimizer = layout_optimizer.LayoutOptimizer(estimator)

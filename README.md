@@ -177,10 +177,25 @@ involves matrix multiplications which reduce out the "batch" dimension.
 
 While results do not depend on layout (except in the realm of roundoff errors
 and random seeds), performance and memory consumption depend heavily on layout.
-One day we hope to automate the process of choosing a layout.  For now, you
-really need to fully understand the performance implications and pick one
-yourself.  Mesh TensorFlow helps by accumulating and printing counters of
-computation/communication.  To start, here are some tricks/guidelines.
+Fortunately, the auto_mtf subpackage provides a method for automatically
+choosing a layout.  For more information about what auto_mtf is doing to choose
+a layout, see its [README](auto_mtf/README.md) file.
+
+```Python
+import mesh_tensorflow.auto_mtf
+
+graph = mtf.Graph()
+mesh = mtf.Mesh(graph, "my_mesh")
+# Insert model code here.
+outputs = [logits, loss]  # iterable of mtf.Tensor, the outputs you're computing
+mesh_shape = [("processor_rows", 2), ("processor_cols", 2)]
+layout_rules = mtf.auto_mtf.layout(graph, mesh_shape, outputs)
+```
+
+It is possible for advanced users to eke out additional performance by tuning
+the layout (and model) further.  Mesh TensorFlow helps by accumulating and
+printing counters of computation/communication.  To start, here are some
+tricks/guidelines.
 
 * It is illegal for two dimensions of the same tensor to be split across the
   same mesh dimension.
