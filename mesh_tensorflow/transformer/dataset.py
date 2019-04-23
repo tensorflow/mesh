@@ -210,6 +210,47 @@ def pretokenized_tfds_dataset(dataset_name=gin.REQUIRED,
 
 
 @gin.configurable
+def packed_parallel_tsv_dataset(filenames=gin.REQUIRED,
+                                dataset_split=gin.REQUIRED,
+                                batch_size=gin.REQUIRED,
+                                sequence_length=gin.REQUIRED,
+                                vocabulary=gin.REQUIRED,
+                                append_eos=True,
+                                shuffle_buffer_size=10000,
+                                eos_id=1):
+  """Reads parallel tab-separated text file. One example per line."""
+
+  dataset = tf.data.TextLineDataset(filenames)
+  if dataset_split == "train":
+    dataset = dataset.repeat()
+    dataset = dataset.shuffle(shuffle_buffer_size)
+
+  def _parse_fn(record):  # pylint: disable=missing-docstring
+    tokens = tf.decode_csv(
+        record,
+        record_defaults=[""] * 2,
+        field_delim="\t",
+        use_quote_delim=False)
+    return {"inputs": tokens[0], "targets": tokens[1]}
+
+  def _encode_fn(features):  # pylint: disable=missing-docstring
+    inputs_vocabulary = vocabulary[0] if isinstance(vocabulary,
+                                                    tuple) else vocabulary
+    targets_vocabulary = vocabulary[1] if isinstance(vocabulary,
+                                                     tuple) else vocabulary
+    inputs_enc = inputs_vocabulary.encode_tf(features["inputs"])
+    targets_enc = targets_vocabulary.encode_tf(features["targets"])
+    if append_eos:
+      inputs_enc = tf.concat([tf.to_int64(inputs_enc), [eos_id]], 0)
+      targets_enc = tf.concat([tf.to_int64(targets_enc), [eos_id]], 0)
+    return {"inputs": inputs_enc, "targets": targets_enc}
+
+  dataset = dataset.map(_parse_fn)
+  dataset = dataset.map(_encode_fn)
+  return pack_and_batch(dataset, batch_size, sequence_length)
+
+
+@gin.configurable
 def untokenized_tfds_dataset(dataset_name=gin.REQUIRED,
                              text2self=gin.REQUIRED,
                              tfds_data_dir=gin.REQUIRED,

@@ -19,6 +19,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import gin
 from mesh_tensorflow import ops_with_redefined_builtins as mtf
 import tensorflow as tf
 
@@ -83,6 +84,7 @@ def compute_topk_scores_and_seq(sequences, scores, scores_to_gather, flags,
   return topk_seq, topk_gathered_scores, topk_flags, selector
 
 
+@gin.configurable
 def beam_search(logits_fn,
                 initial_ids,
                 alpha,
@@ -571,6 +573,7 @@ def beam_search(logits_fn,
   return finished_seq, finished_scores
 
 
+@gin.configurable
 def greedy_decode(logits_fn,
                   initial_ids,
                   temperature=0.0,

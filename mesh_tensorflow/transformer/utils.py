@@ -57,8 +57,43 @@ def get_variable_dtype(
       activation_dtype=tf.as_dtype(activation_dtype))
 
 
+def inputs_vocabulary(vocabulary):
+  """Inputs vocabulary.
+
+  Args:
+    vocabulary: Vocabulary or (inputs_vocabulary, targets_vocabulary) tuple.
+
+  Returns:
+    a Vocabulary
+  """
+  if isinstance(vocabulary, tuple):
+    vocabulary = vocabulary[0]
+  return vocabulary
+
+
+def targets_vocabulary(vocabulary):
+  """Targets vocabulary.
+
+  Args:
+    vocabulary: Vocabulary or (inputs_vocabulary, targets_vocabulary) tuple.
+
+  Returns:
+    a Vocabulary
+  """
+  if isinstance(vocabulary, tuple):
+    vocabulary = vocabulary[1]
+  return vocabulary
+
+
+@gin.configurable
+def separate_vocabularies(inputs=gin.REQUIRED, targets=gin.REQUIRED):
+  """Gin-configurable helper function."""
+  return (inputs, targets)
+
+
 def build_model(model_type="bitransformer",
-                vocab_size=gin.REQUIRED,
+                input_vocab_size=gin.REQUIRED,
+                output_vocab_size=gin.REQUIRED,
                 layout_rules=None,
                 mesh_shape=None):
   """Build a transformer model.
@@ -79,7 +114,8 @@ def build_model(model_type="bitransformer",
 
   Args:
     model_type: a string - "bitransformer", "lm" or "aligned"
-    vocab_size: an integer
+    input_vocab_size: an integer
+    output_vocab_size: an integer
     layout_rules: optional - an input to mtf.convert_to_layout_rules
     mesh_shape: optional - an input to mtf.convert_to_shape
   Returns:
@@ -87,16 +123,16 @@ def build_model(model_type="bitransformer",
   """
   if model_type == "bitransformer":
     return transformer.make_bitransformer(
-        input_vocab_size=vocab_size,
-        output_vocab_size=vocab_size,
+        input_vocab_size=input_vocab_size,
+        output_vocab_size=output_vocab_size,
         mesh_shape=mesh_shape,
         layout=layout_rules)
   elif model_type == "lm" or model_type == "aligned":
     return transformer.Unitransformer(
         autoregressive=model_type == "lm",
         layer_stack=transformer.make_layer_stack(),
-        input_vocab_size=vocab_size,
-        output_vocab_size=vocab_size,
+        input_vocab_size=input_vocab_size,
+        output_vocab_size=output_vocab_size,
         mesh_shape=mesh_shape,
         layout=layout_rules)
   else:
@@ -353,7 +389,8 @@ def decode_from_file(estimator,
                      sequence_length,
                      checkpoint_path="",
                      input_filename=gin.REQUIRED,
-                     output_filename=gin.REQUIRED):
+                     output_filename=gin.REQUIRED,
+                     eos_id=1):
   """Decode from a text file.
 
   Args:
@@ -365,6 +402,7 @@ def decode_from_file(estimator,
     checkpoint_path: an optional string
     input_filename: a string
     output_filename: a string
+    eos_id: EOS id
   """
   with tf.gfile.Open(input_filename) as f:
     text = f.read()
@@ -377,12 +415,12 @@ def decode_from_file(estimator,
   # encode all inputs
   all_input_ids = []
   for line in inputs:
-    ids = vocabulary.encode(line.strip())
+    ids = inputs_vocabulary(vocabulary).encode(line.strip())
     if model_type != "lm":
       # for text2self problems, the inputs represent a partial sequence
       # to be continued, and should not be terminated by EOS.
       # for sequence-to-sequence problems, the input needs to be EOS-terminated
-      ids += [1]
+      ids += [eos_id]
     if len(ids) > sequence_length:
       ids = ids[:sequence_length]
     else:
@@ -400,16 +438,19 @@ def decode_from_file(estimator,
     return dataset
 
   result_iter = estimator.predict(input_fn, checkpoint_path=checkpoint_path)
-  vocab_size = vocabulary.vocab_size
+  vocab_size = targets_vocabulary(vocabulary).vocab_size
   decodes = []
   for i, result in enumerate(result_iter):
     output_ids = clean_decodes(list(result["outputs"]), vocab_size)
-    output_string = vocabulary.decode([int(x) for x in output_ids])
+    output_string = targets_vocabulary(vocabulary).decode(
+        [int(x) for x in output_ids])
     decodes.append(output_string)
     if i & (i - 1) == 0:
-      # LOG every power of 2
-      tf.logging.info("decode %d input = %s" % (i, inputs[i]))
-      tf.logging.info("          output = %s" % output_string)
+      if i < len(inputs):
+        # LOG every power of 2, don't log if it's padded input i >= len(inputs)
+        tf.logging.info("decode %d input = %s" % (i, inputs[i]))
+        tf.logging.info("          output = %s" % output_string)
+
   # BUG WORKAROUND - on TF1.13 and earlier, the output for each batch is
   # repeated a number of times equal to the number of cores.
   if len(decodes) == padded_n:
@@ -432,22 +473,25 @@ def decode_from_file(estimator,
   output_file.close()
 
 
-def clean_decodes(ids, vocab_size):
+@gin.configurable
+def clean_decodes(ids, vocab_size, eos_id=1):
   """Stop at EOS or padding or OOV.
 
   Args:
     ids: a list of integers
     vocab_size: an integer
+    eos_id: EOS id
 
   Returns:
     a list of integers
   """
   ret = []
   for i in ids:
-    if i <= 1 or i >= vocab_size:
+    if i == eos_id:
       break
-    else:
-      ret.append(int(i))
+    if i >= vocab_size:
+      break
+    ret.append(int(i))
   return ret
 
 
@@ -508,7 +552,8 @@ def run(tpu_job_name,
     tpu_zone: string, GCE zone where the Cloud TPU is located in
     model_dir: string, estimator model_dir
     model_type: a string - either "bitransformer", "lm" or "aligned"
-    vocabulary: a vocabulary.Vocabulary
+    vocabulary: a vocabulary.Vocabulary or
+      (inputs_vocabulary, targets_vocabulary) tuple.
     train_dataset_fn: A function returning a tf.data.Dataset. Must be provided
       for mode=train
     eval_dataset_fn: A function returning a tf.data.Dataset. Must be provided
@@ -567,7 +612,8 @@ def run(tpu_job_name,
 
   transformer_model = build_model(
       model_type=model_type,
-      vocab_size=vocabulary.vocab_size,
+      input_vocab_size=inputs_vocabulary(vocabulary).vocab_size,
+      output_vocab_size=targets_vocabulary(vocabulary).vocab_size,
       layout_rules=layout_rules,
       mesh_shape=mesh_shape)
 
