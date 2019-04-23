@@ -20,6 +20,7 @@ from __future__ import division
 from __future__ import print_function
 
 import gin
+import gin.tf
 
 import mesh_tensorflow as mtf
 from mesh_tensorflow.transformer import metric_utils
@@ -316,6 +317,8 @@ def tpu_estimator_model_fn(model_type,
       saver_listener = mtf.MtfCheckpointSaverListener(lowering)
       saver_hook = tf.train.CheckpointSaverHook(
           model_dir, save_steps=1000, saver=saver, listeners=[saver_listener])
+      gin_config_saver_hook = gin.tf.GinConfigSaverHook(
+          model_dir, summarize_config=True)
 
       if mode == tf.estimator.ModeKeys.TRAIN:
         if use_tpu:
@@ -323,13 +326,21 @@ def tpu_estimator_model_fn(model_type,
               mode=tf.estimator.ModeKeys.TRAIN,
               loss=tf_loss,
               train_op=train_op,
-              training_hooks=[restore_hook, saver_hook])
+              training_hooks=[
+                  restore_hook,
+                  saver_hook,
+                  gin_config_saver_hook,
+              ])
         else:
           return tf.estimator.EstimatorSpec(
               tf.estimator.ModeKeys.TRAIN,
               loss=tf_loss,
               train_op=train_op,
-              training_chief_hooks=[restore_hook, saver_hook])
+              training_chief_hooks=[
+                  restore_hook,
+                  saver_hook,
+                  gin_config_saver_hook,
+              ])
 
   return my_model_fn
 
