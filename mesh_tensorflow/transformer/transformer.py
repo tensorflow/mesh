@@ -301,11 +301,13 @@ class LayerStack(TransformerLayer):
             raise ValueError("Layer %s returned misshaped output x=%s y=%s"
                              % (layer.__class__.__name__, x, y))
         x += self._dropout(context, y)
-      if context.layer_outputs is not None:
+      if context.layer_outputs is not None and lnum != len(self._layers) - 1:
         context.layer_outputs.append(x)
       context.layer_index += 1
     x = self._layer_norm(context, x, name="final_layer_norm")
     x = self._dropout(context, x)
+    if context.layer_outputs is not None:
+      context.layer_outputs.append(x)
     return x
 
   def _dropout(self, context, x):
