@@ -257,7 +257,8 @@ def untokenized_tfds_dataset(dataset_name=gin.REQUIRED,
                              dataset_split=gin.REQUIRED,
                              batch_size=gin.REQUIRED,
                              sequence_length=gin.REQUIRED,
-                             vocabulary=gin.REQUIRED):
+                             vocabulary=gin.REQUIRED,
+                             pack=gin.REQUIRED):
   """Reads a tensorflow_datasets dataset.
 
   Returns a tf.data.Dataset containing single tokenized examples where each
@@ -271,6 +272,8 @@ def untokenized_tfds_dataset(dataset_name=gin.REQUIRED,
     batch_size: an integer
     sequence_length: an integer
     vocabulary: a vocabulary.Vocabulary
+    pack: if True, multiple examples emitted by load_internal() are concatenated
+        to form one combined example.
   Returns:
     a tf.data.Dataset of batches
   """
@@ -282,7 +285,7 @@ def untokenized_tfds_dataset(dataset_name=gin.REQUIRED,
     dataset = dataset.shuffle(1000)
   dataset = supervised_to_dict(dataset, text2self)
   dataset = encode_all_features(dataset, vocabulary)
-  return pack_and_batch(dataset, batch_size, sequence_length)
+  return pack_and_batch(dataset, batch_size, sequence_length, pack)
 
 
 def supervised_to_dict(dataset, text2self):
@@ -381,7 +384,7 @@ def pretokenized_t2t_dataset(dataset_name=gin.REQUIRED,
                              batch_size=gin.REQUIRED,
                              sequence_length=gin.REQUIRED,
                              vocabulary=None):
-  """Loads the Tensor2tensor dataset specified by datatset_name.
+  """Loads the Tensor2tensor dataset specified by dataset_name.
 
   Args:
     dataset_name: TensorFlow Datasets dataset name.

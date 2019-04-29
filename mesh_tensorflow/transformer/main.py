@@ -30,6 +30,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import importlib
 import os
 import gin
 
@@ -68,12 +69,22 @@ tf.flags.DEFINE_multi_string("gin_file", None,
 tf.flags.DEFINE_multi_string(
     "gin_param", None, "Newline separated list of Gin parameter bindings.")
 
+# TFDS Module Import
+tf.flags.DEFINE_multi_string(
+    "module_import", None,
+    "Modules to import. Use this when your DatasetBuilder is defined outside "
+    "of tensorflow_datasets so that it is registered.")
+
 FLAGS = tf.flags.FLAGS
 
 _DEFAULT_CONFIG_FILE = "./gin/defaults.gin"
 
 
 def main(_):
+  if FLAGS.module_import:
+    for module in FLAGS.module_import:
+      importlib.import_module(module)
+
   # Set up the default values for the configurable parameters. These values will
   # be overridden by any user provided gin files/parameters.
   gin.parse_config_file(
