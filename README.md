@@ -179,7 +179,7 @@ While results do not depend on layout (except in the realm of roundoff errors
 and random seeds), performance and memory consumption depend heavily on layout.
 Fortunately, the auto_mtf subpackage provides a method for automatically
 choosing a layout.  For more information about what auto_mtf is doing to choose
-a layout, see its [README](auto_mtf/README.md) file.
+a layout, see its [README](mesh_tensorflow/auto_mtf/README.md) file.
 
 ```Python
 import mesh_tensorflow.auto_mtf
