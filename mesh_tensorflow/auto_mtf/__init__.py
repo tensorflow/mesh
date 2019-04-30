@@ -19,4 +19,10 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+from mesh_tensorflow.auto_mtf import graph_interface
+from mesh_tensorflow.auto_mtf import layout_optimizer
+from mesh_tensorflow.auto_mtf import memory_estimator
+from mesh_tensorflow.auto_mtf import print_cp_model_solution
+from mesh_tensorflow.auto_mtf import scheduler
+from mesh_tensorflow.auto_mtf import valid_layouts
 from mesh_tensorflow.auto_mtf.layout import layout

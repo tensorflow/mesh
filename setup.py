@@ -26,6 +26,7 @@ setup(
         'tests': [
             'absl-py',
             'pytest',
+            'ortools>=7.0.6546',
             'tensor2tensor>=1.9.0',  # TODO(trandustin): rm dependence
         ],
     },
