@@ -19,6 +19,8 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import os
+
 import gin
 import gin.tf
 
@@ -30,6 +32,23 @@ import tensorflow as tf
 
 from tensorflow.contrib.tpu.python.tpu import tpu_config
 from tensorflow.contrib.tpu.python.tpu import tpu_estimator
+
+tf.flags.DEFINE_multi_string("gin_file", None,
+                             "List of paths to the config files.")
+tf.flags.DEFINE_multi_string(
+    "gin_param", None, "Newline separated list of Gin parameter bindings.")
+FLAGS = tf.flags.FLAGS
+
+_DEFAULT_CONFIG_FILE = "./gin/defaults.gin"
+
+
+def parse_gin_defaults_and_flags():
+  """Parses all default gin files and those provides via flags."""
+  # Set up the default values for the configurable parameters. These values will
+  # be overridden by any user provided gin files/parameters.
+  gin.parse_config_file(
+      os.path.join(os.path.dirname(__file__), _DEFAULT_CONFIG_FILE))
+  gin.parse_config_files_and_bindings(FLAGS.gin_file, FLAGS.gin_param)
 
 
 # TODO(noam): maybe add gin-config to mtf.get_variable so we can delete
@@ -425,8 +444,8 @@ def decode_from_file(estimator,
       ids = ids[:sequence_length]
     else:
       ids.extend([0] * (sequence_length - len(ids)))
-      all_input_ids.append(ids)
-      # pad to make an integral number of batches
+    all_input_ids.append(ids)
+  # pad to make an integral number of batches
   all_input_ids.extend([all_input_ids[0]] * (-n % batch_size))
   padded_n = len(all_input_ids)
   all_input_ids = np.array(all_input_ids, dtype=np.int32)

@@ -31,9 +31,6 @@ from __future__ import division
 from __future__ import print_function
 
 import importlib
-import os
-import gin
-
 from mesh_tensorflow.transformer import utils
 import tensorflow as tf
 
@@ -63,12 +60,6 @@ tf.flags.DEFINE_string(
     help="GCE zone where the Cloud TPU is located in. If not specified, we "
     "will attempt to automatically detect the GCE project from metadata.")
 
-# GIN PARAMETERS
-tf.flags.DEFINE_multi_string("gin_file", None,
-                             "List of paths to the config files.")
-tf.flags.DEFINE_multi_string(
-    "gin_param", None, "Newline separated list of Gin parameter bindings.")
-
 # TFDS Module Import
 tf.flags.DEFINE_multi_string(
     "module_import", None,
@@ -77,19 +68,13 @@ tf.flags.DEFINE_multi_string(
 
 FLAGS = tf.flags.FLAGS
 
-_DEFAULT_CONFIG_FILE = "./gin/defaults.gin"
-
 
 def main(_):
   if FLAGS.module_import:
     for module in FLAGS.module_import:
       importlib.import_module(module)
 
-  # Set up the default values for the configurable parameters. These values will
-  # be overridden by any user provided gin files/parameters.
-  gin.parse_config_file(
-      os.path.join(os.path.dirname(__file__), _DEFAULT_CONFIG_FILE))
-  gin.parse_config_files_and_bindings(FLAGS.gin_file, FLAGS.gin_param)
+  utils.parse_gin_defaults_and_flags()
   utils.run(
       tpu_job_name=FLAGS.tpu_job_name,
       tpu=FLAGS.tpu,
