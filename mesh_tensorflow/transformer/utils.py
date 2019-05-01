@@ -19,6 +19,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import math
 import os
 
 import gin
@@ -158,6 +159,42 @@ def build_model(model_type="bitransformer",
     raise ValueError("unknown model_type")
 
 
+def _logical_to_physical(physical_shape, mesh_shape):
+  """Mapping from logical mesh to physical TPU cores.
+
+  This is to create the logical_to_physical mapping for SimdMeshImpl.  For 2d
+  meshes, we use a tiled layout with the second logical mesh-dimension
+  corresponding to position within a tile.  This tends to give better
+  performance.  For non-2d meshes, we use the default mapping.
+
+  Args:
+    physical_shape: a list of integers - the physical mesh shape
+    mesh_shape: a mtf.Shape
+  Returns:
+    a permutation of range(mesh_shape.size) or None
+  """
+  mesh_shape = mesh_shape.to_integer_list
+  if len(mesh_shape) != 2:
+    return None
+  # Use "tiled" mapping of logical mesh to physical mesh.
+  # The first logical-mesh dimension corresponds to which phyiscal tile
+  # and the second logical-mesh dimension corresponds to location within
+  # a tile.
+  tile_size = mesh_shape[1] // 2  # size in chips (each with 2 cores)
+  lg_tile_size = int(math.log(tile_size, 2))
+  t0 = 2 ** (lg_tile_size // 2)
+  t1 = tile_size // t0
+  tile_shape = [t0, t1]
+  tf.logging.info("Mesh shape = %s" % mesh_shape)
+  tf.logging.info("Physical shape = %s" % physical_shape)
+  tf.logging.info("Tile shape = %s" % tile_shape)
+  _, logical_to_physical = mtf.simd_mesh_impl.tile_2d(
+      physical_shape, tile_shape)
+  tf.logging.info("logical_to_physical = %s" % (logical_to_physical,))
+  return logical_to_physical
+
+
+@gin.configurable
 def tpu_estimator_model_fn(model_type,
                            transformer_model,
                            model_dir,
@@ -214,8 +251,12 @@ def tpu_estimator_model_fn(model_type,
       var_placer = mtf.utils.BalancedVariablePlacer(device_list,
                                                     devices_memeory_usage)
       mesh_devices = [""] * mesh_shape.size
+      physical_shape = list(
+          params["context"].device_assignment.topology.mesh_shape)
+      logical_to_physical = _logical_to_physical(physical_shape, mesh_shape)
       mesh_impl = mtf.simd_mesh_impl.SimdMeshImpl(
-          mesh_shape, layout_rules, mesh_devices, ctx.device_assignment)
+          mesh_shape, layout_rules, mesh_devices, ctx.device_assignment,
+          logical_to_physical=logical_to_physical)
     else:
       var_placer = None
       mesh_devices = [""] * mesh_shape.size
@@ -540,6 +581,28 @@ def auto_batch_size(sequence_length,
 
 
 @gin.configurable
+def auto_train_steps(batch_size,
+                     sequence_length,
+                     train_tokens=2 ** 36):
+  """Automatically compute number of training steps.
+
+  Since the batch size and sequence length can vary across experiments, we
+  specify the amount of training in terms of (non-unique) input tokens processed
+  over the course of training the model.  The number of steps is computed as
+
+    train_steps = train_tokens // (batch_size * sequence_length)
+
+  Args:
+    batch_size: an integer
+    sequence_length: an integer
+    train_tokens: an integer (train_steps * batch_size * sequence_length)
+  Returns:
+    an integer
+  """
+  return train_tokens // (batch_size * sequence_length)
+
+
+@gin.configurable
 def run(tpu_job_name,
         tpu,
         gcp_project,
@@ -556,8 +619,8 @@ def run(tpu_job_name,
         iterations_per_loop=100,
         save_checkpoints_steps=1000,
         eval_steps=10,
-        train_steps=1000000,
         batch_size=auto_batch_size,
+        train_steps=auto_train_steps,
         sequence_length=gin.REQUIRED,
         mesh_shape=gin.REQUIRED,
         layout_rules=gin.REQUIRED,
@@ -584,10 +647,11 @@ def run(tpu_job_name,
     iterations_per_loop: integer, steps per train loop
     save_checkpoints_steps: integer, steps per checkpoint
     eval_steps: integer, number of evaluation steps
-    train_steps: Total number of training steps.
     batch_size: An integer or a function with the same signature as
       auto_batch_size().  Mini-batch size for the training. Note that this is
       the global batch size and not the per-shard batch size.
+    train_steps: An integer or a function with the same signature as
+      auto_train_steps().  Total number of training steps.
     sequence_length: an integer
     mesh_shape: an input to mtf.convert_to_shape()
     layout_rules: an input to mtf.convert_to_layout_rules()
@@ -598,9 +662,13 @@ def run(tpu_job_name,
   if not isinstance(batch_size, int):
     batch_size = batch_size(sequence_length, mesh_shape, layout_rules)
 
+  if not isinstance(train_steps, int):
+    train_steps = train_steps(batch_size, sequence_length)
+
   tf.logging.info("mode=%s" % mode,)
-  tf.logging.info("batch_size=%s" % batch_size,)
   tf.logging.info("sequence_length=%s" % sequence_length,)
+  tf.logging.info("batch_size=%s" % batch_size,)
+  tf.logging.info("train_steps=%s" % train_steps,)
   tf.logging.info("mesh_shape=%s" % mesh_shape,)
   tf.logging.info("layout_rules=%s" % layout_rules,)
 
