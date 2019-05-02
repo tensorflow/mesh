@@ -30,6 +30,7 @@ from mesh_tensorflow.transformer import metric_utils
 from mesh_tensorflow.transformer import transformer
 import numpy as np
 import tensorflow as tf
+import tensorflow_datasets as tfds
 
 from tensorflow.contrib.tpu.python.tpu import tpu_config
 from tensorflow.contrib.tpu.python.tpu import tpu_estimator
@@ -441,38 +442,36 @@ def tpu_estimator_model_fn(model_type,
   return my_model_fn
 
 
-@gin.configurable
-def decode_from_file(estimator,
-                     vocabulary,
-                     model_type,
-                     batch_size,
-                     sequence_length,
-                     checkpoint_path="",
-                     input_filename=gin.REQUIRED,
-                     output_filename=gin.REQUIRED,
-                     eos_id=1):
-  """Decode from a text file.
+def get_inputs_from_file(input_filename):
+  """Read data from file and strip new lines."""
+  inputs = [line.strip() for line in tf.gfile.Open(input_filename)]
+
+  # Strip the last empty line.
+  if not inputs[-1]:
+    inputs.pop()
+  return inputs
+
+
+def encode_inputs(inputs,
+                  vocabulary,
+                  model_type,
+                  batch_size,
+                  sequence_length,
+                  eos_id=1):
+  """Encode inputs.
 
   Args:
-    estimator: a TPUEstimator
+    inputs: list of strings
     vocabulary: a mtf.transformer.vocabulary.Vocabulary
     model_type: a string
     batch_size: an integer
     sequence_length: an integer (maximum decode length)
-    checkpoint_path: an optional string
-    input_filename: a string
-    output_filename: a string
     eos_id: EOS id
+
+  Returns:
+    all_input_ids: encoded inputs
   """
-  with tf.gfile.Open(input_filename) as f:
-    text = f.read()
-  records = text.split("\n")
-  inputs = [record.strip() for record in records]
-  # Strip the last empty line.
-  if not inputs[-1]:
-    inputs.pop()
   n = len(inputs)
-  # encode all inputs
   all_input_ids = []
   for line in inputs:
     ids = inputs_vocabulary(vocabulary).encode(line.strip())
@@ -488,16 +487,41 @@ def decode_from_file(estimator,
     all_input_ids.append(ids)
   # pad to make an integral number of batches
   all_input_ids.extend([all_input_ids[0]] * (-n % batch_size))
-  padded_n = len(all_input_ids)
   all_input_ids = np.array(all_input_ids, dtype=np.int32)
 
-  def input_fn(params):
-    del params
-    dataset = tf.data.Dataset.from_tensor_slices({"inputs": all_input_ids})
-    dataset = dataset.batch(batch_size, drop_remainder=True)
-    return dataset
+  return all_input_ids
 
-  result_iter = estimator.predict(input_fn, checkpoint_path=checkpoint_path)
+
+@gin.configurable
+def decode(estimator,
+           input_fn,
+           dataset_size,
+           padded_dataset_size,
+           batch_size,
+           vocabulary,
+           checkpoint_path="",
+           output_filename=None,
+           log_labels=False):
+  """Decode from an input_fn.
+
+  Args:
+    estimator: a TPUEstimator
+    input_fn: function that returns a tf.Dataset
+    dataset_size: number of examples in the dataset
+    padded_dataset_size: number of examples in the padded dataset
+    batch_size: an integer
+    vocabulary: a mtf.transformer.vocabulary.Vocabulary
+    checkpoint_path: an optional string
+    output_filename: location to save a file of predictions and a file of labels
+    log_labels: whether or not to write the "targets" from the input_fn to a
+      file. If there are no targets given in the input_fn then this should be
+      set to False.
+
+  Returns:
+    list of decoded strings
+  """
+  result_iter = estimator.predict(input_fn,
+                                  checkpoint_path=checkpoint_path)
   vocab_size = targets_vocabulary(vocabulary).vocab_size
   decodes = []
   for i, result in enumerate(result_iter):
@@ -506,17 +530,19 @@ def decode_from_file(estimator,
         [int(x) for x in output_ids])
     decodes.append(output_string)
     if i & (i - 1) == 0:
-      if i < len(inputs):
-        # LOG every power of 2, don't log if it's padded input i >= len(inputs)
-        tf.logging.info("decode %d input = %s" % (i, inputs[i]))
-        tf.logging.info("          output = %s" % output_string)
+      # LOG every power of 2.
+      tf.logging.info("decoded {}: {}".format(i, output_string))
 
   # BUG WORKAROUND - on TF1.13 and earlier, the output for each batch is
   # repeated a number of times equal to the number of cores.
-  if len(decodes) == padded_n:
+  tf.logging.info(
+      "num examples in dataset (dataset_size): %d\n"
+      "num_examples in padded dataset (padded_dataset_size): %d",
+      dataset_size, padded_dataset_size)
+  if len(decodes) == padded_dataset_size:
     tf.logging.info("number of decodes matches number of inputs")
-  elif len(decodes) % padded_n == 0:
-    num_cores = len(decodes) // padded_n
+  elif len(decodes) % padded_dataset_size == 0:
+    num_cores = len(decodes) // padded_dataset_size
     tf.logging.info("output is repeated num_cores times - removing extras")
 
     def keep(i):
@@ -525,12 +551,92 @@ def decode_from_file(estimator,
     decodes = [d for i, d in enumerate(decodes) if keep(i)]
   else:
     raise ValueError("unexpected number of outputs")
-  output_file = tf.gfile.Open(output_filename, "w")
-  decodes = decodes[:n]
-  for d in decodes:
-    output_file.write(d)
-    output_file.write("\n")
-  output_file.close()
+
+  # Since we replicate a batch enough times to fill the min_dataset_size, this
+  # might not be an integer number of repeats. So we take the first dataset_size
+  # examples.
+  if len(decodes) != dataset_size:
+    tf.logging.info("Taking the first %d examples of %d",
+                    dataset_size, len(decodes))
+    decodes = decodes[:dataset_size]
+
+  if output_filename:
+    # Write out predicted strings
+    pred_output_filename = output_filename + "_preds"
+    if tf.io.gfile.Exists(pred_output_filename):
+      tf.io.gfile.Remove(pred_output_filename)
+    with tf.io.gfile.Open(pred_output_filename, "w") as output_file:
+      for d in decodes:
+        output_file.write(d + "\n")
+
+  if output_filename and log_labels:
+    # Write out labels
+    dataset = tfds.as_numpy(input_fn(0))
+    count = 0
+    # Break through both for-loops by setting broken to be True.
+    broken = False
+    label_output_filename = output_filename + "_labels"
+    if tf.io.gfile.Exists(label_output_filename):
+      tf.io.gfile.Remove(label_output_filename)
+    with tf.io.gfile.Open(label_output_filename, "w") as output_file:
+      for input_target in dataset:
+        if "targets" not in input_target:
+          raise ValueError("The input_fn provided to decode does not have a "
+                           "value for \"targets\"")
+        for ids in input_target["targets"]:
+          output_ids = clean_decodes(ids, vocab_size)
+          output_string = targets_vocabulary(vocabulary).decode(
+              [int(x) for x in output_ids])
+          output_file.write(output_string + "\n")
+          count += 1
+          if count >= dataset_size:
+            broken = True
+            break
+        if broken:
+          break
+
+  return decodes
+
+
+@gin.configurable
+def decode_from_file(estimator,
+                     vocabulary,
+                     model_type,
+                     batch_size,
+                     sequence_length,
+                     checkpoint_path="",
+                     input_filename=gin.REQUIRED,
+                     output_filename=gin.REQUIRED,
+                     eos_id=1):
+  """Decode from a text file and write to output_filename.
+
+  Args:
+    estimator: a TPUEstimator
+    vocabulary: a mtf.transformer.vocabulary.Vocabulary
+    model_type: a string
+    batch_size: an integer
+    sequence_length: an integer (maximum decode length)
+    checkpoint_path: an optional string
+    input_filename: a string
+    output_filename: a string
+    eos_id: EOS id
+  """
+  inputs = get_inputs_from_file(input_filename)
+
+  all_input_ids = encode_inputs(inputs, vocabulary, model_type, batch_size,
+                                sequence_length, eos_id=eos_id)
+  def input_fn(params):
+    del params
+    dataset = tf.data.Dataset.from_tensor_slices({"inputs": all_input_ids})
+    dataset = dataset.batch(batch_size, drop_remainder=True)
+    return dataset
+
+  dataset_size = len(inputs)
+  padded_dataset_size = len(all_input_ids)
+
+  _ = decode(estimator, input_fn, dataset_size, padded_dataset_size, batch_size,
+             vocabulary, checkpoint_path=checkpoint_path,
+             output_filename=output_filename, log_labels=False)
 
 
 @gin.configurable
