@@ -196,6 +196,36 @@ def _logical_to_physical(physical_shape, mesh_shape):
 
 
 @gin.configurable
+def learning_rate_schedule_noam(train_steps,
+                                warmup_steps=10000,
+                                linear_decay_fraction=0.1,
+                                multiplier=1.0):
+  """Noam's favorite learning-rate schedule.
+
+  (rsqrt(max(step_num, warmup_steps))
+   * multiplier
+   * min(1.0, (train_steps-step_num)/(train_steps*linear_decay_fraction)))
+
+  Args:
+    train_steps: a number
+    warmup_steps: a number
+    linear_decay_fraction: a number
+    multiplier: a number
+  Returns:
+    a tf.scalar
+  """
+  train_steps = float(train_steps)
+  step_num = tf.cast(tf.get_global_step(), tf.float32)
+  learning_rate = tf.math.rsqrt(tf.maximum(step_num, warmup_steps))
+  learning_rate *= multiplier
+  if linear_decay_fraction > 0:
+    learning_rate *= tf.minimum(
+        1.0,
+        (train_steps - step_num) / (train_steps * linear_decay_fraction))
+  return learning_rate
+
+
+@gin.configurable
 def tpu_estimator_model_fn(model_type,
                            transformer_model,
                            model_dir,
@@ -205,7 +235,8 @@ def tpu_estimator_model_fn(model_type,
                            batch_size,
                            sequence_length,
                            autostack,
-                           metric_names):
+                           metric_names,
+                           learning_rate=None):
   """Create a TPUEstimator model function.
 
   Args:
@@ -220,6 +251,7 @@ def tpu_estimator_model_fn(model_type,
     autostack: a boolean
     metric_names: list of strings giving the metric names. If None, then
       computes padded_neg_log_perplexity
+    learning_rate: an optional tf.Scalar
 
   Returns:
     a function to be passed to TPUEstimator
@@ -384,7 +416,7 @@ def tpu_estimator_model_fn(model_type,
     if mode == tf.estimator.ModeKeys.TRAIN:
       var_grads = mtf.gradients(
           [loss], [v.outputs[0] for v in graph.trainable_variables])
-      optimizer = mtf.optimize.AdafactorOptimizer()
+      optimizer = mtf.optimize.AdafactorOptimizer(learning_rate=learning_rate)
       update_ops = optimizer.apply_grads(var_grads, graph.trainable_variables)
 
     lowering = mtf.Lowering(graph, {mesh: mesh_impl}, autostack=autostack)
@@ -730,7 +762,8 @@ def run(tpu_job_name,
         sequence_length=gin.REQUIRED,
         mesh_shape=gin.REQUIRED,
         layout_rules=gin.REQUIRED,
-        get_components_fn=None):
+        get_components_fn=None,
+        learning_rate_fn=None):
   """Run training/eval/inference.
 
   Args:
@@ -764,12 +797,18 @@ def run(tpu_job_name,
     get_components_fn: an optional function that gets a list of tuples of
       (metric_names, component) for each component. Required if mode is
       "continuous_eval"
+    learning_rate_fn: an optional function that takes train_steps and produces
+      a tf.Scalar learning-rate value
   """
   if not isinstance(batch_size, int):
     batch_size = batch_size(sequence_length, mesh_shape, layout_rules)
 
   if not isinstance(train_steps, int):
     train_steps = train_steps(batch_size, sequence_length)
+
+  learning_rate = None
+  if learning_rate_fn is not None:
+    learning_rate = learning_rate_fn(train_steps)
 
   tf.logging.info("mode=%s" % mode,)
   tf.logging.info("sequence_length=%s" % sequence_length,)
@@ -820,7 +859,8 @@ def run(tpu_job_name,
       batch_size=batch_size,
       sequence_length=sequence_length,
       autostack=autostack,
-      metric_names=None)
+      metric_names=None,
+      learning_rate=learning_rate)
 
   estimator = tpu_estimator.TPUEstimator(
       model_fn=model_fn,
