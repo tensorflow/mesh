@@ -476,7 +476,7 @@ def tpu_estimator_model_fn(model_type,
 
 def get_inputs_from_file(input_filename):
   """Read data from file and strip new lines."""
-  inputs = [line.strip() for line in tf.gfile.Open(input_filename)]
+  inputs = [line.strip() for line in tf.io.gfile.GFile(input_filename)]
 
   # Strip the last empty line.
   if not inputs[-1]:
@@ -532,8 +532,8 @@ def decode(estimator,
            batch_size,
            vocabulary,
            checkpoint_path="",
-           output_filename=None,
-           log_labels=False):
+           pred_output_filename=None,
+           label_output_filename=None):
   """Decode from an input_fn.
 
   Args:
@@ -544,10 +544,10 @@ def decode(estimator,
     batch_size: an integer
     vocabulary: a mtf.transformer.vocabulary.Vocabulary
     checkpoint_path: an optional string
-    output_filename: location to save a file of predictions and a file of labels
-    log_labels: whether or not to write the "targets" from the input_fn to a
-      file. If there are no targets given in the input_fn then this should be
-      set to False.
+    pred_output_filename: location to save a file of predictions. If None, don't
+      save a prediction file.
+    label_output_filename: location to save a file of labels. If None, don't
+      save a label file.
 
   Returns:
     list of decoded strings
@@ -592,25 +592,23 @@ def decode(estimator,
                     dataset_size, len(decodes))
     decodes = decodes[:dataset_size]
 
-  if output_filename:
+  if pred_output_filename:
     # Write out predicted strings
-    pred_output_filename = output_filename + "_preds"
-    if tf.io.gfile.Exists(pred_output_filename):
-      tf.io.gfile.Remove(pred_output_filename)
-    with tf.io.gfile.Open(pred_output_filename, "w") as output_file:
+    if tf.io.gfile.exists(pred_output_filename):
+      tf.io.gfile.remove(pred_output_filename)
+    with tf.io.gfile.GFile(pred_output_filename, "w") as output_file:
       for d in decodes:
         output_file.write(d + "\n")
 
-  if output_filename and log_labels:
+  if label_output_filename:
     # Write out labels
     dataset = tfds.as_numpy(input_fn(0))
     count = 0
     # Break through both for-loops by setting broken to be True.
     broken = False
-    label_output_filename = output_filename + "_labels"
-    if tf.io.gfile.Exists(label_output_filename):
-      tf.io.gfile.Remove(label_output_filename)
-    with tf.io.gfile.Open(label_output_filename, "w") as output_file:
+    if tf.io.gfile.exists(label_output_filename):
+      tf.io.gfile.remove(label_output_filename)
+    with tf.io.gfile.GFile(label_output_filename, "w") as output_file:
       for input_target in dataset:
         if "targets" not in input_target:
           raise ValueError("The input_fn provided to decode does not have a "
@@ -668,7 +666,7 @@ def decode_from_file(estimator,
 
   _ = decode(estimator, input_fn, dataset_size, padded_dataset_size, batch_size,
              vocabulary, checkpoint_path=checkpoint_path,
-             output_filename=output_filename, log_labels=False)
+             pred_output_filename=output_filename)
 
 
 @gin.configurable
