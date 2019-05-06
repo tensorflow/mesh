@@ -44,7 +44,7 @@ LayerStack.dropout_rate = %dropout_rate
 # label smoothing by default for Bitransofrmer models (but not language models)
 decoder/Unitransformer.label_smoothing = 0.1
 
-sequence_length = 256
+sequence_length = 512
 # the sequence length for this run
 utils.run.sequence_length = %sequence_length
 # the maximum sequence length (changing breaks checkpoint compatibility)
