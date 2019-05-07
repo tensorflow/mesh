@@ -217,7 +217,8 @@ def packed_parallel_tsv_dataset(filenames=gin.REQUIRED,
                                 vocabulary=gin.REQUIRED,
                                 append_eos=True,
                                 shuffle_buffer_size=10000,
-                                eos_id=1):
+                                eos_id=1,
+                                max_encoded_len=0):
   """Reads parallel tab-separated text file. One example per line."""
 
   dataset = tf.data.TextLineDataset(filenames)
@@ -246,7 +247,19 @@ def packed_parallel_tsv_dataset(filenames=gin.REQUIRED,
     return {"inputs": inputs_enc, "targets": targets_enc}
 
   dataset = dataset.map(_parse_fn)
-  dataset = dataset.map(_encode_fn)
+  dataset = dataset.map(_encode_fn, num_parallel_calls=16)
+
+  def _filter_fn(features):  # pylint: disable=missing-docstring
+    return tf.less_equal(
+        tf.reduce_max(
+            tf.stack([tf.size(v) for v in features.values()], axis=0)),
+        max_encoded_len)
+
+  if max_encoded_len:
+    tf.logging.info("Filtering encoded examples longer than %d" %
+                    max_encoded_len)
+    dataset = dataset.filter(_filter_fn)
+
   return pack_and_batch(dataset, batch_size, sequence_length)
 
 
