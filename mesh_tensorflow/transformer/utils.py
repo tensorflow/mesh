@@ -235,6 +235,8 @@ def tpu_estimator_model_fn(model_type,
                            sequence_length,
                            autostack,
                            metric_names,
+                           checkpoints_to_keep,
+                           save_steps,
                            get_metric_fns=gin.REQUIRED,
                            learning_rate=None):
   """Create a TPUEstimator model function.
@@ -251,6 +253,8 @@ def tpu_estimator_model_fn(model_type,
     autostack: a boolean
     metric_names: list of strings giving the metric names. If None, then
       computes padded_neg_log_perplexity
+    checkpoints_to_keep: an integer
+    save_steps: an integer
     get_metric_fns: function that takes in a list of metrics, labels, and
       outputs, and returns a dictionary of metric name: metric function
       evaluated on labels and outputs
@@ -441,14 +445,17 @@ def tpu_estimator_model_fn(model_type,
       saver = tf.train.Saver(
           tf.global_variables(),
           sharded=True,
-          max_to_keep=10,
+          max_to_keep=checkpoints_to_keep,
           keep_checkpoint_every_n_hours=2,
           defer_build=False,
           save_relative_paths=True)
       tf.add_to_collection(tf.GraphKeys.SAVERS, saver)
       saver_listener = mtf.MtfCheckpointSaverListener(lowering)
       saver_hook = tf.train.CheckpointSaverHook(
-          model_dir, save_steps=1000, saver=saver, listeners=[saver_listener])
+          model_dir,
+          save_steps=save_steps,
+          saver=saver,
+          listeners=[saver_listener])
       gin_config_saver_hook = gin.tf.GinConfigSaverHook(
           model_dir, summarize_config=True)
 
@@ -766,7 +773,9 @@ def run(tpu_job_name,
         get_components_fn=None,
         run_post_decode_metrics=None,
         process_metric_names=None,
-        learning_rate_fn=None):
+        learning_rate_fn=None,
+        checkpoints_to_keep=10,
+        save_steps=1000):
   """Run training/eval/inference.
 
   Args:
@@ -812,6 +821,8 @@ def run(tpu_job_name,
       decoding sequences. Required if mode is "continuous_eval."
     learning_rate_fn: an optional function that takes train_steps and produces
       a tf.Scalar learning-rate value
+    checkpoints_to_keep: an integer, keep up to this many checkpoints
+    save_steps: an integer, save every this many steps
   """
   if not isinstance(batch_size, int):
     batch_size = batch_size(sequence_length, mesh_shape, layout_rules)
@@ -873,7 +884,10 @@ def run(tpu_job_name,
       sequence_length=sequence_length,
       autostack=autostack,
       metric_names=None,
-      learning_rate=learning_rate)
+      learning_rate=learning_rate,
+      checkpoints_to_keep=checkpoints_to_keep,
+      save_steps=save_steps,
+  )
 
   estimator = tpu_estimator.TPUEstimator(
       model_fn=model_fn,
@@ -928,7 +942,9 @@ def run(tpu_job_name,
             batch_size=batch_size,
             sequence_length=sequence_length,
             autostack=autostack,
-            metric_names=estimator_metric_names)
+            metric_names=estimator_metric_names,
+            checkpoints_to_keep=checkpoints_to_keep,
+            save_steps=save_steps)
         estimator = tpu_estimator.TPUEstimator(
             model_fn=model_fn,
             config=run_config,
