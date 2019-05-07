@@ -26,7 +26,6 @@ import gin
 import gin.tf
 
 import mesh_tensorflow as mtf
-from mesh_tensorflow.transformer import metric_utils
 from mesh_tensorflow.transformer import transformer
 import numpy as np
 import tensorflow as tf
@@ -236,6 +235,7 @@ def tpu_estimator_model_fn(model_type,
                            sequence_length,
                            autostack,
                            metric_names,
+                           get_metric_fns=gin.REQUIRED,
                            learning_rate=None):
   """Create a TPUEstimator model function.
 
@@ -251,6 +251,9 @@ def tpu_estimator_model_fn(model_type,
     autostack: a boolean
     metric_names: list of strings giving the metric names. If None, then
       computes padded_neg_log_perplexity
+    get_metric_fns: function that takes in a list of metrics, labels, and
+      outputs, and returns a dictionary of metric name: metric function
+      evaluated on labels and outputs
     learning_rate: an optional tf.Scalar
 
   Returns:
@@ -373,7 +376,7 @@ def tpu_estimator_model_fn(model_type,
       local_metric_names = metric_names or ["token_accuracy"]
 
       def metric_fn(labels, outputs):
-        return metric_utils.get_metric_fns(
+        return get_metric_fns(
             local_metric_names, labels, outputs
         )
       eval_metrics = (metric_fn, [labels, outputs])
@@ -476,7 +479,7 @@ def tpu_estimator_model_fn(model_type,
 
 def get_inputs_from_file(input_filename):
   """Read data from file and strip new lines."""
-  inputs = [line.strip() for line in tf.io.gfile.GFile(input_filename)]
+  inputs = [line.rstrip() for line in tf.io.gfile.GFile(input_filename)]
 
   # Strip the last empty line.
   if not inputs[-1]:
@@ -761,6 +764,8 @@ def run(tpu_job_name,
         mesh_shape=gin.REQUIRED,
         layout_rules=gin.REQUIRED,
         get_components_fn=None,
+        run_post_decode_metrics=None,
+        process_metric_names=None,
         learning_rate_fn=None):
   """Run training/eval/inference.
 
@@ -792,9 +797,19 @@ def run(tpu_job_name,
     sequence_length: an integer
     mesh_shape: an input to mtf.convert_to_shape()
     layout_rules: an input to mtf.convert_to_layout_rules()
-    get_components_fn: an optional function that gets a list of tuples of
-      (metric_names, component) for each component. Required if mode is
-      "continuous_eval"
+    get_components_fn: an optional function that takes in a component and
+      returns a list of tuples of (metric_names, component) for each component.
+      Required if mode is "continuous_eval."
+    run_post_decode_metrics: an optional function that takes in: metric names
+      (list of strs), output_filename (str), dataset split (str), and
+      tensorboard summary diretory (optional, str), runs metrics on the outputs
+      in output_filename, and returns a dictionary of metrics and their computed
+      values. Required if mode is "continuous_eval."
+    process_metric_names: an optional function that takes: metric_names (list of
+      str) and a dataset_split (str), and returns: estimator_metric_names (list
+      of str) which are metrics to compute with TPUEstimator.evaluate and
+      post_metric_names (list of str) which are metrics to compute after
+      decoding sequences. Required if mode is "continuous_eval."
     learning_rate_fn: an optional function that takes train_steps and produces
       a tf.Scalar learning-rate value
   """
@@ -883,19 +898,25 @@ def run(tpu_job_name,
 
     estimator.train(input_fn=input_fn, max_steps=train_steps)
   elif mode == "continuous_eval":
-    if get_components_fn is None:
-      raise ValueError("Must provide get_components_fn through gin for eval.")
     if eval_dataset_fn is None:
       raise ValueError("Must provide eval_dataset_fn through gin for eval.")
+    if get_components_fn is None:
+      raise ValueError("Must provide get_components_fn through gin for eval.")
+    if run_post_decode_metrics is None:
+      raise ValueError(
+          "Must provide run_post_decode_metrics through gin for eval.")
+    if process_metric_names is None:
+      raise ValueError(
+          "Must provide process_metric_names through gin for eval.")
+
     metrics_inputs = get_components_fn()
     for _ in tf.contrib.training.checkpoints_iterator(estimator.model_dir):
       for metric_names, component in metrics_inputs:
         tf.logging.info("Evaluating {}".format(component.__dict__))
         tf.logging.info("on split {}".format(dataset_split))
         # Prepend eval tag and split name to metric names
-        metric_names = [
-            "eval/{}/{}".format(dataset_split, n) for n in metric_names
-        ]
+        (estimator_metric_names,
+         post_metric_names) = process_metric_names(metric_names, dataset_split)
         # Regenerate the estimator
         model_fn = tpu_estimator_model_fn(
             model_type=model_type,
@@ -907,7 +928,7 @@ def run(tpu_job_name,
             batch_size=batch_size,
             sequence_length=sequence_length,
             autostack=autostack,
-            metric_names=metric_names)
+            metric_names=estimator_metric_names)
         estimator = tpu_estimator.TPUEstimator(
             model_fn=model_fn,
             config=run_config,
@@ -917,18 +938,37 @@ def run(tpu_job_name,
             use_tpu=tpu,
             export_to_tpu=False,
             params={})
+
+        # Extra eval_dataset_fn call to get the dataset_size
+        _, dataset_size, padded_dataset_size = eval_dataset_fn(
+            component,  # pylint: disable=cell-var-from-loop
+            batch_size=batch_size, sequence_length=sequence_length,
+            vocabulary=vocabulary, dataset_split=dataset_split, pack=False)
         def input_fn(params):
           del params
-          dataset = eval_dataset_fn(component,  # pylint: disable=cell-var-from-loop
-                                    batch_size=batch_size,
-                                    sequence_length=sequence_length,
-                                    vocabulary=vocabulary,
-                                    dataset_split=dataset_split,
-                                    pack=False)
+          dataset, _, _ = eval_dataset_fn(component,  # pylint: disable=cell-var-from-loop
+                                          batch_size=batch_size,
+                                          sequence_length=sequence_length,
+                                          vocabulary=vocabulary,
+                                          dataset_split=dataset_split,
+                                          pack=False)
           return dataset
 
+        tf.logging.info("Evaluating metrics via estimator.evaluate: {}".format(
+            estimator_metric_names))
         eval_args = {"eval": (input_fn, eval_steps)}
         _ = evaluate(estimator, eval_args)
+
+        dataset_name = component.tfds_name.replace("/", "-").replace(":", "-")
+        output_filename = model_dir+"{}-{}-decoded".format(
+            dataset_name, dataset_split)
+        _ = decode(estimator, input_fn, dataset_size, padded_dataset_size,
+                   batch_size, vocabulary, checkpoint_path=checkpoint_path,
+                   pred_output_filename=output_filename)
+        tf.logging.info("Evaluating post decode metrics: {}".format(
+            post_metric_names))
+        _ = run_post_decode_metrics(
+            post_metric_names, output_filename, dataset_split)
 
   elif mode == "infer":
     decode_from_file(
