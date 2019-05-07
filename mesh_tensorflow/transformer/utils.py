@@ -801,8 +801,8 @@ def run(tpu_job_name,
       returns a list of tuples of (metric_names, component) for each component.
       Required if mode is "continuous_eval."
     run_post_decode_metrics: an optional function that takes in: metric names
-      (list of strs), output_filename (str), dataset split (str), and
-      tensorboard summary diretory (optional, str), runs metrics on the outputs
+      (list of strs), pred_output_filename (str), label_output_filename (str),
+      dataset split (str), and tb_summary_dir (str), runs metrics on the outputs
       in output_filename, and returns a dictionary of metrics and their computed
       values. Required if mode is "continuous_eval."
     process_metric_names: an optional function that takes: metric_names (list of
@@ -964,11 +964,16 @@ def run(tpu_job_name,
             dataset_name, dataset_split)
         _ = decode(estimator, input_fn, dataset_size, padded_dataset_size,
                    batch_size, vocabulary, checkpoint_path=checkpoint_path,
-                   pred_output_filename=output_filename)
+                   pred_output_filename=output_filename + "-preds",
+                   label_output_filename=output_filename + "-labels")
         tf.logging.info("Evaluating post decode metrics: {}".format(
             post_metric_names))
+        tb_summary_dir = (
+            os.path.dirname(output_filename) + "/{}_eval/".format(
+                "eval" if dataset_split == "validation" else dataset_split))
         _ = run_post_decode_metrics(
-            post_metric_names, output_filename, dataset_split)
+            post_metric_names, output_filename + "-preds",
+            output_filename + "-labels", dataset_split, tb_summary_dir)
 
   elif mode == "infer":
     decode_from_file(
