@@ -237,7 +237,7 @@ def tpu_estimator_model_fn(model_type,
                            metric_names,
                            checkpoints_to_keep,
                            save_steps,
-                           get_metric_fns=gin.REQUIRED,
+                           get_metric_fns=None,
                            learning_rate=None,
                            outer_batch_size=1):
   """Create a TPUEstimator model function.
@@ -258,7 +258,7 @@ def tpu_estimator_model_fn(model_type,
     save_steps: an integer
     get_metric_fns: function that takes in a list of metrics, labels, and
       outputs, and returns a dictionary of metric name: metric function
-      evaluated on labels and outputs
+      evaluated on labels and outputs. Required for eval, optional otherwise.
     learning_rate: an optional tf.Scalar
     outer_batch_size: outer batch dimension that could be used to enable the mix
       of data-parallel and model-parallel training of MoE models
