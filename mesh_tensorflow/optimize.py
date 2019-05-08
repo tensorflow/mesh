@@ -20,6 +20,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import gin
 from mesh_tensorflow import ops_with_redefined_builtins as mtf
 import tensorflow as tf
 
@@ -34,7 +35,10 @@ def make_optimizer(hparams, lr):
 
 
 class Optimizer(object):
-  """Base optimizer class."""
+  """Base optimizer class.
+
+  Constructor of subclasses must take `learning_rate` as an argument.
+  """
 
   def apply_grads(self, grads, variables):
     """Apply gradients to variables.
@@ -68,11 +72,12 @@ class Optimizer(object):
     raise ValueError("apply_grad not implemented %s %s" % (grad, var))
 
 
+@gin.configurable
 class SgdOptimizer(Optimizer):
   """Optimizer implementing SGD."""
 
-  def __init__(self, lr):
-    self._lr = lr
+  def __init__(self, learning_rate):
+    self._lr = learning_rate
 
   @property
   def lr(self):
@@ -88,6 +93,7 @@ class SgdOptimizer(Optimizer):
     return [mtf.assign_sub(var, grad * self.lr)]
 
 
+@gin.configurable
 class AdafactorOptimizer(Optimizer):
   """Adafactor."""
 

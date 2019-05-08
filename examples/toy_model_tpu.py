@@ -183,7 +183,7 @@ def model_fn(features, labels, mode, params):
       optimizer = mtf.optimize.AdafactorOptimizer()
     else:
       assert FLAGS.optimizer == 'SGD'
-      optimizer = mtf.optimize.SgdOptimizer(lr=FLAGS.lr)
+      optimizer = mtf.optimize.SgdOptimizer(learning_rate=FLAGS.lr)
     update_ops = optimizer.apply_grads(var_grads, graph.trainable_variables)
   else:
     # for now, we can only export fully-replicated tensors.

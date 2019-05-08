@@ -239,6 +239,7 @@ def tpu_estimator_model_fn(model_type,
                            save_steps,
                            get_metric_fns=None,
                            learning_rate=None,
+                           optimizer=None,
                            outer_batch_size=1):
   """Create a TPUEstimator model function.
 
@@ -260,6 +261,8 @@ def tpu_estimator_model_fn(model_type,
       outputs, and returns a dictionary of metric name: metric function
       evaluated on labels and outputs. Required for eval, optional otherwise.
     learning_rate: an optional tf.Scalar
+
+    optimizer: a class extending optimize.Optimizer, required for training
     outer_batch_size: outer batch dimension that could be used to enable the mix
       of data-parallel and model-parallel training of MoE models
 
@@ -436,8 +439,8 @@ def tpu_estimator_model_fn(model_type,
     if mode == tf.estimator.ModeKeys.TRAIN:
       var_grads = mtf.gradients(
           [loss], [v.outputs[0] for v in graph.trainable_variables])
-      optimizer = mtf.optimize.AdafactorOptimizer(learning_rate=learning_rate)
-      update_ops = optimizer.apply_grads(var_grads, graph.trainable_variables)
+      update_ops = optimizer(learning_rate=learning_rate).apply_grads(
+          var_grads, graph.trainable_variables)
 
     lowering = mtf.Lowering(graph, {mesh: mesh_impl}, autostack=autostack)
 
@@ -788,7 +791,8 @@ def run(tpu_job_name,
         process_metric_names=None,
         learning_rate_fn=None,
         checkpoints_to_keep=10,
-        save_steps=1000):
+        save_steps=1000,
+        optimizer=None):
   """Run training/eval/inference.
 
   Args:
@@ -836,6 +840,7 @@ def run(tpu_job_name,
       a tf.Scalar learning-rate value
     checkpoints_to_keep: an integer, keep up to this many checkpoints
     save_steps: an integer, save every this many steps
+    optimizer: a class extending optimize.Optimizer, required for training
   """
   if not isinstance(batch_size, int):
     batch_size = batch_size(sequence_length, mesh_shape, layout_rules)
@@ -900,7 +905,7 @@ def run(tpu_job_name,
       learning_rate=learning_rate,
       checkpoints_to_keep=checkpoints_to_keep,
       save_steps=save_steps,
-  )
+      optimizer=optimizer)
 
   estimator = tpu_estimator.TPUEstimator(
       model_fn=model_fn,
