@@ -19,6 +19,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import functools
 import math
 import os
 
@@ -195,36 +196,6 @@ def _logical_to_physical(physical_shape, mesh_shape):
 
 
 @gin.configurable
-def learning_rate_schedule_noam(train_steps,
-                                warmup_steps=10000,
-                                linear_decay_fraction=0.1,
-                                multiplier=1.0):
-  """Noam's favorite learning-rate schedule.
-
-  (rsqrt(max(step_num, warmup_steps))
-   * multiplier
-   * min(1.0, (train_steps-step_num)/(train_steps*linear_decay_fraction)))
-
-  Args:
-    train_steps: a number
-    warmup_steps: a number
-    linear_decay_fraction: a number
-    multiplier: a number
-  Returns:
-    a tf.scalar
-  """
-  train_steps = float(train_steps)
-  step_num = tf.cast(tf.get_global_step(), tf.float32)
-  learning_rate = tf.math.rsqrt(tf.maximum(step_num, warmup_steps))
-  learning_rate *= multiplier
-  if linear_decay_fraction > 0:
-    learning_rate *= tf.minimum(
-        1.0,
-        (train_steps - step_num) / (train_steps * linear_decay_fraction))
-  return learning_rate
-
-
-@gin.configurable
 def tpu_estimator_model_fn(model_type,
                            transformer_model,
                            model_dir,
@@ -238,7 +209,7 @@ def tpu_estimator_model_fn(model_type,
                            checkpoints_to_keep,
                            save_steps,
                            get_metric_fns=None,
-                           learning_rate=None,
+                           learning_rate_schedule=None,
                            optimizer=None,
                            outer_batch_size=1):
   """Create a TPUEstimator model function.
@@ -260,8 +231,8 @@ def tpu_estimator_model_fn(model_type,
     get_metric_fns: function that takes in a list of metrics, labels, and
       outputs, and returns a dictionary of metric name: metric function
       evaluated on labels and outputs. Required for eval, optional otherwise.
-    learning_rate: an optional tf.Scalar
-
+    learning_rate_schedule: an optional function taking the scalar named
+      argument `step` and return the scalar learning rate
     optimizer: a class extending optimize.Optimizer, required for training
     outer_batch_size: outer batch dimension that could be used to enable the mix
       of data-parallel and model-parallel training of MoE models
@@ -439,6 +410,9 @@ def tpu_estimator_model_fn(model_type,
     if mode == tf.estimator.ModeKeys.TRAIN:
       var_grads = mtf.gradients(
           [loss], [v.outputs[0] for v in graph.trainable_variables])
+      learning_rate = None
+      if learning_rate_schedule:
+        learning_rate = learning_rate_schedule(step=tf.train.get_global_step())
       update_ops = optimizer(learning_rate=learning_rate).apply_grads(
           var_grads, graph.trainable_variables)
 
@@ -789,9 +763,9 @@ def run(tpu_job_name,
         get_components_fn=None,
         run_post_decode_metrics=None,
         process_metric_names=None,
-        learning_rate_fn=None,
         checkpoints_to_keep=10,
         save_steps=1000,
+        learning_rate_schedule=None,
         optimizer=None):
   """Run training/eval/inference.
 
@@ -836,10 +810,11 @@ def run(tpu_job_name,
       of str) which are metrics to compute with TPUEstimator.evaluate and
       post_metric_names (list of str) which are metrics to compute after
       decoding sequences. Required if mode is "continuous_eval."
-    learning_rate_fn: an optional function that takes train_steps and produces
-      a tf.Scalar learning-rate value
     checkpoints_to_keep: an integer, keep up to this many checkpoints
     save_steps: an integer, save every this many steps
+    learning_rate_schedule: an optional function taking the scalar name
+      argument `step` and the numeric argument `total_train_steps` and return
+      the scalar learning rate
     optimizer: a class extending optimize.Optimizer, required for training
   """
   if not isinstance(batch_size, int):
@@ -848,9 +823,9 @@ def run(tpu_job_name,
   if not isinstance(train_steps, int):
     train_steps = train_steps(batch_size, sequence_length)
 
-  learning_rate = None
-  if learning_rate_fn is not None:
-    learning_rate = learning_rate_fn(train_steps)
+  if learning_rate_schedule is not None:
+    learning_rate_schedule = functools.partial(
+        learning_rate_schedule, total_train_steps=train_steps)
 
   tf.logging.info("mode=%s" % mode,)
   tf.logging.info("sequence_length=%s" % sequence_length,)
@@ -902,7 +877,7 @@ def run(tpu_job_name,
       sequence_length=sequence_length,
       autostack=autostack,
       metric_names=None,
-      learning_rate=learning_rate,
+      learning_rate_schedule=learning_rate_schedule,
       checkpoints_to_keep=checkpoints_to_keep,
       save_steps=save_steps,
       optimizer=optimizer)
