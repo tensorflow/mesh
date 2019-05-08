@@ -238,7 +238,8 @@ def tpu_estimator_model_fn(model_type,
                            checkpoints_to_keep,
                            save_steps,
                            get_metric_fns=gin.REQUIRED,
-                           learning_rate=None):
+                           learning_rate=None,
+                           outer_batch_size=1):
   """Create a TPUEstimator model function.
 
   Args:
@@ -259,6 +260,8 @@ def tpu_estimator_model_fn(model_type,
       outputs, and returns a dictionary of metric name: metric function
       evaluated on labels and outputs
     learning_rate: an optional tf.Scalar
+    outer_batch_size: outer batch dimension that could be used to enable the mix
+      of data-parallel and model-parallel training of MoE models
 
   Returns:
     a function to be passed to TPUEstimator
@@ -316,9 +319,11 @@ def tpu_estimator_model_fn(model_type,
       Returns:
         a mtf.Tensor with dtype int32 and shape [batch_dim, length_dim]
       """
-      batch_dim = mtf.Dimension("batch", batch_size)
+      outer_batch_dim = mtf.Dimension("outer_batch", outer_batch_size)
+      batch_dim = mtf.Dimension("batch", batch_size // outer_batch_size)
       length_dim = mtf.Dimension("length", sequence_length)
-      mtf_shape = mtf.Shape([batch_dim, length_dim])
+
+      mtf_shape = mtf.Shape([outer_batch_dim, batch_dim, length_dim])
       if key not in features:
         if allow_missing:
           return None
@@ -328,6 +333,8 @@ def tpu_estimator_model_fn(model_type,
       tf.logging.info("Import feature %s: %s" % (key, features[key]))
 
       x = tf.to_int32(features[key])
+      x = tf.reshape(x, [outer_batch_size, batch_size // outer_batch_size, -1])
+
       if not use_tpu:
         x = tf.Print(
             x, [x], "import feature %s" % key, summarize=1000, first_n=1)
@@ -335,6 +342,12 @@ def tpu_estimator_model_fn(model_type,
 
     if mode == tf.estimator.ModeKeys.PREDICT:
       inputs = _import_feature("inputs")
+      inputs = mtf.reshape(
+          inputs,
+          mtf.Shape([
+              mtf.Dimension("batch", batch_size),
+              mtf.Dimension("length", sequence_length)
+          ]))
       if isinstance(transformer_model, transformer.Unitransformer):
         mtf_samples = transformer_model.sample_autoregressive(
             inputs, variable_dtype=get_variable_dtype())

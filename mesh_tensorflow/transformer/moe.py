@@ -65,6 +65,17 @@ class MoE1D(transformer.TransformerLayer):
 
   def call(self, context, x, losses=None):
     """Call the layer."""
+
+    # Dim cheat sheet:
+    # <B>: batch dims, e.g.
+    #   [outer_batch_size, batch_size] or
+    #   [beam_size, batch_size]
+    # L: original length
+    # M: model dim
+    #
+    # x
+    #   <B>LM Tensor
+
     has_length_dim = context.length_dim in x.shape.dims
     if not has_length_dim:
       x_shape = x.shape
@@ -199,6 +210,17 @@ def transformer_moe_layer_v1(
   TODO(noam): Factor this code better.  We want to be able to substitute
   different code for the experts themselves.
 
+  Dimensions cheat sheet:
+  <B>: batch dims
+  L: original sequence length
+  M: input depth
+  N: output depth
+  G: number of groups
+  S: group size
+  E: number of experts
+  C: expert capacity
+  (u for unsplit dims)
+
   Args:
     inputs: a mtf.Tensor with shape [<batch_dims...>, length_dim, input_dim]
     output_dim: a mtf.Dimension (for Transformer, this is input_dim)
@@ -218,6 +240,8 @@ def transformer_moe_layer_v1(
   Raises:
     ValueError: on unrecognized hparams.moe_gating
   """
+  # See "Dimensions cheat sheet"
+  # <B>LM Tensor
   orig_inputs = inputs
   hidden_dim = mtf.Dimension("expert_hidden", hparams.moe_hidden_size)
   experts_dim = mtf.Dimension("experts", hparams.moe_num_experts)
@@ -225,14 +249,38 @@ def transformer_moe_layer_v1(
   # We "cheat" here and look at the mesh shape and layout. This is to ensure
   # that the number of groups is a multiple of the mesh dimension
   # over which those groups are split.
-  orig_batch_dim, orig_length_dim, input_dim = orig_inputs.shape.dims
+  batch_and_length_dims, input_dim = (orig_inputs.shape.dims[:-1],
+                                      orig_inputs.shape.dims[-1])
+  # Hack: we assume that
+  #   "outer_batch" == replication of experts
+  #   mesh_dim_size can be derived from mesh_shape and orig_batch_dim
+  #
+  # We then reqire num_groups to be a multiple of mesh_dim_size.
+  if orig_inputs.shape.dims[0].name == "outer_batch":
+    outer_batch_dim, orig_batch_dim = orig_inputs.shape.dims[:2]
+  else:
+    outer_batch_dim, orig_batch_dim = (mtf.Dimension("outer_batch", 1),
+                                       orig_inputs.shape.dims[0])
 
-  num_groups, group_size = _split_into_groups(
-      orig_batch_dim.size * orig_length_dim.size, hparams.moe_group_size,
-      mtf.tensor_dim_to_mesh_dim_size(layout, mesh_shape, orig_batch_dim))
+  # Number of MoE inputs (total number of position across batch_and_length_dims
+  # per replica.
+  n = 1
+  for d in batch_and_length_dims:
+    n *= d.size
+
+  n = n // outer_batch_dim.size
+
+  mesh_dim_size = mtf.tensor_dim_to_mesh_dim_size(layout, mesh_shape,
+                                                  orig_batch_dim)
+  num_groups, group_size = _split_into_groups(n, hparams.moe_group_size,
+                                              mesh_dim_size)
+
   group_size_dim = mtf.Dimension("group", group_size)
-  batch_dim = mtf.Dimension(orig_batch_dim.name, num_groups)
-  inputs = mtf.reshape(inputs, [batch_dim, group_size_dim, input_dim])
+  num_groups_dim = mtf.Dimension(orig_batch_dim.name, num_groups)
+
+  moe_input_dims = [outer_batch_dim, num_groups_dim, group_size_dim, input_dim]
+  # OGSM Tensor
+  inputs = mtf.reshape(inputs, moe_input_dims)
 
   # Each sequence sends expert_capacity positions to each expert.
   if train:
@@ -245,12 +293,14 @@ def transformer_moe_layer_v1(
   expert_capacity_dim = mtf.Dimension("expert_capacity", expert_capacity)
 
   experts_dim_unsplit = mtf.Dimension("expert_unsplit", experts_dim.size)
-  batch_dim_unsplit = mtf.Dimension("batch_unsplit", batch_dim.size)
+  batch_dim_unsplit = mtf.Dimension("batch_unsplit", num_groups_dim.size)
   if nonpadding is not None:
-    nonpadding = mtf.zeros(inputs.mesh, [orig_batch_dim, orig_length_dim],
-                           dtype=inputs.dtype) + nonpadding
-    nonpadding = mtf.reshape(nonpadding, [batch_dim, group_size_dim])
+    nonpadding = mtf.zeros(
+        inputs.mesh, batch_and_length_dims, dtype=inputs.dtype) + nonpadding
+    nonpadding = mtf.reshape(nonpadding, moe_input_dims[:-1])
   if hparams.moe_gating == "top_2":
+    # dispatch_tensor and combine_tensor are
+    # <B>GSEC Tensors
     dispatch_tensor, combine_tensor, loss = _top_2_gating(
         inputs=inputs,
         outer_expert_dims=None,
@@ -263,30 +313,44 @@ def transformer_moe_layer_v1(
   else:
     raise ValueError("unknown hparams.moe_gating=%s" % hparams.moe_gating)
 
-  # put num_experts dimension first to make split easier in alltoall
-  expert_inputs = mtf.einsum([inputs, dispatch_tensor], mtf.Shape(
-      [experts_dim_unsplit, batch_dim, expert_capacity_dim, input_dim]))
+  expert_inputs = mtf.einsum([inputs, dispatch_tensor],
+                             mtf.Shape([
+                                 outer_batch_dim, experts_dim_unsplit,
+                                 num_groups_dim, expert_capacity_dim, input_dim
+                             ]))
 
-  expert_inputs = mtf.reshape(expert_inputs, mtf.Shape(
-      [experts_dim, batch_dim_unsplit, expert_capacity_dim, input_dim]))
+  expert_inputs = mtf.reshape(
+      expert_inputs,
+      mtf.Shape([
+          outer_batch_dim, experts_dim, batch_dim_unsplit, expert_capacity_dim,
+          input_dim
+      ]))
 
   # Now feed the expert inputs through the experts.
   h = mtf.layers.dense(
       expert_inputs, hidden_dim, expert_dims=[experts_dim],
       activation=mtf.relu, use_bias=False,
       variable_dtype=variable_dtype, name="wi")
+
   expert_output = mtf.layers.dense(
       h, output_dim, expert_dims=[experts_dim], use_bias=False,
       variable_dtype=variable_dtype,
       name="wo")
 
-  expert_output = mtf.reshape(expert_output, mtf.Shape(
-      [experts_dim_unsplit, batch_dim, expert_capacity_dim, input_dim]))
+  expert_output = mtf.reshape(
+      expert_output,
+      mtf.Shape([
+          outer_batch_dim,
+          experts_dim_unsplit,
+          num_groups_dim,
+          expert_capacity_dim,
+          output_dim,
+      ]))
 
-  output = mtf.einsum([expert_output, combine_tensor], mtf.Shape(
-      [batch_dim, group_size_dim, output_dim]))
-
-  output = mtf.reshape(output, orig_inputs.shape.dims[:-1] + [output_dim])
+  moe_output_dims = moe_input_dims[:-1] + [output_dim]
+  output = mtf.einsum([expert_output, combine_tensor],
+                      mtf.Shape(moe_output_dims))
+  output = mtf.reshape(output, batch_and_length_dims + [output_dim])
 
   return output, loss * hparams.moe_loss_coef
 
