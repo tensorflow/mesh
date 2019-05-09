@@ -210,7 +210,24 @@ def pretokenized_tfds_dataset(dataset_name=gin.REQUIRED,
 
 
 @gin.configurable
-def packed_parallel_tsv_dataset(filenames=gin.REQUIRED,
+def sample_from_text_line_datasets(glob_weight_list):
+  globs, weights = zip(*glob_weight_list)
+  datasets = [
+      tf.data.TextLineDataset(
+          tf.gfile.Glob(g)).repeat().shuffle(10000).prefetch(100) for g in globs
+  ]
+  dataset = tf.contrib.data.sample_from_datasets(
+      datasets=datasets, weights=weights)
+  return dataset
+
+
+@gin.configurable
+def make_text_line_dataset(glob=gin.REQUIRED):
+  return tf.data.TextLineDataset(tf.gfile.Glob(glob))
+
+
+@gin.configurable
+def packed_parallel_tsv_dataset(dataset=gin.REQUIRED,
                                 dataset_split=gin.REQUIRED,
                                 batch_size=gin.REQUIRED,
                                 sequence_length=gin.REQUIRED,
@@ -220,11 +237,8 @@ def packed_parallel_tsv_dataset(filenames=gin.REQUIRED,
                                 eos_id=1,
                                 max_encoded_len=0):
   """Reads parallel tab-separated text file. One example per line."""
-
-  dataset = tf.data.TextLineDataset(filenames)
-  if dataset_split == "train":
-    dataset = dataset.repeat()
-    dataset = dataset.shuffle(shuffle_buffer_size)
+  del shuffle_buffer_size  # TODO(lepikhin): figure out I/O throughput
+  assert dataset_split == "train"
 
   def _parse_fn(record):  # pylint: disable=missing-docstring
     tokens = tf.decode_csv(
