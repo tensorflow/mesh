@@ -581,8 +581,6 @@ def decode(estimator,
       return i % (batch_size * num_cores) < batch_size
 
     decodes = [d for i, d in enumerate(decodes) if keep(i)]
-  else:
-    raise ValueError("unexpected number of outputs")
 
   # Since we replicate a batch enough times to fill the min_dataset_size, this
   # might not be an integer number of repeats. So we take the first dataset_size
