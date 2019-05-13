@@ -2,6 +2,7 @@
 
 import mesh_tensorflow.optimize
 import mesh_tensorflow.transformer.transformer_layers
+import mesh_tensorflow.transformer.learning_rate_schedules
 
 # for Unitransformer models (e.g. language-model)
 transformer.make_layer_stack.layers = [
@@ -53,3 +54,10 @@ Unitransformer.max_length = %sequence_length
 
 # Optimization
 utils.run.optimizer = @optimize.AdafactorOptimizer
+
+# Single processor (unless overridden)
+utils.run.mesh_shape = ""
+
+# The following layout rules have no effect unless the names "model" and/or
+# "batch" are in utils.run.mesh_shape .
+utils.run.layout_rules = "batch:batch,d_ff:model,heads:model,vocab:model"

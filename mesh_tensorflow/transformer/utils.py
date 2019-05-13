@@ -160,6 +160,31 @@ def build_model(model_type="bitransformer",
     raise ValueError("unknown model_type")
 
 
+@gin.configurable
+def tpu_mesh_shape(tpu_topology=gin.REQUIRED,
+                   model_parallelism=gin.REQUIRED):
+  """Create a mesh_shape for data-parallelism and model-parallelism on TPU.
+
+  Example: tpu_mesh_shape("4x4", 8) -> mtf.Shape(("batch", 4), ("model", 8))
+  Since there are 4x4x2=32 total cores, and we want 8-way model paralleism.
+
+  Args:
+    tpu_topology: a string - e.g. "2x2"
+    model_parallelism: an integer - the number of cores per model replica
+  Returns:
+    a mtf.Shape
+  """
+  x, y = tpu_topology.split("x")
+  num_cores = int(x) * int(y) * 2
+  data_parallelism = num_cores // model_parallelism
+  dims = []
+  if data_parallelism > 1:
+    dims.append(mtf.Dimension("batch", data_parallelism))
+  if model_parallelism > 1:
+    dims.append(mtf.Dimension("model", model_parallelism))
+  return mtf.Shape(dims)
+
+
 def _logical_to_physical(physical_shape, mesh_shape):
   """Mapping from logical mesh to physical TPU cores.
 
@@ -412,7 +437,12 @@ def tpu_estimator_model_fn(model_type,
           [loss], [v.outputs[0] for v in graph.trainable_variables])
       learning_rate = None
       if learning_rate_schedule:
-        learning_rate = learning_rate_schedule(step=tf.train.get_global_step())
+        # the following happens on CPU since TPU can't handle summaries.
+        with mtf.utils.outside_all_rewrites():
+          learning_rate = learning_rate_schedule(
+              step=tf.train.get_global_step())
+          tf.summary.scalar("learning_rate", learning_rate)
+
       update_ops = optimizer(learning_rate=learning_rate).apply_grads(
           var_grads, graph.trainable_variables)
 
@@ -569,8 +599,9 @@ def decode(estimator,
   # repeated a number of times equal to the number of cores.
   tf.logging.info(
       "num examples in dataset (dataset_size): %d\n"
-      "num_examples in padded dataset (padded_dataset_size): %d",
-      dataset_size, padded_dataset_size)
+      "num_examples in padded dataset (padded_dataset_size): %d"
+      "len(decodes): %d",
+      dataset_size, padded_dataset_size, len(decodes))
   if len(decodes) == padded_dataset_size:
     tf.logging.info("number of decodes matches number of inputs")
   elif len(decodes) % padded_dataset_size == 0:
