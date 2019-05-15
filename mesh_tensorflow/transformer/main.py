@@ -31,6 +31,8 @@ from __future__ import division
 from __future__ import print_function
 
 import importlib
+import os
+import sys
 from mesh_tensorflow.transformer import utils
 import tensorflow as tf
 
@@ -73,6 +75,10 @@ def main(_):
   if FLAGS.module_import:
     for module in FLAGS.module_import:
       importlib.import_module(module)
+
+  tf.io.gfile.makedirs(FLAGS.model_dir)
+  with tf.io.gfile.GFile(os.path.join(FLAGS.model_dir, "command"), "w") as f:
+    f.write(" ".join(sys.argv))
 
   utils.parse_gin_defaults_and_flags()
   utils.run(
