@@ -289,7 +289,7 @@ class LayerStack(TransformerLayer):
 
   def call(self, context, x):
     """Call the layer stack."""
-    if context.sequence_id:
+    if isinstance(context.sequence_id, mtf.Tensor):
       # We use this mask to zero out the padding regions at each layer.
       # This "fixes" a bug where extreme values leak from the padding into the
       # non-padding regions.
