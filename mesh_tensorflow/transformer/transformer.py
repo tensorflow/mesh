@@ -289,12 +289,21 @@ class LayerStack(TransformerLayer):
 
   def call(self, context, x):
     """Call the layer stack."""
+    if context.sequence_id:
+      # We use this mask to zero out the padding regions at each layer.
+      # This "fixes" a bug where extreme values leak from the padding into the
+      # non-padding regions.
+      # TODO(noam): undertand this better and make a more principled fix.
+      mask = mtf.cast(
+          mtf.not_equal(context.sequence_id, 0), context.activation_dtype)
+    else:
+      mask = None
     x = self._dropout(context, x)
     if context.layer_outputs is not None:
       context.layer_outputs.append(x)
     for lnum, layer in enumerate(self._layers):
       with tf.variable_scope("layer_%03d" % lnum):
-        norm_x = self._layer_norm(context, x)
+        norm_x = self._layer_norm(context, (x * mask) if mask else x)
         with tf.variable_scope(layer.__class__.__name__):
           y = layer.call(context, norm_x)
           if y.shape != x.shape:
@@ -306,6 +315,8 @@ class LayerStack(TransformerLayer):
       context.layer_index += 1
     x = self._layer_norm(context, x, name="final_layer_norm")
     x = self._dropout(context, x)
+    if mask:
+      x *= mask
     if context.layer_outputs is not None:
       context.layer_outputs.append(x)
     return x
