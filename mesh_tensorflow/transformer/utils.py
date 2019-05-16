@@ -236,7 +236,8 @@ def tpu_estimator_model_fn(model_type,
                            get_metric_fns=None,
                            learning_rate_schedule=None,
                            optimizer=None,
-                           outer_batch_size=1):
+                           outer_batch_size=1,
+                           tpu_summaries=False):
   """Create a TPUEstimator model function.
 
   Args:
@@ -261,6 +262,8 @@ def tpu_estimator_model_fn(model_type,
     optimizer: a class extending optimize.Optimizer, required for training
     outer_batch_size: outer batch dimension that could be used to enable the mix
       of data-parallel and model-parallel training of MoE models
+    tpu_summaries: a boolean - if True, then use rewrites to make summaries
+      work on TPU.  This may be slow, since it uses a host call hack.
 
   Returns:
     a function to be passed to TPUEstimator
@@ -479,27 +482,34 @@ def tpu_estimator_model_fn(model_type,
       gin_config_saver_hook = gin.tf.GinConfigSaverHook(
           model_dir, summarize_config=True)
 
-      if mode == tf.estimator.ModeKeys.TRAIN:
-        if use_tpu:
-          return tpu_estimator.TPUEstimatorSpec(
-              mode=tf.estimator.ModeKeys.TRAIN,
-              loss=tf_loss,
-              train_op=train_op,
-              training_hooks=[
-                  restore_hook,
-                  saver_hook,
-                  gin_config_saver_hook,
-              ])
+    if mode == tf.estimator.ModeKeys.TRAIN:
+      if use_tpu:
+        if tpu_summaries:
+          tf.summary.scalar("loss", tf_loss)
+          host_call = mtf.utils.create_host_call(model_dir)
+          mtf.utils.remove_summaries()
         else:
-          return tf.estimator.EstimatorSpec(
-              tf.estimator.ModeKeys.TRAIN,
-              loss=tf_loss,
-              train_op=train_op,
-              training_chief_hooks=[
-                  restore_hook,
-                  saver_hook,
-                  gin_config_saver_hook,
-              ])
+          host_call = None
+        return tpu_estimator.TPUEstimatorSpec(
+            mode=tf.estimator.ModeKeys.TRAIN,
+            loss=tf_loss,
+            train_op=train_op,
+            host_call=host_call,
+            training_hooks=[
+                restore_hook,
+                saver_hook,
+                gin_config_saver_hook,
+            ])
+      else:
+        return tf.estimator.EstimatorSpec(
+            tf.estimator.ModeKeys.TRAIN,
+            loss=tf_loss,
+            train_op=train_op,
+            training_chief_hooks=[
+                restore_hook,
+                saver_hook,
+                gin_config_saver_hook,
+            ])
 
   return my_model_fn
 
