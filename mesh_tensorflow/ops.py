@@ -3424,6 +3424,42 @@ def stop_gradient(x):
   return StopGradient(x).outputs[0]
 
 
+class ScalarSummaryOperation(Operation):
+  """Similar to tf.Print."""
+
+  def __init__(self, name, x):
+    super(ScalarSummaryOperation, self).__init__(
+        [x], x.mesh, name=name)
+    if x.shape.dims:
+      raise ValueError("ScalarSummaryOperation takes a scalar")
+    self._outputs = [Tensor(self, x.shape, x.dtype)]
+
+  def lower(self, lowering):
+    lowered_input = lowering.tensors[self.inputs[0]].to_laid_out_tensor()
+    tf.summary.scalar(self.name, lowered_input.tensor_list[0])
+    lowering.set_tensor_lowering(
+        self.outputs[0], lowered_input)
+
+  def gradient(self, grad_ys):
+    return grad_ys
+
+
+def scalar_summary(name, x):
+  """Call tf.summary.scalar.
+
+  Caveat - summaries do not generally work on TPU - they need to be rewritten
+  into a host call.
+  TODO(noam): provide a pointer to code for this.
+
+  Args:
+    name: a string
+    x: a 0-dimensional Tensor
+  Returns:
+    a Tensor which is identical in value to x
+  """
+  return ScalarSummaryOperation(name, x)
+
+
 class PrintOperation(Operation):
   """Similar to tf.Print."""
 
