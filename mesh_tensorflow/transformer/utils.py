@@ -1008,20 +1008,22 @@ def run(tpu_job_name,
         _ = evaluate(estimator, eval_args)
 
         dataset_name = component.tfds_name.replace("/", "-").replace(":", "-")
-        output_filename = model_dir+"{}-{}-decoded".format(
-            dataset_name, dataset_split)
+        output_filename = os.path.join(model_dir, "{}-{}-decoded".format(
+            dataset_name, dataset_split))
+        pred_output_filename = output_filename + "-preds"
+        label_output_filename = output_filename + "-labels"
         _ = decode(estimator, input_fn, dataset_size, padded_dataset_size,
                    batch_size, vocabulary, checkpoint_path=checkpoint_path,
-                   pred_output_filename=output_filename + "-preds",
-                   label_output_filename=output_filename + "-labels")
+                   pred_output_filename=pred_output_filename,
+                   label_output_filename=label_output_filename)
         tf.logging.info("Evaluating post decode metrics: {}".format(
             post_metric_names))
         tb_summary_dir = (
             os.path.dirname(output_filename) + "/{}_eval/".format(
                 "eval" if dataset_split == "validation" else dataset_split))
         _ = run_post_decode_metrics(
-            post_metric_names, output_filename + "-preds",
-            output_filename + "-labels", dataset_split, tb_summary_dir)
+            post_metric_names, pred_output_filename,
+            label_output_filename, dataset_split, tb_summary_dir)
 
   elif mode == "infer":
     decode_from_file(
