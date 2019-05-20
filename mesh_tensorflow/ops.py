@@ -5169,8 +5169,11 @@ def tensor_dim_to_mesh_dim_size(layout, mesh_shape, tensor_dim):
 
 
 def tensor_dim_to_size_per_split(layout, mesh_shape, tensor_dim):
-  return tensor_dim.size // tensor_dim_to_mesh_dim_size(
-      layout, mesh_shape, tensor_dim)
+  mesh_dim_size = tensor_dim_to_mesh_dim_size(layout, mesh_shape, tensor_dim)
+  if tensor_dim.size % mesh_dim_size:
+    raise ValueError("Mesh dimension (%s) must divide tensor dimension (%s)"
+                     % (mesh_dim_size, tensor_dim))
+  return tensor_dim.size // mesh_dim_size
 
 
 def combined_dimension(dims, name=None):

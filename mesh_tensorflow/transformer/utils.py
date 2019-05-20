@@ -258,7 +258,8 @@ def tpu_estimator_model_fn(model_type,
       outputs, and returns a dictionary of metric name: metric function
       evaluated on labels and outputs. Required for eval, optional otherwise.
     learning_rate_schedule: an optional function taking the scalar named
-      argument `step` and return the scalar learning rate
+      argument `step` and return the scalar learning rate.
+      Alternatively, a constant.
     optimizer: a class extending optimize.Optimizer, required for training
     outer_batch_size: outer batch dimension that could be used to enable the mix
       of data-parallel and model-parallel training of MoE models
@@ -311,39 +312,23 @@ def tpu_estimator_model_fn(model_type,
     graph = mtf.Graph()
     mesh = mtf.Mesh(graph, "my_mesh", var_placer)
 
-    def _import_feature(key, allow_missing=False):
-      """Import a feature from the features dictionary into a mtf.Tensor.
+    outer_batch_dim = mtf.Dimension("outer_batch", outer_batch_size)
+    batch_dim = mtf.Dimension("batch", batch_size // outer_batch_size)
+    length_dim = mtf.Dimension("length", sequence_length)
+    feature_shape = mtf.Shape([outer_batch_dim, batch_dim, length_dim])
 
-      Args:
-        key: a string
-        allow_missing: a boolean
-
-      Returns:
-        a mtf.Tensor with dtype int32 and shape [batch_dim, length_dim]
-      """
-      outer_batch_dim = mtf.Dimension("outer_batch", outer_batch_size)
-      batch_dim = mtf.Dimension("batch", batch_size // outer_batch_size)
-      length_dim = mtf.Dimension("length", sequence_length)
-
-      mtf_shape = mtf.Shape([outer_batch_dim, batch_dim, length_dim])
-      if key not in features:
-        if allow_missing:
-          return None
-        else:
-          raise ValueError(
-              "feature not found %s - features %s = " % (key, features))
-      tf.logging.info("Import feature %s: %s" % (key, features[key]))
-
+    mtf_features = {}
+    for key, x in features.items():
       x = tf.to_int32(features[key])
       x = tf.reshape(x, [outer_batch_size, batch_size // outer_batch_size, -1])
-
       if not use_tpu:
         x = tf.Print(
             x, [x], "import feature %s" % key, summarize=1000, first_n=1)
-      return mtf.import_fully_replicated(mesh, x, mtf_shape, name=key)
+      mtf_features[key] = mtf.import_fully_replicated(
+          mesh, x, feature_shape, name=key)
 
     if mode == tf.estimator.ModeKeys.PREDICT:
-      inputs = _import_feature("inputs")
+      inputs = mtf_features["inputs"]
       inputs = mtf.reshape(
           inputs,
           mtf.Shape([
@@ -367,15 +352,14 @@ def tpu_estimator_model_fn(model_type,
           predictions=predictions,
           prediction_hooks=[mtf.MtfRestoreHook(lowering)])
 
-    targets = _import_feature("targets")
-    anon_targets = mtf.anonymize(targets)
-    if model_type == "lm":
-      _, length_dim = targets.shape
-      inputs = mtf.shift(targets, offset=1, dim=length_dim, wrap=False)
-    else:
-      inputs = _import_feature("inputs")
-
-    if mode == tf.estimator.ModeKeys.EVAL:
+    elif mode == tf.estimator.ModeKeys.EVAL:
+      targets = mtf_features["targets"]
+      anon_targets = mtf.anonymize(targets)
+      if model_type == "lm":
+        _, length_dim = targets.shape
+        inputs = mtf.shift(targets, offset=1, dim=length_dim, wrap=False)
+      else:
+        inputs = mtf_features["inputs"]
       if isinstance(transformer_model, transformer.Unitransformer):
         mtf_samples = transformer_model.sample_autoregressive(
             inputs, variable_dtype=get_variable_dtype())
@@ -408,108 +392,140 @@ def tpu_estimator_model_fn(model_type,
           evaluation_hooks=[restore_hook],
           eval_metrics=eval_metrics)
 
-    if isinstance(transformer_model, transformer.Unitransformer):
-      position_kwargs = dict(
-          sequence_id=_import_feature("targets_segmentation", True),
-          position=_import_feature("targets_position", True),
-      )
-    elif isinstance(transformer_model, transformer.Bitransformer):
-      position_kwargs = dict(
-          encoder_sequence_id=_import_feature("inputs_segmentation", True),
-          decoder_sequence_id=_import_feature("targets_segmentation", True),
-          encoder_position=_import_feature("inputs_position", True),
-          decoder_position=_import_feature("targets_position", True),
-      )
     else:
-      raise ValueError("unrecognized class")
+      assert mode == tf.estimator.ModeKeys.TRAIN
+      num_microbatches = serialize_num_microbatches(batch_dim,
+                                                    length_dim,
+                                                    mesh_shape,
+                                                    layout_rules)
+      def model_fn(mtf_features):
+        """The kind of function we need for mtf.serialize_training_step.
 
-    logits, loss = transformer_model.call_simple(
-        inputs=inputs,
-        targets=targets,
-        compute_loss=True,
-        mode=mode,
-        variable_dtype=get_variable_dtype(),
-        **position_kwargs)
+        Args:
+          mtf_features: a dictionary
+        Returns:
+          a dictionary
+        """
+        targets = mtf_features["targets"]
+        if model_type == "lm":
+          _, length_dim = targets.shape
+          inputs = mtf.shift(targets, offset=1, dim=length_dim, wrap=False)
+        else:
+          inputs = mtf_features["inputs"]
 
-    if use_tpu and logits is not None:
-      logits = mtf.anonymize(logits)
+        if isinstance(transformer_model, transformer.Unitransformer):
+          position_kwargs = dict(
+              sequence_id=mtf_features.get("targets_segmentation", None),
+              position=mtf_features("targets_position", None),
+          )
+        elif isinstance(transformer_model, transformer.Bitransformer):
+          position_kwargs = dict(
+              encoder_sequence_id=mtf_features.get(
+                  "inputs_segmentation", None),
+              decoder_sequence_id=mtf_features.get(
+                  "targets_segmentation", None),
+              encoder_position=mtf_features.get(
+                  "inputs_position", None),
+              decoder_position=mtf_features.get(
+                  "targets_position", None),
+          )
+        else:
+          raise ValueError("unrecognized class")
 
-    # TRAIN mode
-    if mode == tf.estimator.ModeKeys.TRAIN:
-      var_grads = mtf.gradients(
-          [loss], [v.outputs[0] for v in graph.trainable_variables])
-      learning_rate = None
-      if learning_rate_schedule:
+        logits, loss = transformer_model.call_simple(
+            inputs=inputs,
+            targets=targets,
+            compute_loss=True,
+            mode=mode,
+            variable_dtype=get_variable_dtype(),
+            **position_kwargs)
+        if num_microbatches > 1:
+          loss /= float(num_microbatches)
+        del logits
+        return {"loss": loss}
+
+      if num_microbatches > 1:
+        var_grads, loss_dict = mtf.serialize_training_step(
+            mtf_features, model_fn, batch_dim, num_microbatches)
+      else:
+        loss_dict = model_fn(mtf_features)
+        var_grads = mtf.gradients(
+            [loss_dict["loss"]],
+            [v.outputs[0] for v in graph.trainable_variables])
+
+      loss = loss_dict["loss"]
+
+      if callable(learning_rate_schedule):
         # the following happens on CPU since TPU can't handle summaries.
         with mtf.utils.outside_all_rewrites():
           learning_rate = learning_rate_schedule(
               step=tf.train.get_global_step())
           tf.summary.scalar("learning_rate", learning_rate)
+      else:
+        learning_rate = learning_rate_schedule
 
       update_ops = optimizer(learning_rate=learning_rate).apply_grads(
           var_grads, graph.trainable_variables)
 
-    lowering = mtf.Lowering(graph, {mesh: mesh_impl}, autostack=autostack)
+      lowering = mtf.Lowering(graph, {mesh: mesh_impl}, autostack=autostack)
 
-    tf_loss = lowering.export_to_tf_tensor(loss)
-    tf_loss = tf.to_float(tf_loss)
-    if not use_tpu:
-      tf_loss = tf.Print(tf_loss, [tf_loss, tf.train.get_global_step()],
-                         "step, tf_loss")
+      tf_loss = lowering.export_to_tf_tensor(loss)
+      tf_loss = tf.to_float(tf_loss)
+      if not use_tpu:
+        tf_loss = tf.Print(tf_loss, [tf_loss, tf.train.get_global_step()],
+                           "step, tf_loss")
 
-    if mode == tf.estimator.ModeKeys.TRAIN:
       tf_update_ops = [lowering.lowered_operation(op) for op in update_ops]
       tf_update_ops.append(tf.assign_add(global_step, 1))
       train_op = tf.group(tf_update_ops)
 
-    with mtf.utils.outside_all_rewrites():
-      # Copy master variables to slices. Must be called first.
-      restore_hook = mtf.MtfRestoreHook(lowering)
-      saver = tf.train.Saver(
-          tf.global_variables(),
-          sharded=True,
-          max_to_keep=checkpoints_to_keep,
-          keep_checkpoint_every_n_hours=2,
-          defer_build=False,
-          save_relative_paths=True)
-      tf.add_to_collection(tf.GraphKeys.SAVERS, saver)
-      saver_listener = mtf.MtfCheckpointSaverListener(lowering)
-      saver_hook = tf.train.CheckpointSaverHook(
-          model_dir,
-          save_steps=save_steps,
-          saver=saver,
-          listeners=[saver_listener])
-      gin_config_saver_hook = gin.tf.GinConfigSaverHook(
-          model_dir, summarize_config=True)
+      with mtf.utils.outside_all_rewrites():
+        # Copy master variables to slices. Must be called first.
+        restore_hook = mtf.MtfRestoreHook(lowering)
+        saver = tf.train.Saver(
+            tf.global_variables(),
+            sharded=True,
+            max_to_keep=checkpoints_to_keep,
+            keep_checkpoint_every_n_hours=2,
+            defer_build=False,
+            save_relative_paths=True)
+        tf.add_to_collection(tf.GraphKeys.SAVERS, saver)
+        saver_listener = mtf.MtfCheckpointSaverListener(lowering)
+        saver_hook = tf.train.CheckpointSaverHook(
+            model_dir,
+            save_steps=save_steps,
+            saver=saver,
+            listeners=[saver_listener])
+        gin_config_saver_hook = gin.tf.GinConfigSaverHook(
+            model_dir, summarize_config=True)
 
-    if mode == tf.estimator.ModeKeys.TRAIN:
-      if use_tpu:
-        if tpu_summaries:
-          tf.summary.scalar("loss", tf_loss)
-          host_call = mtf.utils.create_host_call(model_dir)
-          mtf.utils.remove_summaries()
+        if use_tpu:
+          if tpu_summaries:
+            tf.summary.scalar("loss", tf_loss)
+            host_call = mtf.utils.create_host_call(model_dir)
+            mtf.utils.remove_summaries()
+          else:
+            host_call = None
+          return tpu_estimator.TPUEstimatorSpec(
+              mode=tf.estimator.ModeKeys.TRAIN,
+              loss=tf_loss,
+              train_op=train_op,
+              host_call=host_call,
+              training_hooks=[
+                  restore_hook,
+                  saver_hook,
+                  gin_config_saver_hook,
+              ])
         else:
-          host_call = None
-        return tpu_estimator.TPUEstimatorSpec(
-            mode=tf.estimator.ModeKeys.TRAIN,
-            loss=tf_loss,
-            train_op=train_op,
-            host_call=host_call,
-            training_hooks=[
-                restore_hook,
-                saver_hook,
-                gin_config_saver_hook,
-            ])
-      else:
-        return tf.estimator.EstimatorSpec(
-            tf.estimator.ModeKeys.TRAIN,
-            loss=tf_loss,
-            train_op=train_op,
-            training_chief_hooks=[
-                restore_hook,
-                saver_hook,
-                gin_config_saver_hook,
-            ])
+          return tf.estimator.EstimatorSpec(
+              tf.estimator.ModeKeys.TRAIN,
+              loss=tf_loss,
+              train_op=train_op,
+              training_chief_hooks=[
+                  restore_hook,
+                  saver_hook,
+                  gin_config_saver_hook,
+              ])
 
   return my_model_fn
 
@@ -730,29 +746,111 @@ def clean_decodes(ids, vocab_size, eos_id=1):
   return ret
 
 
-@gin.configurable
-def auto_batch_size(sequence_length,
-                    mesh_shape,
-                    layout_rules,
-                    tokens_per_split=2048):
-  """Automatically compute batch size.
+def compute_batch_size(sequence_length,
+                       mesh_shape,
+                       layout_rules,
+                       method_and_value):
+  """Compute the total batch size in sequences.
+
+  method_and_value is a (string, int) pair.
+  The method string is one of the following four options:
+
+  "sequences_per_batch"
+  "tokens_per_batch"
+  "sequences_per_replica"
+  "tokens_per_replica"
+
+  According to the method string, the value represents either a number of
+  sequences or a number of tokens, and represents either the size of the total
+  batch or the fraction of the batch assigned to each model replica.
+
+  For example ("tokens_per_replica", 2048) means that the batch size should be
+  set so that the number of tokens per model replica is 2048.  So if the
+  sequence length is 1024 and there is 16-way data-parallelism, then the number
+  of sequences per batch would be 2048 * 16 / 1024 = 32.
+
+  The "per_batch" versions are useful for ensuring indentical overall batch
+  sizes across different mesh shapes/layouts.  The "per_replica" versions are
+  useful for scaling up the total batch size relative to the degree of
+  data-parallelism
 
   Args:
     sequence_length: an integer
     mesh_shape: an input to mtf.convert_to_shape()
     layout_rules: an input to mtf.convert_to_layout_rules()
-    tokens_per_split: an integer
+    method_and_value: a pair
+  Returns:
+    an integer - the number of sequences per batch
+  """
+  def checkdiv(a, b):
+    if a % b:
+      raise ValueError("%d is not divisible by %d" % (a, b))
+    return a // b
+  num_replicas = (
+      mtf.tensor_dim_to_mesh_dim_size(
+          layout_rules, mesh_shape, mtf.Dimension("batch", 0)) *
+      mtf.tensor_dim_to_mesh_dim_size(
+          layout_rules, mesh_shape, mtf.Dimension("outer_batch", 0)))
+  method, value = method_and_value
+  if method == "sequences_per_batch":
+    return value
+  elif method == "tokens_per_batch":
+    return checkdiv(value, sequence_length)
+  elif method == "sequences_per_replica":
+    return value * num_replicas
+  elif method == "tokens_per_replica":
+    return checkdiv(value, sequence_length) * num_replicas
+  else:
+    raise ValueError("unknown method %s" % method,)
+
+
+@gin.configurable
+def serialize_num_microbatches(batch_dim,
+                               length_dim,
+                               mesh_shape,
+                               layout_rules,
+                               tokens_per_microbatch_per_replica=None):
+  """Number of microbatches per batch for serialized training.
+
+  We want to split each training step into multiple sequential steps
+  to limit memory usage.  Gradients are accumulated locally and reduced once.
+
+  This function determines the number of microbatches per batch.
+  If tokens_per_microbatch_per_replica=None, then the batch is not split.
+
+  Args:
+    batch_dim: a mtf.Dimension
+    length_dim: a mtf.Dimension
+    mesh_shape: an input to mtf.convert_to_shape()
+    layout_rules: an input to mtf.convert_to_layout_rules()
+    tokens_per_microbatch_per_replica: an optional integer, e.g. 2048
   Returns:
     an integer
   """
-  num_splits = mtf.tensor_dim_to_mesh_dim_size(
-      layout_rules, mesh_shape, mtf.Dimension("batch", 0))
-  ret = max(1, tokens_per_split // sequence_length) * num_splits
+  if not tokens_per_microbatch_per_replica:
+    return 1
+  batch_per_replica = mtf.tensor_dim_to_size_per_split(
+      layout_rules, mesh_shape, batch_dim)
+  # number of sequences per microbatch
+  microbatch_size = max(1, tokens_per_microbatch_per_replica // length_dim.size)
+  # decrease microbatch_size until it is a divisor of batch_per_replica
+  # This is guaranteed to stop at microbatch_size=1 if not earlier.
+  while batch_per_replica % microbatch_size:
+    microbatch_size -= 1
+  num_microbatches = batch_per_replica // microbatch_size
   tf.logging.info(
-      "AUTO_BATCH_SIZE tokens_per_split=%s num_splits=%s"
-      " sequence_length=%s batch_size=%s"
-      % (tokens_per_split, num_splits, sequence_length, ret))
-  return ret
+      "serialize_num_microbatches: "
+      "tokens_per_microbatch_per_replica=%d "
+      "batch_dim=%s "
+      "length_dim=%s "
+      "batch_per_replica=%d "
+      "num_microbatches=%d",
+      tokens_per_microbatch_per_replica,
+      batch_dim,
+      length_dim,
+      batch_per_replica,
+      num_microbatches)
+  return num_microbatches
 
 
 @gin.configurable
@@ -794,7 +892,7 @@ def run(tpu_job_name,
         iterations_per_loop=100,
         save_checkpoints_steps=1000,
         eval_steps=10,
-        batch_size=auto_batch_size,
+        batch_size=("tokens_per_replica", 2048),
         train_steps=auto_train_steps,
         sequence_length=gin.REQUIRED,
         mesh_shape=gin.REQUIRED,
@@ -828,8 +926,8 @@ def run(tpu_job_name,
     iterations_per_loop: integer, steps per train loop
     save_checkpoints_steps: integer, steps per checkpoint
     eval_steps: integer, number of evaluation steps
-    batch_size: An integer or a function with the same signature as
-      auto_batch_size().  Mini-batch size for the training. Note that this is
+    batch_size: An integer or a (method, value) pair to pass to
+      compute_batch_size(). Note that this is
       the global batch size and not the per-shard batch size.
     train_steps: An integer or a function with the same signature as
       auto_train_steps().  Total number of training steps.
@@ -857,12 +955,13 @@ def run(tpu_job_name,
     optimizer: a class extending optimize.Optimizer, required for training
   """
   if not isinstance(batch_size, int):
-    batch_size = batch_size(sequence_length, mesh_shape, layout_rules)
+    batch_size = compute_batch_size(
+        sequence_length, mesh_shape, layout_rules, batch_size)
 
   if not isinstance(train_steps, int):
     train_steps = train_steps(batch_size, sequence_length)
 
-  if learning_rate_schedule is not None:
+  if callable(learning_rate_schedule):
     learning_rate_schedule = functools.partial(
         learning_rate_schedule, total_train_steps=train_steps)
 
@@ -958,6 +1057,9 @@ def run(tpu_job_name,
     metrics_inputs = get_components_fn()
     for _ in tf.contrib.training.checkpoints_iterator(estimator.model_dir):
       for metric_names, component in metrics_inputs:
+        if not metric_names:
+          tf.logging.info("Skipping {}".format(component.__dict__))
+          continue
         tf.logging.info("Evaluating {}".format(component.__dict__))
         tf.logging.info("on split {}".format(dataset_split))
         # Prepend eval tag and split name to metric names
@@ -1069,7 +1171,7 @@ def evaluate(estimator, eval_args):
         steps=eval_steps,
         name=eval_name,
         checkpoint_path=checkpoint_path)
-    for key, val in metric_values.iteritems():
+    for key, val in metric_values.items():
       values[eval_name + "/" + key] = val
 
   tf.logging.info(values)
