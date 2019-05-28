@@ -531,7 +531,8 @@ class Unitransformer(object):
                             encoder_sequence_id=None,
                             shared_params=None,
                             has_partial_sequences=True,
-                            encoder_layer_outputs=None):
+                            encoder_layer_outputs=None,
+                            never_end=False):
     """Sample randomly one token at a time.
 
     The partial_sequences represent partial sequences to be continued.  The
@@ -556,6 +557,7 @@ class Unitransformer(object):
       has_partial_sequences: a boolean
       encoder_layer_outputs: optional - readonly list of tensor activations when
         decoding, one per each input layer + the embedding layer
+      never_end: a boolean - if set, then avoid generating stop_at_token
 
     Returns:
       a Tensor with shape [<batch_dims>, length_dim]
@@ -636,6 +638,11 @@ class Unitransformer(object):
       inputs_this_step = mtf.gather(ids, position - 1, length_dim)
       with tf.variable_scope(self.name, reuse=True):
         logits = self._call_internal(context_incremental, inputs_this_step)
+        if never_end:
+          logits += mtf.one_hot(
+              mtf.constant(logits.mesh, stop_at_token, dtype=tf.int32),
+              self.output_vocab_dim, on_value=-1e9, off_value=0.0,
+              dtype=logits.dtype)
       ids_this_step = mtf.sample_with_temperature(
           logits, self.output_vocab_dim, temperature)
       new_position = position + 1
