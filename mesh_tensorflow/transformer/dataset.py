@@ -345,11 +345,22 @@ def encode_all_features(dataset, vocabulary):
     a tf.data.Dataset
   """
   def my_fn(features):
+    """Encode all features that are strings and return a dictionary.
+
+    Args:
+      features: a dictionary
+    Returns:
+      a dictionary
+    """
     ret = {}
     for k, v in features.items():
-      v = vocabulary.encode_tf(v)
-      v = tf.concat([tf.to_int64(v), [1]], 0)
-      ret[k] = v
+      if v.dtype == tf.string:
+        v = vocabulary.encode_tf(v)
+        v = tf.concat([tf.to_int64(v), [1]], 0)
+        ret[k] = v
+      else:
+        tf.logging.info(
+            "encode_all_features: skipping non-string feature %s:%s", k, v)
     return ret
   return dataset.map(my_fn, num_parallel_calls=tf.data.experimental.AUTOTUNE)
 
