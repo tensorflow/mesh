@@ -233,7 +233,7 @@ def tpu_estimator_model_fn(model_type,
                            metric_names,
                            checkpoints_to_keep,
                            save_steps,
-                           get_metric_fns=None,
+                           get_estimator_metric_fns=None,
                            learning_rate_schedule=None,
                            optimizer=None,
                            outer_batch_size=1,
@@ -254,8 +254,8 @@ def tpu_estimator_model_fn(model_type,
       computes padded_neg_log_perplexity
     checkpoints_to_keep: an integer
     save_steps: an integer
-    get_metric_fns: function that takes in a list of metrics, labels, and
-      outputs, and returns a dictionary of metric name: metric function
+    get_estimator_metric_fns: function that takes in a list of metrics, labels,
+      and outputs, and returns a dictionary of metric name: metric function
       evaluated on labels and outputs. Required for eval, optional otherwise.
     learning_rate_schedule: an optional function taking the scalar named
       argument `step` and return the scalar learning rate.
@@ -379,7 +379,7 @@ def tpu_estimator_model_fn(model_type,
       local_metric_names = metric_names or ["token_accuracy"]
 
       def metric_fn(labels, outputs):
-        return get_metric_fns(
+        return get_estimator_metric_fns(
             local_metric_names, labels, outputs
         )
       eval_metrics = (metric_fn, [labels, outputs])
@@ -898,7 +898,7 @@ def run(tpu_job_name,
         mesh_shape=gin.REQUIRED,
         layout_rules=gin.REQUIRED,
         get_components_fn=None,
-        run_post_decode_metrics=None,
+        compute_metrics=None,
         process_metric_names=None,
         checkpoints_to_keep=10,
         save_steps=1000,
@@ -937,10 +937,10 @@ def run(tpu_job_name,
     get_components_fn: an optional function that takes in a component and
       returns a list of tuples of (metric_names, component) for each component.
       Required if mode is "continuous_eval."
-    run_post_decode_metrics: an optional function that takes in: metric names
-      (list of strs), pred_output_filename (str), label_output_filename (str),
-      dataset split (str), and tb_summary_dir (str), runs metrics on the outputs
-      in output_filename, and returns a dictionary of metrics and their computed
+    compute_metrics: an optional function that takes in: metric names (list of
+      strs), pred_output_filename (str), label_output_filename (str), dataset
+      split (str), and tb_summary_dir (str), runs metrics on the outputs in
+      output_filename, and returns a dictionary of metrics and their computed
       values. Required if mode is "continuous_eval."
     process_metric_names: an optional function that takes: metric_names (list of
       str) and a dataset_split (str), and returns: estimator_metric_names (list
@@ -1047,9 +1047,9 @@ def run(tpu_job_name,
       raise ValueError("Must provide eval_dataset_fn through gin for eval.")
     if get_components_fn is None:
       raise ValueError("Must provide get_components_fn through gin for eval.")
-    if run_post_decode_metrics is None:
+    if compute_metrics is None:
       raise ValueError(
-          "Must provide run_post_decode_metrics through gin for eval.")
+          "Must provide compute_metrics through gin for eval.")
     if process_metric_names is None:
       raise ValueError(
           "Must provide process_metric_names through gin for eval.")
@@ -1058,10 +1058,11 @@ def run(tpu_job_name,
     for _ in tf.contrib.training.checkpoints_iterator(estimator.model_dir):
       for metric_names, component in metrics_inputs:
         if not metric_names:
-          tf.logging.info("Skipping {}".format(component.__dict__))
+          tf.logging.info("Skipping %s", component.__dict__)
           continue
-        tf.logging.info("Evaluating {}".format(component.__dict__))
-        tf.logging.info("on split {}".format(dataset_split))
+        tf.logging.info("Evaluating %s on metrics %s", component.tfds_name,
+                        component.metric_names)
+        tf.logging.info("on split %s", dataset_split)
         # Prepend eval tag and split name to metric names
         (estimator_metric_names,
          post_metric_names) = process_metric_names(metric_names, dataset_split)
@@ -1120,10 +1121,9 @@ def run(tpu_job_name,
                    label_output_filename=label_output_filename)
         tf.logging.info("Evaluating post decode metrics: {}".format(
             post_metric_names))
-        tb_summary_dir = (
-            os.path.dirname(output_filename) + "/{}_eval/".format(
-                "eval" if dataset_split == "validation" else dataset_split))
-        _ = run_post_decode_metrics(
+        tb_summary_dir = os.path.join(model_dir, "{}_eval".format(
+            "eval" if dataset_split == "validation" else dataset_split))
+        _ = compute_metrics(
             post_metric_names, pred_output_filename,
             label_output_filename, dataset_split, tb_summary_dir)
 
