@@ -230,10 +230,8 @@ def tpu_estimator_model_fn(model_type,
                            batch_size,
                            sequence_length,
                            autostack,
-                           metric_names,
                            checkpoints_to_keep,
                            save_steps,
-                           get_estimator_metric_fns=None,
                            learning_rate_schedule=None,
                            optimizer=None,
                            outer_batch_size=1,
@@ -250,13 +248,8 @@ def tpu_estimator_model_fn(model_type,
     batch_size: an integer
     sequence_length: an integer
     autostack: a boolean
-    metric_names: list of strings giving the metric names. If None, then
-      computes padded_neg_log_perplexity
     checkpoints_to_keep: an integer
     save_steps: an integer
-    get_estimator_metric_fns: function that takes in a list of metrics, labels,
-      and outputs, and returns a dictionary of metric name: metric function
-      evaluated on labels and outputs. Required for eval, optional otherwise.
     learning_rate_schedule: an optional function taking the scalar named
       argument `step` and return the scalar learning rate.
       Alternatively, a constant.
@@ -353,44 +346,7 @@ def tpu_estimator_model_fn(model_type,
           prediction_hooks=[mtf.MtfRestoreHook(lowering)])
 
     elif mode == tf.estimator.ModeKeys.EVAL:
-      targets = mtf_features["targets"]
-      anon_targets = mtf.anonymize(targets)
-      if model_type == "lm":
-        _, length_dim = targets.shape
-        inputs = mtf.shift(targets, offset=1, dim=length_dim, wrap=False)
-      else:
-        inputs = mtf_features["inputs"]
-      if isinstance(transformer_model, transformer.Unitransformer):
-        mtf_samples = transformer_model.sample_autoregressive(
-            inputs, variable_dtype=get_variable_dtype())
-      elif isinstance(transformer_model, transformer.Bitransformer):
-        mtf_samples = transformer_model.decode(
-            inputs, variable_dtype=get_variable_dtype())
-      else:
-        raise ValueError("unrecognized class")
-      mtf_samples = mtf.anonymize(mtf_samples)
-      lowering = mtf.Lowering(graph, {mesh: mesh_impl}, autostack=autostack)
-      outputs = lowering.export_to_tf_tensor(mtf_samples)
-      labels = lowering.export_to_tf_tensor(anon_targets)
-      restore_hook = mtf.MtfRestoreHook(lowering)
-
-      # metric_names becomes locally scoped if we simply assign
-      # ["padded_neg_log_perplexity"] to it conditioned on if it's None.
-      local_metric_names = metric_names or ["token_accuracy"]
-
-      def metric_fn(labels, outputs):
-        return get_estimator_metric_fns(
-            local_metric_names, labels, outputs
-        )
-      eval_metrics = (metric_fn, [labels, outputs])
-      return tpu_estimator.TPUEstimatorSpec(
-          tf.estimator.ModeKeys.EVAL,
-          # Unfortunately TPUEstimatorSpec requires us to provide a value for
-          # loss when in EVAL mode. Since we are sampling or decoding from the
-          # model, we don't have a loss to report.
-          loss=tf.constant(0.),
-          evaluation_hooks=[restore_hook],
-          eval_metrics=eval_metrics)
+      raise NotImplementedError("We don't expect to use mode == eval.")
 
     else:
       assert mode == tf.estimator.ModeKeys.TRAIN
@@ -587,9 +543,7 @@ def decode(estimator,
            padded_dataset_size,
            batch_size,
            vocabulary,
-           checkpoint_path="",
-           pred_output_filename=None,
-           label_output_filename=None):
+           checkpoint_path=""):
   """Decode from an input_fn.
 
   Args:
@@ -600,10 +554,6 @@ def decode(estimator,
     batch_size: an integer
     vocabulary: a mtf.transformer.vocabulary.Vocabulary
     checkpoint_path: an optional string
-    pred_output_filename: location to save a file of predictions. If None, don't
-      save a prediction file.
-    label_output_filename: location to save a file of labels. If None, don't
-      save a label file.
 
   Returns:
     list of decoded strings
@@ -646,24 +596,36 @@ def decode(estimator,
     tf.logging.info("Taking the first %d examples of %d",
                     dataset_size, len(decodes))
     decodes = decodes[:dataset_size]
+  return decodes
 
-  if pred_output_filename:
-    # Write out predicted strings
+
+def log_pred_target(decodes, dataset, dataset_size, vocabulary,
+                    pred_output_filename=None,
+                    target_output_filename=None):
+  """Log predictions and targets."""
+
+  vocab_size = targets_vocabulary(vocabulary).vocab_size
+
+  # Write out predicted strings
+  if pred_output_filename is not None:
     if tf.io.gfile.exists(pred_output_filename):
       tf.io.gfile.remove(pred_output_filename)
     with tf.io.gfile.GFile(pred_output_filename, "w") as output_file:
       for d in decodes:
         output_file.write(d + "\n")
 
-  if label_output_filename:
-    # Write out labels
-    dataset = tfds.as_numpy(input_fn(0))
+  # Write out targets
+  if target_output_filename is not None:
+    if dataset is None:
+      raise ValueError(
+          "Must provide a dataset if target_output_filename is set.")
+    dataset = tfds.as_numpy(dataset)
     count = 0
     # Break through both for-loops by setting broken to be True.
     broken = False
-    if tf.io.gfile.exists(label_output_filename):
-      tf.io.gfile.remove(label_output_filename)
-    with tf.io.gfile.GFile(label_output_filename, "w") as output_file:
+    if tf.io.gfile.exists(target_output_filename):
+      tf.io.gfile.remove(target_output_filename)
+    with tf.io.gfile.GFile(target_output_filename, "w") as output_file:
       for input_target in dataset:
         if "targets" not in input_target:
           raise ValueError("The input_fn provided to decode does not have a "
@@ -719,9 +681,10 @@ def decode_from_file(estimator,
   dataset_size = len(inputs)
   padded_dataset_size = len(all_input_ids)
 
-  _ = decode(estimator, input_fn, dataset_size, padded_dataset_size, batch_size,
-             vocabulary, checkpoint_path=checkpoint_path,
-             pred_output_filename=output_filename)
+  decodes = decode(estimator, input_fn, dataset_size, padded_dataset_size,
+                   batch_size, vocabulary, checkpoint_path=checkpoint_path)
+  log_pred_target(decodes, None, dataset_size, vocabulary,
+                  pred_output_filename=output_filename)
 
 
 @gin.configurable
@@ -891,7 +854,6 @@ def run(tpu_job_name,
         mode="train",
         iterations_per_loop=100,
         save_checkpoints_steps=1000,
-        eval_steps=10,
         batch_size=("tokens_per_replica", 2048),
         train_steps=auto_train_steps,
         sequence_length=gin.REQUIRED,
@@ -899,7 +861,6 @@ def run(tpu_job_name,
         layout_rules=gin.REQUIRED,
         get_components_fn=None,
         compute_metrics=None,
-        process_metric_names=None,
         checkpoints_to_keep=10,
         save_steps=1000,
         learning_rate_schedule=None,
@@ -925,7 +886,6 @@ def run(tpu_job_name,
     mode: string, train/evaluate/infer
     iterations_per_loop: integer, steps per train loop
     save_checkpoints_steps: integer, steps per checkpoint
-    eval_steps: integer, number of evaluation steps
     batch_size: An integer or a (method, value) pair to pass to
       compute_batch_size(). Note that this is
       the global batch size and not the per-shard batch size.
@@ -938,15 +898,10 @@ def run(tpu_job_name,
       returns a list of tuples of (metric_names, component) for each component.
       Required if mode is "continuous_eval."
     compute_metrics: an optional function that takes in: metric names (list of
-      strs), pred_output_filename (str), label_output_filename (str), dataset
+      strs), pred_output_filename (str), target_output_filename (str), dataset
       split (str), and tb_summary_dir (str), runs metrics on the outputs in
       output_filename, and returns a dictionary of metrics and their computed
       values. Required if mode is "continuous_eval."
-    process_metric_names: an optional function that takes: metric_names (list of
-      str) and a dataset_split (str), and returns: estimator_metric_names (list
-      of str) which are metrics to compute with TPUEstimator.evaluate and
-      post_metric_names (list of str) which are metrics to compute after
-      decoding sequences. Required if mode is "continuous_eval."
     checkpoints_to_keep: an integer, keep up to this many checkpoints
     save_steps: an integer, save every this many steps
     learning_rate_schedule: an optional function taking the scalar name
@@ -1014,7 +969,6 @@ def run(tpu_job_name,
       batch_size=batch_size,
       sequence_length=sequence_length,
       autostack=autostack,
-      metric_names=None,
       learning_rate_schedule=learning_rate_schedule,
       checkpoints_to_keep=checkpoints_to_keep,
       save_steps=save_steps,
@@ -1050,22 +1004,17 @@ def run(tpu_job_name,
     if compute_metrics is None:
       raise ValueError(
           "Must provide compute_metrics through gin for eval.")
-    if process_metric_names is None:
-      raise ValueError(
-          "Must provide process_metric_names through gin for eval.")
 
     metrics_inputs = get_components_fn()
-    for _ in tf.contrib.training.checkpoints_iterator(estimator.model_dir):
+    for ckpt in tf.contrib.training.checkpoints_iterator(estimator.model_dir):
       for metric_names, component in metrics_inputs:
         if not metric_names:
           tf.logging.info("Skipping %s", component.__dict__)
           continue
-        tf.logging.info("Evaluating %s on metrics %s", component.tfds_name,
-                        component.metric_names)
+        tf.logging.info("Evaluating %s on metrics %s",
+                        component.tfds_name, component.metric_names)
         tf.logging.info("on split %s", dataset_split)
-        # Prepend eval tag and split name to metric names
-        (estimator_metric_names,
-         post_metric_names) = process_metric_names(metric_names, dataset_split)
+
         # Regenerate the estimator
         model_fn = tpu_estimator_model_fn(
             model_type=model_type,
@@ -1077,7 +1026,6 @@ def run(tpu_job_name,
             batch_size=batch_size,
             sequence_length=sequence_length,
             autostack=autostack,
-            metric_names=estimator_metric_names,
             checkpoints_to_keep=checkpoints_to_keep,
             save_steps=save_steps)
         estimator = tpu_estimator.TPUEstimator(
@@ -1090,11 +1038,17 @@ def run(tpu_job_name,
             export_to_tpu=False,
             params={})
 
-        # Extra eval_dataset_fn call to get the dataset_size
-        _, dataset_size, padded_dataset_size = eval_dataset_fn(
-            component,  # pylint: disable=cell-var-from-loop
-            batch_size=batch_size, sequence_length=sequence_length,
-            vocabulary=vocabulary, dataset_split=dataset_split, pack=False)
+        # Extra eval_dataset_fn call to get the dataset_size and an extra
+        # dataset object to write out targets. We need to use a separate graph
+        # because estimator finalizes the default graph after iterating over the
+        # dataset.
+        dataset_graph = tf.Graph()
+        with dataset_graph.as_default():
+          dataset, dataset_size, padded_dataset_size = eval_dataset_fn(
+              component,  # pylint: disable=cell-var-from-loop
+              batch_size=batch_size, sequence_length=sequence_length,
+              vocabulary=vocabulary, dataset_split=dataset_split, pack=False)
+
         def input_fn(params):
           del params
           dataset, _, _ = eval_dataset_fn(component,  # pylint: disable=cell-var-from-loop
@@ -1105,27 +1059,25 @@ def run(tpu_job_name,
                                           pack=False)
           return dataset
 
-        tf.logging.info("Evaluating metrics via estimator.evaluate: {}".format(
-            estimator_metric_names))
-        eval_args = {"eval": (input_fn, eval_steps)}
-        _ = evaluate(estimator, eval_args)
-
         dataset_name = component.tfds_name.replace("/", "-").replace(":", "-")
         output_filename = os.path.join(model_dir, "{}-{}-decoded".format(
             dataset_name, dataset_split))
-        pred_output_filename = output_filename + "-preds"
-        label_output_filename = output_filename + "-labels"
-        _ = decode(estimator, input_fn, dataset_size, padded_dataset_size,
-                   batch_size, vocabulary, checkpoint_path=checkpoint_path,
-                   pred_output_filename=pred_output_filename,
-                   label_output_filename=label_output_filename)
-        tf.logging.info("Evaluating post decode metrics: {}".format(
-            post_metric_names))
+        pred_output_filename = output_filename + "-preds-test"
+        target_output_filename = output_filename + "-targets-test"
+        decodes = decode(estimator, input_fn, dataset_size, padded_dataset_size,
+                         batch_size, vocabulary,
+                         checkpoint_path=checkpoint_path)
+        with dataset_graph.as_default():
+          log_pred_target(decodes, dataset, dataset_size, vocabulary,
+                          pred_output_filename=pred_output_filename,
+                          target_output_filename=target_output_filename)
+        tf.logging.info("Evaluating metrics: {}".format(
+            metric_names))
         tb_summary_dir = os.path.join(model_dir, "{}_eval".format(
             "eval" if dataset_split == "validation" else dataset_split))
         _ = compute_metrics(
-            post_metric_names, pred_output_filename,
-            label_output_filename, dataset_split, tb_summary_dir)
+            metric_names, pred_output_filename,
+            target_output_filename, dataset_split, tb_summary_dir, ckpt)
 
   elif mode == "infer":
     decode_from_file(
@@ -1137,42 +1089,4 @@ def run(tpu_job_name,
         checkpoint_path=checkpoint_path)
   else:
     raise ValueError(
-        "unknown mode %s - must be train/evaluate/continuous_eval/infer" % mode)
-
-
-def evaluate(estimator, eval_args):
-  """Runs evaluation on the latest model checkpoint & logs to tensorboard.
-
-  Args:
-    estimator: A tf.Estimator object.
-    eval_args: Dictionary of {eval_name: (input_fn, eval_steps)} where eval_name
-      is the name of the evaluation set, e.g. "train" or "val", input_fn is an
-      input function returning a tuple (features, labels), and eval_steps is the
-      number of steps for which to evaluate the model. If None, evaluates until
-      input_fn raises an end-of-input exception.
-
-  Returns:
-    A dict of metric values from the evaluation. May be empty, e.g. if the
-    training job has not yet saved a checkpoint or the checkpoint is deleted by
-    the time the TPU worker initializes.
-  """
-  values = {}  # Default return value if evaluation fails.
-
-  checkpoint_path = estimator.latest_checkpoint()
-  if not checkpoint_path:
-    # This is expected if the training job has not yet saved a checkpoint.
-    return values
-
-  tf.logging.info("Starting evaluation on checkpoint %s", checkpoint_path)
-  for eval_name in eval_args:
-    input_fn, eval_steps = eval_args[eval_name]
-    metric_values = estimator.evaluate(
-        input_fn,
-        steps=eval_steps,
-        name=eval_name,
-        checkpoint_path=checkpoint_path)
-    for key, val in metric_values.items():
-      values[eval_name + "/" + key] = val
-
-  tf.logging.info(values)
-  return values
+        "unknown mode %s - must be train/continuous_eval/infer" % mode)
