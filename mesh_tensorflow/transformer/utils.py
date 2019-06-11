@@ -313,7 +313,9 @@ def tpu_estimator_model_fn(model_type,
     mtf_features = {}
     for key, x in features.items():
       x = tf.to_int32(features[key])
-      x = tf.reshape(x, [outer_batch_size, batch_size // outer_batch_size, -1])
+      x = tf.reshape(
+          x, [outer_batch_size, batch_size // outer_batch_size, sequence_length]
+      )
       if not use_tpu:
         x = tf.Print(
             x, [x], "import feature %s" % key, summarize=1000, first_n=1)
