@@ -230,8 +230,8 @@ def tpu_estimator_model_fn(model_type,
                            batch_size,
                            sequence_length,
                            autostack,
-                           checkpoints_to_keep,
-                           save_steps,
+                           keep_checkpoint_max,
+                           save_checkpoints_steps,
                            learning_rate_schedule=None,
                            optimizer=None,
                            outer_batch_size=1,
@@ -248,8 +248,8 @@ def tpu_estimator_model_fn(model_type,
     batch_size: an integer
     sequence_length: an integer
     autostack: a boolean
-    checkpoints_to_keep: an integer
-    save_steps: an integer
+    keep_checkpoint_max: an integer
+    save_checkpoints_steps: an integer
     learning_rate_schedule: an optional function taking the scalar named
       argument `step` and return the scalar learning rate.
       Alternatively, a constant.
@@ -443,7 +443,7 @@ def tpu_estimator_model_fn(model_type,
         saver = tf.train.Saver(
             tf.global_variables(),
             sharded=True,
-            max_to_keep=checkpoints_to_keep,
+            max_to_keep=keep_checkpoint_max,
             keep_checkpoint_every_n_hours=2,
             defer_build=False,
             save_relative_paths=True)
@@ -451,7 +451,7 @@ def tpu_estimator_model_fn(model_type,
         saver_listener = mtf.MtfCheckpointSaverListener(lowering)
         saver_hook = tf.train.CheckpointSaverHook(
             model_dir,
-            save_steps=save_steps,
+            save_steps=save_checkpoints_steps,
             saver=saver,
             listeners=[saver_listener])
         gin_config_saver_hook = gin.tf.GinConfigSaverHook(
@@ -856,6 +856,7 @@ def run(tpu_job_name,
         mode="train",
         iterations_per_loop=100,
         save_checkpoints_steps=1000,
+        keep_checkpoint_max=10,
         batch_size=("tokens_per_replica", 2048),
         train_steps=auto_train_steps,
         sequence_length=gin.REQUIRED,
@@ -863,8 +864,6 @@ def run(tpu_job_name,
         layout_rules=gin.REQUIRED,
         get_components_fn=None,
         compute_metrics=None,
-        checkpoints_to_keep=10,
-        save_steps=1000,
         learning_rate_schedule=None,
         optimizer=None):
   """Run training/eval/inference.
@@ -888,6 +887,7 @@ def run(tpu_job_name,
     mode: string, train/evaluate/infer
     iterations_per_loop: integer, steps per train loop
     save_checkpoints_steps: integer, steps per checkpoint
+    keep_checkpoint_max: an integer, keep up to this many checkpoints
     batch_size: An integer or a (method, value) pair to pass to
       compute_batch_size(). Note that this is
       the global batch size and not the per-shard batch size.
@@ -904,8 +904,6 @@ def run(tpu_job_name,
       split (str), and tb_summary_dir (str), runs metrics on the outputs in
       output_filename, and returns a dictionary of metrics and their computed
       values. Required if mode is "continuous_eval."
-    checkpoints_to_keep: an integer, keep up to this many checkpoints
-    save_steps: an integer, save every this many steps
     learning_rate_schedule: an optional function taking the scalar name
       argument `step` and the numeric argument `total_train_steps` and return
       the scalar learning rate
@@ -951,8 +949,11 @@ def run(tpu_job_name,
   run_config = tpu_config.RunConfig(
       cluster=cluster,
       model_dir=model_dir,
-      save_checkpoints_steps=save_checkpoints_steps,
-      tpu_config=my_tpu_config)
+      tpu_config=my_tpu_config,
+      # We use a saver hook, so disable checkpoints here to prevent double
+      # saving.
+      save_checkpoints_steps=None,
+      save_checkpoints_secs=None)
 
   transformer_model = build_model(
       model_type=model_type,
@@ -972,8 +973,8 @@ def run(tpu_job_name,
       sequence_length=sequence_length,
       autostack=autostack,
       learning_rate_schedule=learning_rate_schedule,
-      checkpoints_to_keep=checkpoints_to_keep,
-      save_steps=save_steps,
+      keep_checkpoint_max=keep_checkpoint_max,
+      save_checkpoints_steps=save_checkpoints_steps,
       optimizer=optimizer)
 
   estimator = tpu_estimator.TPUEstimator(
@@ -1028,8 +1029,8 @@ def run(tpu_job_name,
             batch_size=batch_size,
             sequence_length=sequence_length,
             autostack=autostack,
-            checkpoints_to_keep=checkpoints_to_keep,
-            save_steps=save_steps)
+            keep_checkpoint_max=keep_checkpoint_max,
+            save_checkpoints_steps=save_checkpoints_steps)
         estimator = tpu_estimator.TPUEstimator(
             model_fn=model_fn,
             config=run_config,
