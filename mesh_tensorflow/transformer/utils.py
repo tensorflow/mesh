@@ -366,7 +366,7 @@ def tpu_estimator_model_fn(model_type,
         """
         targets = mtf_features["targets"]
         if model_type == "lm":
-          _, length_dim = targets.shape
+          _, _, length_dim = targets.shape
           inputs = mtf.shift(targets, offset=1, dim=length_dim, wrap=False)
         else:
           inputs = mtf_features["inputs"]
@@ -374,7 +374,7 @@ def tpu_estimator_model_fn(model_type,
         if isinstance(transformer_model, transformer.Unitransformer):
           position_kwargs = dict(
               sequence_id=mtf_features.get("targets_segmentation", None),
-              position=mtf_features("targets_position", None),
+              position=mtf_features.get("targets_position", None),
           )
         elif isinstance(transformer_model, transformer.Bitransformer):
           position_kwargs = dict(
