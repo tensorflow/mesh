@@ -293,7 +293,8 @@ def untokenized_tfds_dataset(dataset_name=gin.REQUIRED,
 
   Args:
     dataset_name: a string
-    text2self: a boolean
+    text2self: a boolean, if true, run unsupervised LM-style training. if false,
+      the dataset must support supervised mode.
     tfds_data_dir: a boolean
     dataset_split: a string
     batch_size: an integer
@@ -306,11 +307,12 @@ def untokenized_tfds_dataset(dataset_name=gin.REQUIRED,
   """
   dataset = tfds.load(
       dataset_name, split=dataset_split,
-      as_supervised=True, data_dir=tfds_data_dir)
+      as_supervised=not text2self, data_dir=tfds_data_dir)
   if dataset_split == "train":
     dataset = dataset.repeat()
     dataset = dataset.shuffle(1000)
-  dataset = supervised_to_dict(dataset, text2self)
+  if not text2self:
+    dataset = supervised_to_dict(dataset, text2self)
   dataset = encode_all_features(dataset, vocabulary)
   return pack_and_batch(dataset, batch_size, sequence_length, pack)
 
