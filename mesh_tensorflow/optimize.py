@@ -85,7 +85,7 @@ class SgdOptimizer(Optimizer):
 
   def apply_grad(self, grad, var):
     if grad is None:
-      tf.logging.warning("Gradient is None for variable %s" % var)
+      tf.logging.warning("Gradient is None for variable %s" % var.name)
       return []
     # It is critical to use assign_sub instead of mtf.assign(var - ...)
     #  for the case of bfloat16 activations, so as to avoid repeatedly rounding
@@ -181,7 +181,7 @@ class AdafactorOptimizer(Optimizer):
 
   def apply_grad(self, grad, var):
     if grad is None:
-      tf.logging.warning("Gradient is None for variable %s" % var)
+      tf.logging.warning("Gradient is None for variable %s" % var.name)
       return []
     # create slots
     grad = mtf.to_float(grad)

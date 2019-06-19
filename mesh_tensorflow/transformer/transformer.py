@@ -778,6 +778,14 @@ class Bitransformer(object):
     self.decoder = decoder
     self.shared_embedding = shared_embedding
 
+  @property
+  def output_vocab_dim(self):
+    return self.decoder.output_vocab_dim
+
+  @property
+  def z_loss(self):
+    return self.decoder.z_loss
+
   def _shared_params(self, mesh, variable_dtype):
     """Create parameters that are shared between encoder and decoder.
 
@@ -959,6 +967,135 @@ class Bitransformer(object):
           encoder_layer_outputs=encoder_layer_outputs)
 
 
+@gin.configurable
+class StudentTeacher(object):
+  """A teacher and a student to be taught via distillation."""
+
+  def __init__(self,
+               student,
+               teacher,
+               temperature=None,
+               fraction_soft=None,
+               teacher_checkpoint=None):
+    """Create a StudentTeacher.
+
+    Args:
+      student: a Unitransformer or Bitransformer
+      teacher: a Unitransformer or Bitransformer
+      temperature: a float, the temperature of the softmax for distilling from
+        the teacher. Required only when training.
+      fraction_soft: a float between 0 and 1, the contribution of the soft
+        target cross entropy to the training loss. The rest of the loss will be
+        the cross entropy with the one-hot actual label. Required only when
+        training.
+      teacher_checkpoint: a string, the path to the teacher checkpoint that we
+        wish to use. Required only when training.
+    """
+    self.student = student
+    self.teacher = teacher
+    self.temperature = temperature
+    self.fraction_soft = fraction_soft
+    self.teacher_checkpoint = teacher_checkpoint
+
+  def call_simple(self,
+                  inputs,
+                  targets,
+                  compute_loss,
+                  variable_dtype=mtf.VariableDType(tf.float32),
+                  **kargs):
+    """Compute logits based on inputs (all positions in parallel).
+
+    This is called during training and evaluation.
+
+    Args:
+      inputs: an int32 Tensor with shape [<batch_dims>, length_dim] For training
+        autoregressive models this should be equal to mtf.shift(targets,
+        offset=1, dim=length_dim, wrap=False)
+      targets: an optional int32 Tensor with shape [<batch_dims>, length_dim]
+      compute_loss: a boolean
+      variable_dtype: a mtf.VariableDType
+      **kargs: additional arguments to pass to the student.call_simple and
+        teacher.call_simple
+
+    Returns:
+      logits: a Tensor with shape [<batch_dims>, output_vocab_dim]
+      loss: an optional Scalar (if compute_loss=True)
+    """
+    assert self.student.output_vocab_dim == self.teacher.output_vocab_dim
+    assert self.student.z_loss == self.teacher.z_loss
+    output_vocab_dim = self.student.output_vocab_dim
+    z_loss = self.student.z_loss
+
+    with tf.variable_scope("student"):
+      student_logits, hard_loss = self.student.call_simple(
+          inputs,
+          targets,
+          compute_loss=True,
+          variable_dtype=variable_dtype,
+          **kargs)
+      if not compute_loss:
+        return student_logits
+
+    with tf.variable_scope("teacher"):
+      teacher_logits, _ = self.teacher.call_simple(
+          inputs,
+          targets,
+          compute_loss=True,
+          variable_dtype=variable_dtype,
+          **kargs)
+
+    soft_targets = mtf.softmax(teacher_logits / self.temperature,
+                               output_vocab_dim)
+
+    soft_loss = mtf.layers.softmax_cross_entropy_with_logits(
+        student_logits / self.temperature,
+        mtf.stop_gradient(soft_targets),
+        output_vocab_dim,
+        z_loss=z_loss)
+
+    # Ignore losses from padding regions.
+    weights = mtf.layers.weights_nonzero(
+        targets, dtype=variable_dtype.activation_dtype)
+    soft_loss = mtf.reduce_mean(soft_loss * weights)
+
+    loss = (1.0 - self.fraction_soft) * hard_loss \
+           + self.temperature**2 * self.fraction_soft * soft_loss
+
+    return student_logits, loss
+
+  def decode(self, *args, **kargs):
+    """Sample from the student.
+
+    Args:
+       *args: arguments to Unitransformer.sample_autoregressive or
+         Bitransformer.decode
+       **kargs: arguments to Unitransformer.sample_autoregressive or
+         Bitransformer.decode
+
+    Returns:
+      a Tensor with the same shape as the output of
+      Unitransformer.sample_autoregressive or Bitransformer.decode
+    """
+    with tf.variable_scope("student"):
+      if isinstance(self.student, Unitransformer):
+        return self.student.sample_autoregressive(*args, **kargs)
+      elif isinstance(self.student, Bitransformer):
+        return self.student.decode(*args, **kargs)
+      else:
+        raise ValueError("unrecognized class")
+
+  def initialize(self):
+    """Initialize the teacher model from the checkpoint.
+
+    This function will be called after the graph has been constructed.
+    """
+    vars_to_restore = tf.get_collection(
+        tf.GraphKeys.GLOBAL_VARIABLES, scope="teacher")
+    tf.train.init_from_checkpoint(
+        self.teacher_checkpoint,
+        {v.name[len("teacher/"):].split(":")[0]: v for v in vars_to_restore})
+
+
 # gin-configurable constructors
 @gin.configurable
 def make_layer_stack(layers=gin.REQUIRED, num_layers=6):
@@ -1021,6 +1158,54 @@ def make_bitransformer(
         layout=layout,
         mesh_shape=mesh_shape)
   return Bitransformer(encoder, decoder)
+
+
+@gin.configurable
+def make_bi_student_teacher(input_vocab_size=gin.REQUIRED,
+                            output_vocab_size=gin.REQUIRED,
+                            layout=None,
+                            mesh_shape=None):
+  """Gin-configurable bitransformer student teacher constructor.
+
+  In your config file you need to set the encoder and decoder layers like this:
+    encoder_layers = [
+        @mesh_tensorflow.transformer.transformer_layers.SelfAttention,
+        @mesh_tensorflow.transformer.transformer_layers.DenseReluDense,
+    ]
+    decoder_layers = [
+        @mesh_tensorflow.transformer.transformer_layers.SelfAttention,
+        @mesh_tensorflow.transformer.transformer_layers.EncDecAttention,
+        @mesh_tensorflow.transformer.transformer_layers.DenseReluDense,
+    ]
+    teacher/encoder/transformer.make_layer_stack.layers = %encoder_layers
+    teacher/decoder/transformer.make_layer_stack.layers = %decoder_layers
+    student/encoder/transformer.make_layer_stack.layers = %encoder_layers
+    student/decoder/transformer.make_layer_stack.layers = %decoder_layers
+
+  Args:
+    input_vocab_size: a integer
+    output_vocab_size: an integer
+    layout: optional - an input to mtf.convert_to_layout_rules Some layers (e.g.
+      MoE layers) cheat by looking at layout and mesh_shape
+    mesh_shape: optional - an input to mtf.convert_to_shape Some layers (e.g.
+      MoE layers) cheat by looking at layout and mesh_shape
+
+  Returns:
+    a StudentTeacher
+  """
+  with gin.config_scope("student"):
+    student = make_bitransformer(
+        input_vocab_size=input_vocab_size,
+        output_vocab_size=output_vocab_size,
+        layout=layout,
+        mesh_shape=mesh_shape)
+  with gin.config_scope("teacher"):
+    teacher = make_bitransformer(
+        input_vocab_size=input_vocab_size,
+        output_vocab_size=output_vocab_size,
+        layout=layout,
+        mesh_shape=mesh_shape)
+  return StudentTeacher(student=student, teacher=teacher)
 
 
 def _round_up_to_multiple(n, divisor):

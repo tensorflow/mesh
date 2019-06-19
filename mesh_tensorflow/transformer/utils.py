@@ -119,7 +119,7 @@ def build_model(model_type="bitransformer",
                 mesh_shape=None):
   """Build a transformer model.
 
-  Currently, three types of models are supported:
+  Currently, four types of models are supported:
 
   "bitransformer": The traditional encoder-decoder architecture from
      "attention is all you need".  Requires a non-text2self dataset.
@@ -133,6 +133,9 @@ def build_model(model_type="bitransformer",
      a non-text2self dataset with inputs and targets.  The targets are
      aligned with the inputs.
 
+  "bi_teacher_student": a teacher-student model where both the student and
+    teacher are bitransformers. Requires a non-text2self dataset.
+
   Args:
     model_type: a string - "bitransformer", "lm" or "aligned"
     input_vocab_size: an integer
@@ -144,6 +147,12 @@ def build_model(model_type="bitransformer",
   """
   if model_type == "bitransformer":
     return transformer.make_bitransformer(
+        input_vocab_size=input_vocab_size,
+        output_vocab_size=output_vocab_size,
+        mesh_shape=mesh_shape,
+        layout=layout_rules)
+  elif model_type == "bi_student_teacher":
+    return transformer.make_bi_student_teacher(
         input_vocab_size=input_vocab_size,
         output_vocab_size=output_vocab_size,
         mesh_shape=mesh_shape,
@@ -333,7 +342,8 @@ def tpu_estimator_model_fn(model_type,
       if isinstance(transformer_model, transformer.Unitransformer):
         mtf_samples = transformer_model.sample_autoregressive(
             inputs, variable_dtype=get_variable_dtype())
-      elif isinstance(transformer_model, transformer.Bitransformer):
+      elif isinstance(transformer_model,
+                      (transformer.Bitransformer, transformer.StudentTeacher)):
         mtf_samples = transformer_model.decode(
             inputs, variable_dtype=get_variable_dtype())
       else:
@@ -376,7 +386,9 @@ def tpu_estimator_model_fn(model_type,
               sequence_id=mtf_features.get("targets_segmentation", None),
               position=mtf_features.get("targets_position", None),
           )
-        elif isinstance(transformer_model, transformer.Bitransformer):
+        elif isinstance(
+            transformer_model,
+            transformer.Bitransformer) or model_type == "bi_student_teacher":
           position_kwargs = dict(
               encoder_sequence_id=mtf_features.get(
                   "inputs_segmentation", None),
@@ -436,6 +448,10 @@ def tpu_estimator_model_fn(model_type,
       tf_update_ops = [lowering.lowered_operation(op) for op in update_ops]
       tf_update_ops.append(tf.assign_add(global_step, 1))
       train_op = tf.group(tf_update_ops)
+
+      if hasattr(transformer_model, "initialize"):
+        with mtf.utils.outside_all_rewrites():
+          transformer_model.initialize()
 
       with mtf.utils.outside_all_rewrites():
         # Copy master variables to slices. Must be called first.
@@ -874,7 +890,8 @@ def run(tpu_job_name,
     gcp_project: string, project name for the Cloud TPU-enabled project
     tpu_zone: string, GCE zone where the Cloud TPU is located in
     model_dir: string, estimator model_dir
-    model_type: a string - either "bitransformer", "lm" or "aligned"
+    model_type: a string - either "bitransformer", "bi_student_teacher", lm" or
+      "aligned"
     vocabulary: a vocabulary.Vocabulary or
       (inputs_vocabulary, targets_vocabulary) tuple.
     train_dataset_fn: A function returning a tf.data.Dataset. Must be provided
