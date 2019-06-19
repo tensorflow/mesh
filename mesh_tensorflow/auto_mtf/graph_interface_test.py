@@ -39,7 +39,7 @@ class GraphInterfaceTest(tf.test.TestCase):
                 id=0,
                 output_info=[
                     cost_graph_pb2.CostGraphDef.Node.OutputInfo(
-                        size=12,
+                        size=48,
                         alias_input_port=-1,
                         dtype=types_pb2.DT_INT32,
                         shape=tensor_shape_pb2.TensorShapeProto(
@@ -57,7 +57,7 @@ class GraphInterfaceTest(tf.test.TestCase):
                 id=1,
                 output_info=[
                     cost_graph_pb2.CostGraphDef.Node.OutputInfo(
-                        size=20,
+                        size=80,
                         alias_input_port=-1,
                         dtype=types_pb2.DT_INT32,
                         shape=tensor_shape_pb2.TensorShapeProto(
@@ -85,7 +85,7 @@ class GraphInterfaceTest(tf.test.TestCase):
                 ],
                 output_info=[
                     cost_graph_pb2.CostGraphDef.Node.OutputInfo(
-                        size=15,
+                        size=60,
                         alias_input_port=-1,
                         dtype=types_pb2.DT_INT32,
                         shape=tensor_shape_pb2.TensorShapeProto(
@@ -114,7 +114,7 @@ class GraphInterfaceTest(tf.test.TestCase):
                 ],
                 output_info=[
                     cost_graph_pb2.CostGraphDef.Node.OutputInfo(
-                        size=15,
+                        size=60,
                         alias_input_port=-1,
                         dtype=types_pb2.DT_INT32,
                         shape=tensor_shape_pb2.TensorShapeProto(

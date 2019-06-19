@@ -342,7 +342,7 @@ class GraphInterface(object):
         # not the same as None.
         if devices is None or tensor_device is None or tensor_device in devices:
           node.output_info.add(
-              size=self.get_tensor_num_entries(output_name),
+              size=self.get_tensor_size(output_name),
               alias_input_port=-1,
               dtype=self.get_tensor_dtype(output_name).as_datatype_enum,
               shape=self.get_tensor_shape(output_name).as_proto(),
