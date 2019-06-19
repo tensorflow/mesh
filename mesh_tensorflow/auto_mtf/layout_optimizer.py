@@ -96,7 +96,11 @@ class LayoutOptimizer(object):
         needed).
 
   Objective Function:
-    We want to minimize the variable z.
+    We want to minimize the variable z. However, we want to tiebreak by the
+    number of assigned dimensions (preferring more dimensions), so our
+    modified objective is (#MTF Dimensions + 1) * z - sum x_{t->m}. Note that we
+    prefer more splitting because in general splits result in smaller tensors
+    and less duplicated work.
   """
 
   def __init__(self, memory_estimator, scheduler_alg="LIST"):
@@ -263,7 +267,11 @@ class LayoutOptimizer(object):
 
   def _build_objective_function(self):
     """Builds the objective function of the IP."""
-    self._model.Minimize(self._memory_var)
+    # Break ties in favor of more assignments.
+    scale = len(self._layout_validator.splittable_mtf_dimension_names) + 1
+    objective = scale * self._memory_var - sum(six.itervalues(
+        self._global_vars))
+    self._model.Minimize(objective)
 
   def _get_memory_contents(self):
     """Runs the scheduler to determine memory contents at every point in time.

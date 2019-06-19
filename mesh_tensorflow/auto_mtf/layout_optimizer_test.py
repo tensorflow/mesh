@@ -128,6 +128,16 @@ class OptimizeLayoutTest(tf.test.TestCase):
     # b has size 5 (so there are divisiblity issues).
     self.assertEqual(optimizer.solve(), "")
 
+  def testOptimizeLayoutTiebreak(self):
+    x1 = mtf.zeros(self.mesh, "a:10,b:5")
+    x2 = mtf.zeros(self.mesh, "b:5,c:20")
+    mtf.einsum([x1, x2], "a:10,c:20")
+    # Rewrite mesh_shape to have a dummy dimension.
+    self.mesh_shape = mtf.convert_to_shape("m1:4,m2:2,m3:1")
+    optimizer = self.get_layout_optimizer()
+    layout = optimizer.solve()
+    self.assertEqual(layout, "a:m2;b:m3;c:m1")
+
 # TODO(joshuawang): Add test to ensure only a single device"s worth of memory is
 # being measured.
 
