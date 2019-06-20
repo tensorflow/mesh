@@ -566,6 +566,19 @@ class Graph(object):
       ret.append(Assign(variables, values, fn))
     return ret
 
+  def make_variables_untrainable(self, variables):
+    """Makes the variables untrainable.
+
+    Args:
+      variables: a list of Variable objects
+    """
+    variables = set(variables)
+    for v in variables:
+      v._trainable = False  # pylint: disable=protected-access
+    self._trainable_variables = [
+        v for v in self._trainable_variables if v not in variables
+    ]
+
 
 class Lowering(object):
   """Lowering of a Graph from Mesh-TensorFlow to TensorFlow.

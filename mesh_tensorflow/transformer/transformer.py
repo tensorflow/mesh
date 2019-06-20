@@ -1021,11 +1021,6 @@ class StudentTeacher(object):
       logits: a Tensor with shape [<batch_dims>, output_vocab_dim]
       loss: an optional Scalar (if compute_loss=True)
     """
-    assert self.student.output_vocab_dim == self.teacher.output_vocab_dim
-    assert self.student.z_loss == self.teacher.z_loss
-    output_vocab_dim = self.student.output_vocab_dim
-    z_loss = self.student.z_loss
-
     with tf.variable_scope("student"):
       student_logits, hard_loss = self.student.call_simple(
           inputs,
@@ -1035,6 +1030,15 @@ class StudentTeacher(object):
           **kargs)
       if not compute_loss:
         return student_logits
+      elif self.fraction_soft == 0.0:
+        # Do not create the teacher if we do not need it.
+        return student_logits, hard_loss
+
+    assert self.student.output_vocab_dim == self.teacher.output_vocab_dim
+    assert self.student.z_loss == self.teacher.z_loss
+    output_vocab_dim = self.student.output_vocab_dim
+    z_loss = self.student.z_loss
+    graph = inputs.mesh.graph
 
     with tf.variable_scope("teacher"):
       teacher_logits, _ = self.teacher.call_simple(
@@ -1043,6 +1047,8 @@ class StudentTeacher(object):
           compute_loss=True,
           variable_dtype=variable_dtype,
           **kargs)
+    graph.make_variables_untrainable(
+        [v for v in graph.trainable_variables if v.name.startswith("teacher/")])
 
     soft_targets = mtf.softmax(teacher_logits / self.temperature,
                                output_vocab_dim)
@@ -1089,6 +1095,9 @@ class StudentTeacher(object):
 
     This function will be called after the graph has been constructed.
     """
+    if self.fraction_soft == 0.0:
+      # Do nothing if we do not need the teacher.
+      return
     vars_to_restore = tf.get_collection(
         tf.GraphKeys.GLOBAL_VARIABLES, scope="teacher")
     tf.train.init_from_checkpoint(

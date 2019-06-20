@@ -937,6 +937,7 @@ def run(tpu_job_name,
     learning_rate_schedule = functools.partial(
         learning_rate_schedule, total_train_steps=train_steps)
 
+  tf.logging.info("model_type=%s" % model_type,)
   tf.logging.info("mode=%s" % mode,)
   tf.logging.info("sequence_length=%s" % sequence_length,)
   tf.logging.info("batch_size=%s" % batch_size,)
