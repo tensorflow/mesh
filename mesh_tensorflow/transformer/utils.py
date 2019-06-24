@@ -879,7 +879,7 @@ def run(tpu_job_name,
         mesh_shape=gin.REQUIRED,
         layout_rules=gin.REQUIRED,
         get_components_fn=None,
-        compute_metrics=None,
+        compute_metrics_from_file_fn=None,
         learning_rate_schedule=None,
         optimizer=None):
   """Run training/eval/inference.
@@ -913,14 +913,14 @@ def run(tpu_job_name,
     sequence_length: an integer
     mesh_shape: an input to mtf.convert_to_shape()
     layout_rules: an input to mtf.convert_to_layout_rules()
-    get_components_fn: an optional function that takes in a component and
-      returns a list of tuples of (metric_names, component) for each component.
+    get_components_fn: an optional function that returns a list of tuples of
+      (metric_names, component) for each component.
       Required if mode is "continuous_eval."
-    compute_metrics: an optional function that takes in: metric names (list of
-      strs), pred_output_filename (str), target_output_filename (str), dataset
-      split (str), and tb_summary_dir (str), runs metrics on the outputs in
-      output_filename, and returns a dictionary of metrics and their computed
-      values. Required if mode is "continuous_eval."
+    compute_metrics_from_file_fn: an optional function that takes in: component,
+      metric names (list of strs), targets (list of strs), predictions (list of
+      strs), dataset_split (str), and tb_summary_dir (str), runs metrics on
+      targets and predictions, and returns a dictionary of metrics and their
+      computed values. Required if mode is "continuous_eval."
     learning_rate_schedule: an optional function taking the scalar name
       argument `step` and the numeric argument `total_train_steps` and return
       the scalar learning rate
@@ -1022,9 +1022,9 @@ def run(tpu_job_name,
       raise ValueError("Must provide eval_dataset_fn through gin for eval.")
     if get_components_fn is None:
       raise ValueError("Must provide get_components_fn through gin for eval.")
-    if compute_metrics is None:
+    if compute_metrics_from_file_fn is None:
       raise ValueError(
-          "Must provide compute_metrics through gin for eval.")
+          "Must provide compute_metrics_from_file_fn through gin for eval.")
 
     metrics_inputs = get_components_fn()
     for ckpt in tf.contrib.training.checkpoints_iterator(estimator.model_dir):
@@ -1096,8 +1096,9 @@ def run(tpu_job_name,
             metric_names))
         tb_summary_dir = os.path.join(model_dir, "{}_eval".format(
             "eval" if dataset_split == "validation" else dataset_split))
-        _ = compute_metrics(
-            metric_names, pred_output_filename,
+
+        _ = compute_metrics_from_file_fn(
+            component, pred_output_filename,
             target_output_filename, dataset_split, tb_summary_dir, ckpt)
 
   elif mode == "infer":
