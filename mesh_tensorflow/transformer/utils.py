@@ -878,6 +878,7 @@ def run(tpu_job_name,
         sequence_length=gin.REQUIRED,
         mesh_shape=gin.REQUIRED,
         layout_rules=gin.REQUIRED,
+        num_eval_examples=None,
         get_components_fn=None,
         compute_metrics_from_file_fn=None,
         learning_rate_schedule=None,
@@ -913,6 +914,8 @@ def run(tpu_job_name,
     sequence_length: an integer
     mesh_shape: an input to mtf.convert_to_shape()
     layout_rules: an input to mtf.convert_to_layout_rules()
+    num_eval_examples: maximum number of examples per task to use for continuous
+      eval.
     get_components_fn: an optional function that returns a list of tuples of
       (metric_names, component) for each component.
       Required if mode is "continuous_eval."
@@ -1068,7 +1071,8 @@ def run(tpu_job_name,
           dataset, dataset_size, padded_dataset_size = eval_dataset_fn(
               component,  # pylint: disable=cell-var-from-loop
               batch_size=batch_size, sequence_length=sequence_length,
-              vocabulary=vocabulary, dataset_split=dataset_split, pack=False)
+              vocabulary=vocabulary, dataset_split=dataset_split, pack=False,
+              max_dataset_size=num_eval_examples)
 
         def input_fn(params):
           del params
@@ -1077,7 +1081,8 @@ def run(tpu_job_name,
                                           sequence_length=sequence_length,
                                           vocabulary=vocabulary,
                                           dataset_split=dataset_split,
-                                          pack=False)
+                                          pack=False,
+                                          max_dataset_size=num_eval_examples)
           return dataset
 
         dataset_name = component.tfds_name.replace("/", "-").replace(":", "-")
@@ -1096,10 +1101,11 @@ def run(tpu_job_name,
             metric_names))
         tb_summary_dir = os.path.join(model_dir, "{}_eval".format(
             "eval" if dataset_split == "validation" else dataset_split))
-
+        summary_writer = tf.summary.FileWriter(tb_summary_dir)
         _ = compute_metrics_from_file_fn(
             component, pred_output_filename,
-            target_output_filename, dataset_split, tb_summary_dir, ckpt)
+            target_output_filename, dataset_split, tb_summary_dir, ckpt,
+            summary_writer=summary_writer)
 
   elif mode == "infer":
     decode_from_file(
