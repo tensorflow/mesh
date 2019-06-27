@@ -567,8 +567,9 @@ def decode(estimator,
   Args:
     estimator: a TPUEstimator
     input_fn: function that returns a tf.Dataset
-    dataset_size: number of examples in the dataset
-    padded_dataset_size: number of examples in the padded dataset
+    dataset_size: integer or np.inf. Number of examples in the dataset
+    padded_dataset_size: integer or np.inf. Number of examples in the padded
+      dataset.
     batch_size: an integer
     vocabulary: a mtf.transformer.vocabulary.Vocabulary
     checkpoint_path: an optional string
@@ -596,7 +597,11 @@ def decode(estimator,
       "num_examples in padded dataset (padded_dataset_size): %d"
       "len(decodes): %d",
       dataset_size, padded_dataset_size, len(decodes))
-  if len(decodes) == padded_dataset_size:
+  if np.isinf(padded_dataset_size):
+    tf.logging.warning(
+        "Unable to infer if examples are repeated per TPU core! "
+        "padded_dataset_size = %f", padded_dataset_size)
+  elif len(decodes) == padded_dataset_size:
     tf.logging.info("number of decodes matches number of inputs")
   elif len(decodes) % padded_dataset_size == 0:
     num_cores = len(decodes) // padded_dataset_size
@@ -610,7 +615,11 @@ def decode(estimator,
   # Since we replicate a batch enough times to fill the min_dataset_size, this
   # might not be an integer number of repeats. So we take the first dataset_size
   # examples.
-  if len(decodes) != dataset_size:
+  if np.isinf(padded_dataset_size):
+    tf.logging.warning(
+        "Unable to infer if examples were repeated to fill TPU buffers! "
+        "dataset_size = %f", dataset_size)
+  elif len(decodes) != dataset_size:
     tf.logging.info("Taking the first %d examples of %d",
                     dataset_size, len(decodes))
     decodes = decodes[:dataset_size]
