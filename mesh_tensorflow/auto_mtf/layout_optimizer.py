@@ -108,7 +108,7 @@ class LayoutOptimizer(object):
 
     Args:
       memory_estimator: a memory_estimator.MemoryEstimator.
-      scheduler_alg: an optional string, see scheduler.MinimizePeakMemory.
+      scheduler_alg: an optional string, see scheduler.minimize_peak_memory.
     """
     self._estimator = memory_estimator
     self._scheduler_alg = scheduler_alg
