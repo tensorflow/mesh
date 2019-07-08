@@ -27,6 +27,7 @@ import gin
 import gin.tf
 
 import mesh_tensorflow as mtf
+from mesh_tensorflow.transformer import dataset as transformer_dataset
 from mesh_tensorflow.transformer import transformer
 import numpy as np
 import tensorflow as tf
@@ -42,6 +43,12 @@ tf.flags.DEFINE_multi_string(
 FLAGS = tf.flags.FLAGS
 
 _DEFAULT_CONFIG_FILE = "./gin/defaults.gin"
+
+# List of features used by model.
+_INPUT_FEATURES = [
+    "inputs", "inputs_position", "inputs_segmentation",
+    "targets", "targets_position", "targets_segmentation",
+]
 
 
 def parse_gin_defaults_and_flags():
@@ -887,9 +894,6 @@ def run(tpu_job_name,
         sequence_length=gin.REQUIRED,
         mesh_shape=gin.REQUIRED,
         layout_rules=gin.REQUIRED,
-        num_eval_examples=None,
-        get_components_fn=None,
-        compute_metrics_from_file_fn=None,
         learning_rate_schedule=None,
         optimizer=None):
   """Run training/eval/inference.
@@ -905,13 +909,33 @@ def run(tpu_job_name,
     vocabulary: a vocabulary.Vocabulary or
       (inputs_vocabulary, targets_vocabulary) tuple.
     train_dataset_fn: A function returning a tf.data.Dataset. Must be provided
-      for mode=train
-    eval_dataset_fn: A function returning a tf.data.Dataset. Must be provided
-      for model=eval
+      for mode="train". Should accept the following arguments:
+        - batch_size: int, number of entries in each batch.
+        - sequence_length: int, length of each packed or padded sequence.
+        - vocabulary: Vocabulary instance to use for encoding.
+        - dataset_split: str, which dataset split to load.
+    eval_dataset_fn: A function returning a list of dataset.EvalDataset tuples.
+      Must be provided for mode="continuous_eval".
+      Should accept the following arguments:
+        - batch_size: int, number of entries in each batch.
+        - sequence_length: int, length of each packed or padded sequence.
+        - vocabulary: Vocabulary instance to use for encoding.
+        - dataset_split: str, which dataset split to load.
+      dataset.EvalDataset tuples are namedtuples with the following fields:
+        - name: string, the task name
+        - dataset_fn: function which returns a tf.data.Dataset of tokenized and
+          padded examples. Must not require any arguments and must include the
+          feature keys 'inputs' and 'targets_plaintext'.
+        - postprocess_fn: function which converts model outputs to evalable str
+        - list_of_metric_fns: list of metric functions with the call signature
+          `metric_fn(targets, predictions)`. TensorBoard summaries and other
+          tags will be written out using `metric_fn.__name__`.
+        - dataset_size: number of entries in the dataset.
+        - padded_dataset_size: number of entries in the dataset after padding.
     dataset_split: a string
     autostack: boolean, internally combine variables
     checkpoint_path: a string - which checkpoint to load for inference
-    mode: string, train/evaluate/infer
+    mode: string, train/continuous_eval/infer
     iterations_per_loop: integer, steps per train loop
     save_checkpoints_steps: integer, steps per checkpoint
     keep_checkpoint_max: an integer, keep up to this many checkpoints
@@ -923,16 +947,6 @@ def run(tpu_job_name,
     sequence_length: an integer
     mesh_shape: an input to mtf.convert_to_shape()
     layout_rules: an input to mtf.convert_to_layout_rules()
-    num_eval_examples: maximum number of examples per task to use for continuous
-      eval.
-    get_components_fn: an optional function that returns a list of tuples of
-      (metric_names, component) for each component.
-      Required if mode is "continuous_eval."
-    compute_metrics_from_file_fn: an optional function that takes in: component,
-      metric names (list of strs), targets (list of strs), predictions (list of
-      strs), dataset_split (str), and tb_summary_dir (str), runs metrics on
-      targets and predictions, and returns a dictionary of metrics and their
-      computed values. Required if mode is "continuous_eval."
     learning_rate_schedule: an optional function taking the scalar name
       argument `step` and the numeric argument `total_train_steps` and return
       the scalar learning rate
@@ -1029,23 +1043,49 @@ def run(tpu_job_name,
       return dataset
 
     estimator.train(input_fn=input_fn, max_steps=train_steps)
+
   elif mode == "continuous_eval":
     if eval_dataset_fn is None:
       raise ValueError("Must provide eval_dataset_fn through gin for eval.")
-    if get_components_fn is None:
-      raise ValueError("Must provide get_components_fn through gin for eval.")
-    if compute_metrics_from_file_fn is None:
-      raise ValueError(
-          "Must provide compute_metrics_from_file_fn through gin for eval.")
 
-    metrics_inputs = get_components_fn()
+    eval_datasets = eval_dataset_fn(
+        batch_size=batch_size,
+        sequence_length=sequence_length,
+        vocabulary=vocabulary,
+        dataset_split=dataset_split,
+    )
+
+    # Pre-load in all of the targets once before entering continuous eval loop
+    cached_targets = {}
+    # Need to create a separate graph for loading in plaintext targets
+    # or else TF will complain that we modified the graph
+    with tf.Graph().as_default():
+      for eval_dataset in eval_datasets:
+        eval_dataset = transformer_dataset.EvalDataset(*eval_dataset)
+        # Only cache targets for those tasks with eval functions provides
+        if eval_dataset.metric_fns:
+          ds = eval_dataset.dataset_fn()
+          # De-batch the dataset
+          ds = ds.flat_map(tf.data.Dataset.from_tensor_slices)
+          ds = tfds.as_numpy(ds)
+          targets = [
+              eval_dataset.postprocess_fn(d["targets_plaintext"]) for d in ds
+          ]
+          targets = targets[:eval_dataset.dataset_size]
+          cached_targets[eval_dataset.name] = targets
+
     for ckpt in tf.contrib.training.checkpoints_iterator(estimator.model_dir):
-      for metric_names, component in metrics_inputs:
-        if not metric_names:
-          tf.logging.info("Skipping %s", component.__dict__)
+      for eval_dataset in eval_datasets:
+        eval_dataset = transformer_dataset.EvalDataset(*eval_dataset)
+        if not eval_dataset.metric_fns:
+          tf.logging.info(
+              "Skipping %s because metric_fns is empty", eval_dataset.name
+          )
           continue
-        tf.logging.info("Evaluating %s on metrics %s",
-                        component.tfds_name, component.metric_names)
+        metric_names = [metric.__name__ for metric in eval_dataset.metric_fns]
+        tf.logging.info(
+            "Evaluating %s on metrics %s", eval_dataset.name, metric_names
+        )
         tf.logging.info("on split %s", dataset_split)
 
         # Regenerate the estimator
@@ -1071,50 +1111,42 @@ def run(tpu_job_name,
             export_to_tpu=False,
             params={})
 
-        # Extra eval_dataset_fn call to get the dataset_size and an extra
-        # dataset object to write out targets. We need to use a separate graph
-        # because estimator finalizes the default graph after iterating over the
-        # dataset.
-        dataset_graph = tf.Graph()
-        with dataset_graph.as_default():
-          dataset, dataset_size, padded_dataset_size = eval_dataset_fn(
-              component,  # pylint: disable=cell-var-from-loop
-              batch_size=batch_size, sequence_length=sequence_length,
-              vocabulary=vocabulary, dataset_split=dataset_split, pack=False,
-              max_dataset_size=num_eval_examples)
-
         def input_fn(params):
           del params
-          dataset, _, _ = eval_dataset_fn(component,  # pylint: disable=cell-var-from-loop
-                                          batch_size=batch_size,
-                                          sequence_length=sequence_length,
-                                          vocabulary=vocabulary,
-                                          dataset_split=dataset_split,
-                                          pack=False,
-                                          max_dataset_size=num_eval_examples)
-          return dataset
+          ds = eval_dataset.dataset_fn()
+          # Only pass those variables which will be used for decoding
+          ds = ds.map(
+              lambda x: {k: v for k, v in x.items() if k in _INPUT_FEATURES}
+          )
+          return ds
 
-        dataset_name = component.tfds_name.replace("/", "-").replace(":", "-")
-        output_filename = os.path.join(model_dir, "{}-{}-decoded".format(
-            dataset_name, dataset_split))
-        pred_output_filename = output_filename + "-preds-test"
-        target_output_filename = output_filename + "-targets-test"
-        decodes = decode(estimator, input_fn, dataset_size, padded_dataset_size,
-                         batch_size, vocabulary,
-                         checkpoint_path=checkpoint_path)
-        with dataset_graph.as_default():
-          log_pred_target(decodes, dataset, dataset_size, vocabulary,
-                          pred_output_filename=pred_output_filename,
-                          target_output_filename=target_output_filename)
-        tf.logging.info("Evaluating metrics: {}".format(
-            metric_names))
-        tb_summary_dir = os.path.join(model_dir, "{}_eval".format(
-            "eval" if dataset_split == "validation" else dataset_split))
+        decodes = decode(
+            estimator,
+            input_fn,
+            eval_dataset.dataset_size,
+            eval_dataset.padded_dataset_size,
+            batch_size,
+            vocabulary,
+            checkpoint_path=checkpoint_path,
+        )
+        predictions = [eval_dataset.postprocess_fn(d) for d in decodes]
+
+        tb_summary_dir = os.path.join(
+            model_dir, "{}_eval".format(dataset_split)
+        )
         summary_writer = tf.summary.FileWriter(tb_summary_dir)
-        _ = compute_metrics_from_file_fn(
-            component, pred_output_filename,
-            target_output_filename, dataset_split, tb_summary_dir, ckpt,
-            summary_writer=summary_writer)
+        global_step = int(ckpt.split("-")[-1])
+        for metric_fn in eval_dataset.metric_fns:
+          summary = tf.Summary()
+          tag = "eval/{}/{}/{}".format(
+              eval_dataset.name, dataset_split, metric_fn.__name__
+          )
+          targets = cached_targets[eval_dataset.name]
+          metric_value = metric_fn(targets, predictions)
+          tf.logging.info("%s: %.3f", tag, metric_value)
+          summary.value.add(tag=tag, simple_value=metric_value)
+          summary_writer.add_summary(summary, global_step)
+        summary_writer.flush()
 
   elif mode == "infer":
     decode_from_file(

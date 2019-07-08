@@ -87,6 +87,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import collections
 import functools
 import os
 import gin
@@ -707,3 +708,16 @@ def _trim_and_pad(t, length):
 def trim_and_pad_all_features(features, length):
   """Trim and pad first dimension of all features to size length."""
   return {k: _trim_and_pad(v, length) for k, v in features.items()}
+
+
+EvalDataset = collections.namedtuple(
+    "EvalDataset",
+    [
+        "name",  # string, the task name
+        "dataset_fn",  # function which returns a tf.data.Dataset
+        "postprocess_fn",  # function which converts decodes to evalable strs
+        "metric_fns",  # list of metric_fn(targets, predictions)
+        "dataset_size",  # number of entries in the dataset
+        "padded_dataset_size",  # number of entries in the padded dataset
+    ]
+)
