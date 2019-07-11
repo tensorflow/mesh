@@ -22,6 +22,7 @@ from __future__ import print_function
 import functools
 import math
 import os
+import re
 
 import gin
 import gin.tf
@@ -568,7 +569,7 @@ def decode(estimator,
            padded_dataset_size,
            batch_size,
            vocabulary,
-           checkpoint_path=""):
+           checkpoint_path=None):
   """Decode from an input_fn.
 
   Args:
@@ -679,13 +680,35 @@ def log_pred_target(decodes, dataset, dataset_size, vocabulary,
   return decodes
 
 
+def get_step_from_checkpoint_path(checkpoint_path):
+  """Returns the global step for the checkpoint at `checkpoint_path`.
+
+  Assumes `checkpoint_path` corresponds to a file which contains the substring
+  model.ckpt-{global_step}
+
+  Args:
+    checkpoint_path: str of path to a checkpoint file.
+
+  Returns:
+    int of the global step corresponding to the checkpoint file.
+
+  Raises:
+    ValueError if checkpoint_path does not correspond to a model checkpoint file
+    which contains the global_step in its filename.
+  """
+  match = re.compile(r".*model\.ckpt\-(\d+).*").match(checkpoint_path)
+  if match is None:
+    raise ValueError("Invalid checkpoint path {}".format(checkpoint_path))
+  return match.group(1)
+
+
 @gin.configurable
 def decode_from_file(estimator,
                      vocabulary,
                      model_type,
                      batch_size,
                      sequence_length,
-                     checkpoint_path="",
+                     checkpoint_path=None,
                      input_filename=gin.REQUIRED,
                      output_filename=gin.REQUIRED,
                      eos_id=1):
@@ -714,9 +737,10 @@ def decode_from_file(estimator,
 
   dataset_size = len(inputs)
   padded_dataset_size = len(all_input_ids)
-
+  checkpoint_step = get_step_from_checkpoint_path(checkpoint_path)
   decodes = decode(estimator, input_fn, dataset_size, padded_dataset_size,
                    batch_size, vocabulary, checkpoint_path=checkpoint_path)
+  output_filename = "{}-{}".format(output_filename, checkpoint_step)
   log_pred_target(decodes, None, dataset_size, vocabulary,
                   pred_output_filename=output_filename)
 
@@ -872,6 +896,51 @@ def auto_train_steps(batch_size,
   return train_tokens // (batch_size * sequence_length)
 
 
+def get_checkpoint_iterator(checkpoint_step, model_dir):
+  """Get an iterable of checkpoint paths from a provided checkpoint step(s).
+
+  Args:
+    checkpoint_step: If checkpoint_step is an int, find the checkpoint with the
+      closest global step and return a singleton list. If checkpoint_step is a
+      list of ints, replace each int with the path to the checkpoint with the
+      closest global step. If checkpoint_step is None, return
+      `tf.contrib.training.checkpoints_iterator` for `model_dir`.
+    model_dir: str, directory to look for checkpoints in.
+
+  Returns:
+    An iterable which yields checkpoint paths.
+  """
+
+  def _get_closest_checkpoint(target_checkpoint):
+    """Returns checkpoint with closest global step to `target_checkpoint`."""
+    checkpoints = set()
+    for f in tf.io.gfile.listdir(model_dir):
+      try:
+        checkpoints.add(int(get_step_from_checkpoint_path(f)))
+      except ValueError:
+        continue
+    if not checkpoints:
+      raise ValueError("No checkpoint files found in {}".format(model_dir))
+    closest = float("inf")
+    for c in checkpoints:
+      if abs(target_checkpoint - c) < abs(target_checkpoint - closest):
+        closest = c
+    if closest != target_checkpoint:
+      tf.logging.info(
+          "Using checkpoint at step %d which is closest to requested step %d",
+          closest,
+          target_checkpoint,
+      )
+    return os.path.join(model_dir, "model.ckpt-{}".format(closest))
+
+  if checkpoint_step is None:
+    return tf.contrib.training.checkpoints_iterator(model_dir)
+  elif isinstance(checkpoint_step, int):
+    return [_get_closest_checkpoint(checkpoint_step)]
+  else:
+    return [_get_closest_checkpoint(c) for c in checkpoint_step]
+
+
 @gin.configurable
 def run(tpu_job_name,
         tpu,
@@ -884,7 +953,7 @@ def run(tpu_job_name,
         eval_dataset_fn=None,
         dataset_split="train",
         autostack=True,
-        checkpoint_path="",
+        checkpoint_step=None,
         mode="train",
         iterations_per_loop=100,
         save_checkpoints_steps=1000,
@@ -915,8 +984,7 @@ def run(tpu_job_name,
         - vocabulary: Vocabulary instance to use for encoding.
         - dataset_split: str, which dataset split to load.
     eval_dataset_fn: A function returning a list of dataset.EvalDataset tuples.
-      Must be provided for mode="continuous_eval".
-      Should accept the following arguments:
+      Must be provided for mode="eval". Should accept the following arguments:
         - batch_size: int, number of entries in each batch.
         - sequence_length: int, length of each packed or padded sequence.
         - vocabulary: Vocabulary instance to use for encoding.
@@ -934,8 +1002,13 @@ def run(tpu_job_name,
         - padded_dataset_size: number of entries in the dataset after padding.
     dataset_split: a string
     autostack: boolean, internally combine variables
-    checkpoint_path: a string - which checkpoint to load for inference
-    mode: string, train/continuous_eval/infer
+    checkpoint_step: int, list of ints, or None. Only used when mode="eval" or
+      mode="infer". If an int or list of ints, evaluation or inference will be
+      run on the checkpoint files  in `model_dir` whose global steps are closest
+      to the global steps provided. If None and mode="eval", run eval
+      continuously waiting for new checkpoints via
+      `tf.contrib.training.checkpoints_iterator`.
+    mode: string, train/eval/infer
     iterations_per_loop: integer, steps per train loop
     save_checkpoints_steps: integer, steps per checkpoint
     keep_checkpoint_max: an integer, keep up to this many checkpoints
@@ -1044,7 +1117,7 @@ def run(tpu_job_name,
 
     estimator.train(input_fn=input_fn, max_steps=train_steps)
 
-  elif mode == "continuous_eval":
+  elif mode == "eval":
     if eval_dataset_fn is None:
       raise ValueError("Must provide eval_dataset_fn through gin for eval.")
 
@@ -1074,7 +1147,7 @@ def run(tpu_job_name,
           targets = targets[:eval_dataset.dataset_size]
           cached_targets[eval_dataset.name] = targets
 
-    for ckpt in tf.contrib.training.checkpoints_iterator(estimator.model_dir):
+    for checkpoint_path in get_checkpoint_iterator(checkpoint_step, model_dir):
       for eval_dataset in eval_datasets:
         eval_dataset = transformer_dataset.EvalDataset(*eval_dataset)
         if not eval_dataset.metric_fns:
@@ -1087,29 +1160,6 @@ def run(tpu_job_name,
             "Evaluating %s on metrics %s", eval_dataset.name, metric_names
         )
         tf.logging.info("on split %s", dataset_split)
-
-        # Regenerate the estimator
-        model_fn = tpu_estimator_model_fn(
-            model_type=model_type,
-            transformer_model=transformer_model,
-            model_dir=model_dir,
-            use_tpu=tpu,
-            mesh_shape=mesh_shape,
-            layout_rules=layout_rules,
-            batch_size=batch_size,
-            sequence_length=sequence_length,
-            autostack=autostack,
-            keep_checkpoint_max=keep_checkpoint_max,
-            save_checkpoints_steps=save_checkpoints_steps)
-        estimator = tpu_estimator.TPUEstimator(
-            model_fn=model_fn,
-            config=run_config,
-            train_batch_size=batch_size,
-            eval_batch_size=batch_size,
-            predict_batch_size=batch_size,
-            use_tpu=tpu,
-            export_to_tpu=False,
-            params={})
 
         def input_fn(params):
           del params
@@ -1130,12 +1180,13 @@ def run(tpu_job_name,
             checkpoint_path=checkpoint_path,
         )
         predictions = [eval_dataset.postprocess_fn(d) for d in decodes]
+        # TODO(craffel): Log predictions and targets.
 
         tb_summary_dir = os.path.join(
             model_dir, "{}_eval".format(dataset_split)
         )
         summary_writer = tf.summary.FileWriter(tb_summary_dir)
-        global_step = int(ckpt.split("-")[-1])
+        global_step = int(get_step_from_checkpoint_path(checkpoint_path))
         for metric_fn in eval_dataset.metric_fns:
           summary = tf.Summary()
           tag = "eval/{}/{}/{}".format(
@@ -1143,19 +1194,20 @@ def run(tpu_job_name,
           )
           targets = cached_targets[eval_dataset.name]
           metric_value = metric_fn(targets, predictions)
-          tf.logging.info("%s: %.3f", tag, metric_value)
+          tf.logging.info("%s at step %d: %.3f", tag, global_step, metric_value)
           summary.value.add(tag=tag, simple_value=metric_value)
           summary_writer.add_summary(summary, global_step)
         summary_writer.flush()
 
   elif mode == "infer":
-    decode_from_file(
-        estimator,
-        vocabulary=vocabulary,
-        model_type=model_type,
-        batch_size=batch_size,
-        sequence_length=sequence_length,
-        checkpoint_path=checkpoint_path)
+    for checkpoint_path in get_checkpoint_iterator(checkpoint_step, model_dir):
+      decode_from_file(
+          estimator,
+          vocabulary=vocabulary,
+          model_type=model_type,
+          batch_size=batch_size,
+          sequence_length=sequence_length,
+          checkpoint_path=checkpoint_path)
   else:
     raise ValueError(
-        "unknown mode %s - must be train/continuous_eval/infer" % mode)
+        "unknown mode %s - must be train/eval/infer" % mode)
