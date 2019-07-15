@@ -398,14 +398,13 @@ def tpu_estimator_model_fn(model_type,
             transformer_model,
             transformer.Bitransformer) or model_type == "bi_student_teacher":
           position_kwargs = dict(
-              encoder_sequence_id=mtf_features.get(
-                  "inputs_segmentation", None),
-              decoder_sequence_id=mtf_features.get(
-                  "targets_segmentation", None),
-              encoder_position=mtf_features.get(
-                  "inputs_position", None),
-              decoder_position=mtf_features.get(
-                  "targets_position", None),
+              encoder_sequence_id=mtf_features.get("inputs_segmentation", None),
+              decoder_sequence_id=mtf_features.get("targets_segmentation",
+                                                   None),
+              decoder_subsequence_id=mtf_features.get("targets_subsegmentation",
+                                                      None),
+              encoder_position=mtf_features.get("inputs_position", None),
+              decoder_position=mtf_features.get("targets_position", None),
           )
         else:
           raise ValueError("unrecognized class")

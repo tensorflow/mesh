@@ -123,6 +123,7 @@ class Context(object):
                autoregressive=False,
                position=None,
                sequence_id=None,
+               subsequence_id=None,
                states=None,
                new_states=None,
                losses=None,
@@ -155,6 +156,11 @@ class Context(object):
         to form a single training example.  Also used to mark padding.
         Id 0 is used for padding, and different positive values
         are used for the different sequences.
+      subsequence_id: an optional int32 Tensor - used to represent multiple
+        targets corresponding to the same input. Should only be provided when
+        being called as a decoder. If provided, then position should line up
+        with this rather than sequence_id. The sequence_id will represent the
+        groups of sub-targets corresponding to each input.
       states: an optional list of Tensors representing loop variables
         (consumed in "incremental" mode)
       new_states: an optional list of Tensors onto which to append the new
@@ -193,6 +199,7 @@ class Context(object):
       self.position_is_default = False
       self.position = position
     self.sequence_id = sequence_id
+    self.subsequence_id = subsequence_id
     self.states = states
     self.new_states = new_states
     self.losses = losses
@@ -368,7 +375,8 @@ class Unitransformer(object):
                name="transformer",
                layout=None,
                mesh_shape=None,
-               vocab_divisor=128):
+               vocab_divisor=128,
+               loss_fn=None):
     self.layer_stack = layer_stack
     self.model_dim = mtf.Dimension("d_model", d_model)
     self.input_vocab_dim = mtf.Dimension(
@@ -389,6 +397,37 @@ class Unitransformer(object):
     self.name = name
     self.layout = layout
     self.mesh_shape = mesh_shape
+    if loss_fn:
+      self._compute_loss = loss_fn
+
+  def _compute_loss(self, context, logits, targets, output_vocab_dim):
+    """Regular cross entropy loss.
+
+    Args:
+      context: a Context
+      logits: a Tensor, the logits from the decoder
+      targets: an Tensor
+      output_vocab_dim: a Dimension
+
+    Returns:
+      A 0-dimensional tensor of the loss.
+    """
+    off_value = self.label_smoothing / output_vocab_dim.size
+    on_value = 1.0 - self.label_smoothing + off_value
+    soft_targets = mtf.one_hot(
+        targets,
+        output_vocab_dim,
+        dtype=context.activation_dtype,
+        on_value=on_value,
+        off_value=off_value)
+    loss = mtf.layers.softmax_cross_entropy_with_logits(
+        logits,
+        soft_targets,
+        output_vocab_dim,
+        z_loss=self.z_loss if context.train else 0.0)
+    weights = mtf.layers.weights_nonzero(
+        targets, dtype=context.activation_dtype)
+    return mtf.reduce_mean(loss * weights)
 
   def _call_internal(self, context, inputs, targets=None):
     """Compute logits based on inputs (all positions in parallel).
@@ -440,20 +479,8 @@ class Unitransformer(object):
           variable_dtype=context.variable_dtype,
           name="logits")
     if targets is not None and context.losses is not None:
-      off_value = self.label_smoothing / self.output_vocab_dim.size
-      on_value = 1.0 - self.label_smoothing + off_value
-      soft_targets = mtf.one_hot(
-          targets, self.output_vocab_dim,
-          dtype=context.activation_dtype,
-          on_value=on_value,
-          off_value=off_value)
-      loss = mtf.layers.softmax_cross_entropy_with_logits(
-          logits, soft_targets, self.output_vocab_dim,
-          z_loss=self.z_loss if context.train else 0.0)
-      weights = mtf.layers.weights_nonzero(
-          targets, dtype=context.activation_dtype)
-      loss = mtf.reduce_mean(loss * weights)
-      context.losses.append(loss)
+      context.losses.append(
+          self._compute_loss(context, logits, targets, self.output_vocab_dim))
     return logits
 
   def call_simple(self,
@@ -463,6 +490,7 @@ class Unitransformer(object):
                   mode=tf.estimator.ModeKeys.TRAIN,
                   variable_dtype=mtf.VariableDType(tf.float32),
                   sequence_id=None,
+                  subsequence_id=None,
                   position=None,
                   encoder_output=None,
                   encoder_sequence_id=None,
@@ -482,6 +510,7 @@ class Unitransformer(object):
       mode: a tf.estimator.ModeKeys
       variable_dtype: a mtf.VariableDType
       sequence_id: an optional Tensor
+      subsequence_id: an optional Tensor
       position: an optional Tensor
       encoder_output: an optional Tensor
       encoder_sequence_id: an optional Tensor
@@ -504,6 +533,7 @@ class Unitransformer(object):
         autoregressive=self.autoregressive,
         losses=[] if compute_loss else None,
         sequence_id=sequence_id,
+        subsequence_id=subsequence_id,
         position=position,
         encoder_output=encoder_output,
         encoder_sequence_id=encoder_sequence_id,
@@ -817,17 +847,17 @@ class Bitransformer(object):
             variable_dtype, "positional_embedding")
     return shared_params
 
-  def call_simple(
-      self,
-      inputs,
-      targets,
-      compute_loss,
-      mode=tf.estimator.ModeKeys.TRAIN,
-      variable_dtype=mtf.VariableDType(tf.float32),
-      encoder_sequence_id=None,
-      decoder_sequence_id=None,
-      encoder_position=None,
-      decoder_position=None):
+  def call_simple(self,
+                  inputs,
+                  targets,
+                  compute_loss,
+                  mode=tf.estimator.ModeKeys.TRAIN,
+                  variable_dtype=mtf.VariableDType(tf.float32),
+                  encoder_sequence_id=None,
+                  decoder_sequence_id=None,
+                  decoder_subsequence_id=None,
+                  encoder_position=None,
+                  decoder_position=None):
     """Compute logits based on inputs (all positions in parallel).
 
     This is called during training and evaluation.
@@ -840,6 +870,7 @@ class Bitransformer(object):
       variable_dtype: a mtf.VariableDType
       encoder_sequence_id: an optional Tensor
       decoder_sequence_id: an optional Tensor
+      decoder_subsequence_id: an optional Tensor
       encoder_position: an optional Tensor
       decoder_position: an optional Tensor
 
@@ -875,6 +906,7 @@ class Bitransformer(object):
         mode=mode,
         variable_dtype=variable_dtype,
         sequence_id=decoder_sequence_id,
+        subsequence_id=decoder_subsequence_id,
         encoder_output=encoder_output,
         encoder_sequence_id=encoder_sequence_id,
         position=decoder_position,

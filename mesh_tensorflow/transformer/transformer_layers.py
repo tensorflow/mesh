@@ -221,15 +221,21 @@ class SelfAttention(transformer.TransformerLayer):
       if max_relative_position is not None:
         illegal = mtf.greater(relative_position, max_relative_position)
         masks.append(mtf.cast(illegal, context.activation_dtype) * -1e9)
-    if (context.sequence_id is not None and
-        isinstance(context.sequence_id, mtf.Tensor) and
-        context.length_dim in context.sequence_id.shape):
-      masks.append(mtf.cast(
-          mtf.not_equal(
-              context.sequence_id,
-              self.rename_length_to_memory_length(
-                  context.sequence_id, context)),
-          context.activation_dtype) * -1e9)
+    sequence_id = None
+    # Subsequence id should only be set if we are in the decoder and have
+    # multiple targets per input. This will allow each sub-target to only attend
+    # to itself.
+    if isinstance(context.subsequence_id, mtf.Tensor):
+      sequence_id = context.subsequence_id
+    elif isinstance(context.sequence_id, mtf.Tensor):
+      sequence_id = context.sequence_id
+    if (sequence_id is not None and context.length_dim in sequence_id.shape):
+      masks.append(
+          mtf.cast(
+              mtf.not_equal(
+                  sequence_id,
+                  self.rename_length_to_memory_length(sequence_id, context)),
+              context.activation_dtype) * -1e9)
     return mtf.add_n(masks) if masks else None
 
   @property
