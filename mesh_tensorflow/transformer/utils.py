@@ -31,6 +31,7 @@ import mesh_tensorflow as mtf
 from mesh_tensorflow.transformer import dataset as transformer_dataset
 from mesh_tensorflow.transformer import transformer
 import numpy as np
+import six
 import tensorflow as tf
 import tensorflow_datasets as tfds
 
@@ -47,8 +48,8 @@ _DEFAULT_CONFIG_FILE = "./gin/defaults.gin"
 
 # List of features used by model.
 _INPUT_FEATURES = [
-    "inputs", "inputs_position", "inputs_segmentation",
-    "targets", "targets_position", "targets_segmentation",
+    "inputs", "inputs_position", "inputs_segmentation", "targets",
+    "targets_position", "targets_segmentation", "targets_subsegmentation"
 ]
 
 
@@ -252,7 +253,8 @@ def tpu_estimator_model_fn(model_type,
                            learning_rate_schedule=None,
                            optimizer=None,
                            outer_batch_size=1,
-                           tpu_summaries=False):
+                           tpu_summaries=False,
+                           predict_fn=None):
   """Create a TPUEstimator model function.
 
   Args:
@@ -268,13 +270,14 @@ def tpu_estimator_model_fn(model_type,
     keep_checkpoint_max: an integer
     save_checkpoints_steps: an integer
     learning_rate_schedule: an optional function taking the scalar named
-      argument `step` and return the scalar learning rate.
-      Alternatively, a constant.
+      argument `step` and return the scalar learning rate. Alternatively, a
+      constant.
     optimizer: a class extending optimize.Optimizer, required for training
     outer_batch_size: outer batch dimension that could be used to enable the mix
       of data-parallel and model-parallel training of MoE models
-    tpu_summaries: a boolean - if True, then use rewrites to make summaries
-      work on TPU.  This may be slow, since it uses a host call hack.
+    tpu_summaries: a boolean - if True, then use rewrites to make summaries work
+      on TPU.  This may be slow, since it uses a host call hack.
+    predict_fn: an optional function, see docs for run for more information
 
   Returns:
     a function to be passed to TPUEstimator
@@ -340,14 +343,21 @@ def tpu_estimator_model_fn(model_type,
           mesh, x, feature_shape, name=key)
 
     if mode == tf.estimator.ModeKeys.PREDICT:
+      feature_shape = mtf.Shape([
+          mtf.Dimension("batch", batch_size),
+          mtf.Dimension("length", sequence_length)
+      ])
+      mtf_features = {
+          k: mtf.reshape(v, feature_shape)
+          for k, v in six.iteritems(mtf_features)
+      }
       inputs = mtf_features["inputs"]
-      inputs = mtf.reshape(
-          inputs,
-          mtf.Shape([
-              mtf.Dimension("batch", batch_size),
-              mtf.Dimension("length", sequence_length)
-          ]))
-      if isinstance(transformer_model, transformer.Unitransformer):
+      if predict_fn:
+        mtf_samples = predict_fn(
+            model=transformer_model,
+            features=mtf_features,
+            variable_dtype=get_variable_dtype())
+      elif isinstance(transformer_model, transformer.Unitransformer):
         mtf_samples = transformer_model.sample_autoregressive(
             inputs, variable_dtype=get_variable_dtype())
       elif isinstance(transformer_model,
@@ -964,7 +974,8 @@ def run(tpu_job_name,
         mesh_shape=gin.REQUIRED,
         layout_rules=gin.REQUIRED,
         learning_rate_schedule=None,
-        optimizer=None):
+        optimizer=None,
+        predict_fn=None):
   """Run training/eval/inference.
 
   Args:
@@ -975,8 +986,8 @@ def run(tpu_job_name,
     model_dir: string, estimator model_dir
     model_type: a string - either "bitransformer", "bi_student_teacher", lm" or
       "aligned"
-    vocabulary: a vocabulary.Vocabulary or
-      (inputs_vocabulary, targets_vocabulary) tuple.
+    vocabulary: a vocabulary.Vocabulary or (inputs_vocabulary,
+      targets_vocabulary) tuple.
     train_dataset_fn: A function returning a tf.data.Dataset. Must be provided
       for mode="train". Should accept the following arguments:
         - batch_size: int, number of entries in each batch.
@@ -1017,17 +1028,25 @@ def run(tpu_job_name,
     eval_summary_dir: str, path to write TensorBoard events file summaries for
       eval. If None, use model_dir/eval_{split}.
     batch_size: An integer or a (method, value) pair to pass to
-      compute_batch_size(). Note that this is
-      the global batch size and not the per-shard batch size.
+      compute_batch_size(). Note that this is the global batch size and not the
+      per-shard batch size.
     train_steps: An integer or a function with the same signature as
       auto_train_steps().  Total number of training steps.
     sequence_length: an integer
     mesh_shape: an input to mtf.convert_to_shape()
     layout_rules: an input to mtf.convert_to_layout_rules()
-    learning_rate_schedule: an optional function taking the scalar name
-      argument `step` and the numeric argument `total_train_steps` and return
-      the scalar learning rate
+    learning_rate_schedule: an optional function taking the scalar name argument
+      `step` and the numeric argument `total_train_steps` and return the scalar
+      learning rate
     optimizer: a class extending optimize.Optimizer, required for training
+    predict_fn: an optional function that can be used to override the default
+      transformer prediction behavior. Must return a tensor of shape [batch_dim,
+      length_dim] that will be the prediction for each example. Must accept the
+      following arguments:
+        - model: a Unitransformer or Bitransformer
+        - features: a dict representing an example. Every value will be an
+          mtf.Tensor with shape [batch_dim, length_dim].
+        - variable_dtype: an mtf.VariableDType
   """
   if not isinstance(batch_size, int):
     batch_size = compute_batch_size(
@@ -1096,7 +1115,8 @@ def run(tpu_job_name,
       learning_rate_schedule=learning_rate_schedule,
       keep_checkpoint_max=keep_checkpoint_max,
       save_checkpoints_steps=save_checkpoints_steps,
-      optimizer=optimizer)
+      optimizer=optimizer,
+      predict_fn=predict_fn)
 
   estimator = tpu_estimator.TPUEstimator(
       model_fn=model_fn,

@@ -178,6 +178,23 @@ class Shape(object):
         [Dimension(name, new_size) if d.name == name else d
          for d in self.dims])
 
+  def get_dim_by_name(self, name):
+    """Get the Dimension with `name` from this shape.
+
+    Args:
+      name: a string, the name of the dimension we wish to get
+
+    Returns:
+      Dimension with `name`
+    Raises:
+      ValueError: if the shape does not contain a dimension with `name`
+    """
+    for d in self.dims:
+      if d.name == name:
+        return d
+    raise ValueError("Dimension {} not found in {}.".format(
+        name, self.to_string))
+
 
 def convert_to_shape(x):
   """Converts input to a Shape.
