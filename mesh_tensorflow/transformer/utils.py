@@ -958,6 +958,7 @@ def run(tpu_job_name,
         iterations_per_loop=100,
         save_checkpoints_steps=1000,
         keep_checkpoint_max=10,
+        eval_summary_dir=None,
         batch_size=("tokens_per_replica", 2048),
         train_steps=auto_train_steps,
         sequence_length=gin.REQUIRED,
@@ -996,8 +997,10 @@ def run(tpu_job_name,
           feature keys 'inputs' and 'targets_plaintext'.
         - postprocess_fn: function which converts model outputs to evalable str
         - list_of_metric_fns: list of metric functions with the call signature
-          `metric_fn(targets, predictions)`. TensorBoard summaries and other
-          tags will be written out using `metric_fn.__name__`.
+          `metric_fn(targets, predictions)` which return either a scalar value
+          or a dict mapping submetric names to scalar values. TensorBoard
+          summaries and other tags will be written out using
+          `metric_fn.__name__`.
         - dataset_size: number of entries in the dataset.
         - padded_dataset_size: number of entries in the dataset after padding.
     dataset_split: a string
@@ -1012,6 +1015,8 @@ def run(tpu_job_name,
     iterations_per_loop: integer, steps per train loop
     save_checkpoints_steps: integer, steps per checkpoint
     keep_checkpoint_max: an integer, keep up to this many checkpoints
+    eval_summary_dir: str, path to write TensorBoard events file summaries for
+      eval. If None, use model_dir/eval_{split}.
     batch_size: An integer or a (method, value) pair to pass to
       compute_batch_size(). Note that this is
       the global batch size and not the per-shard batch size.
@@ -1182,10 +1187,10 @@ def run(tpu_job_name,
         predictions = [eval_dataset.postprocess_fn(d) for d in decodes]
         # TODO(craffel): Log predictions and targets.
 
-        tb_summary_dir = os.path.join(
+        eval_summary_dir = eval_summary_dir or os.path.join(
             model_dir, "{}_eval".format(dataset_split)
         )
-        summary_writer = tf.summary.FileWriter(tb_summary_dir)
+        summary_writer = tf.summary.FileWriter(eval_summary_dir)
         global_step = int(get_step_from_checkpoint_path(checkpoint_path))
         for metric_fn in eval_dataset.metric_fns:
           summary = tf.Summary()
@@ -1193,10 +1198,18 @@ def run(tpu_job_name,
               eval_dataset.name, dataset_split, metric_fn.__name__
           )
           targets = cached_targets[eval_dataset.name]
-          metric_value = metric_fn(targets, predictions)
-          tf.logging.info("%s at step %d: %.3f", tag, global_step, metric_value)
-          summary.value.add(tag=tag, simple_value=metric_value)
-          summary_writer.add_summary(summary, global_step)
+          metric_result = metric_fn(targets, predictions)
+          if isinstance(metric_result, dict):
+            tags = ["{}.{}".format(tag, key) for key in metric_result]
+            metric_values = metric_result.valus()
+          else:
+            tags, metric_values = [tag], [metric_result]
+          for tag, metric_value in zip(tags, metric_values):
+            tf.logging.info(
+                "%s at step %d: %.3f", tag, global_step, metric_value
+            )
+            summary.value.add(tag=tag, simple_value=metric_value)
+            summary_writer.add_summary(summary, global_step)
         summary_writer.flush()
 
   elif mode == "infer":
