@@ -41,7 +41,7 @@ class DenseReluDense(transformer.TransformerLayer):
       dropout_rate: a floating-point number
     """
     self.hidden_size = hidden_size
-    self.dropout_rate = 0.0
+    self.dropout_rate = dropout_rate
 
   def call(self, context, x, losses=None):
     """Call the layer."""
