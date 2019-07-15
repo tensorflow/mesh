@@ -1220,7 +1220,7 @@ def run(tpu_job_name,
           metric_result = metric_fn(targets, predictions)
           if isinstance(metric_result, dict):
             tags = ["{}.{}".format(tag, key) for key in metric_result]
-            metric_values = metric_result.valus()
+            metric_values = metric_result.values()
           else:
             tags, metric_values = [tag], [metric_result]
           for tag, metric_value in zip(tags, metric_values):
