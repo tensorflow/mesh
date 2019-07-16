@@ -574,9 +574,6 @@ def encode_inputs(inputs,
 @gin.configurable
 def decode(estimator,
            input_fn,
-           dataset_size,
-           padded_dataset_size,
-           batch_size,
            vocabulary,
            checkpoint_path=None):
   """Decode from an input_fn.
@@ -584,10 +581,6 @@ def decode(estimator,
   Args:
     estimator: a TPUEstimator
     input_fn: function that returns a tf.Dataset
-    dataset_size: integer or np.inf. Number of examples in the dataset
-    padded_dataset_size: integer or np.inf. Number of examples in the padded
-      dataset.
-    batch_size: an integer
     vocabulary: a mtf.transformer.vocabulary.Vocabulary
     checkpoint_path: an optional string
 
@@ -607,39 +600,6 @@ def decode(estimator,
       # LOG every power of 2.
       tf.logging.info("decoded {}: {}".format(i, output_string))
 
-  # BUG WORKAROUND - on TF1.13 and earlier, the output for each batch is
-  # repeated a number of times equal to the number of cores.
-  tf.logging.info(
-      "num examples in dataset (dataset_size): %d\n"
-      "num_examples in padded dataset (padded_dataset_size): %d"
-      "len(decodes): %d",
-      dataset_size, padded_dataset_size, len(decodes))
-  if np.isinf(padded_dataset_size):
-    tf.logging.warning(
-        "Unable to infer if examples are repeated per TPU core! "
-        "padded_dataset_size = %f", padded_dataset_size)
-  elif len(decodes) == padded_dataset_size:
-    tf.logging.info("number of decodes matches number of inputs")
-  elif len(decodes) % padded_dataset_size == 0:
-    num_cores = len(decodes) // padded_dataset_size
-    tf.logging.info("output is repeated num_cores times - removing extras")
-
-    def keep(i):
-      return i % (batch_size * num_cores) < batch_size
-
-    decodes = [d for i, d in enumerate(decodes) if keep(i)]
-
-  # Since we replicate a batch enough times to fill the min_dataset_size, this
-  # might not be an integer number of repeats. So we take the first dataset_size
-  # examples.
-  if np.isinf(padded_dataset_size):
-    tf.logging.warning(
-        "Unable to infer if examples were repeated to fill TPU buffers! "
-        "dataset_size = %f", dataset_size)
-  elif len(decodes) != dataset_size:
-    tf.logging.info("Taking the first %d examples of %d",
-                    dataset_size, len(decodes))
-    decodes = decodes[:dataset_size]
   return decodes
 
 
@@ -744,11 +704,13 @@ def decode_from_file(estimator,
     dataset = dataset.batch(batch_size, drop_remainder=True)
     return dataset
 
-  dataset_size = len(inputs)
-  padded_dataset_size = len(all_input_ids)
   checkpoint_step = get_step_from_checkpoint_path(checkpoint_path)
-  decodes = decode(estimator, input_fn, dataset_size, padded_dataset_size,
-                   batch_size, vocabulary, checkpoint_path=checkpoint_path)
+  decodes = decode(
+      estimator, input_fn, vocabulary, checkpoint_path=checkpoint_path
+  )
+  # Remove any padded examples
+  dataset_size = len(inputs)
+  decodes = decodes[:dataset_size]
   output_filename = "{}-{}".format(output_filename, checkpoint_step)
   log_pred_target(decodes, None, dataset_size, vocabulary,
                   pred_output_filename=output_filename)
@@ -1012,7 +974,6 @@ def run(tpu_job_name,
           summaries and other tags will be written out using
           `metric_fn.__name__`.
         - dataset_size: number of entries in the dataset.
-        - padded_dataset_size: number of entries in the dataset after padding.
     dataset_split: a string
     autostack: boolean, internally combine variables
     checkpoint_step: int, list of ints, or None. Only used when mode="eval" or
@@ -1151,6 +1112,13 @@ def run(tpu_job_name,
         vocabulary=vocabulary,
         dataset_split=dataset_split,
     )
+    # Convert to EvalDataset tuple in case eval_dataset_fn returns raw tuples
+    eval_datasets = [transformer_dataset.EvalDataset(*d) for d in eval_datasets]
+
+    if all([not d.metric_fns for d in eval_datasets]):
+      raise ValueError(
+          "All provided EvalDatasets have metric_fns=[]; eval is not possible."
+      )
 
     # Pre-load in all of the targets once before entering continuous eval loop
     cached_targets = {}
@@ -1158,12 +1126,11 @@ def run(tpu_job_name,
     # or else TF will complain that we modified the graph
     with tf.Graph().as_default():
       for eval_dataset in eval_datasets:
-        eval_dataset = transformer_dataset.EvalDataset(*eval_dataset)
-        # Only cache targets for those tasks with eval functions provides
         if eval_dataset.metric_fns:
           ds = eval_dataset.dataset_fn()
-          # De-batch the dataset
+          # De-batch the dataset so that we iterate over examples, not batches
           ds = ds.flat_map(tf.data.Dataset.from_tensor_slices)
+          # Create list of postprocessed text targets
           ds = tfds.as_numpy(ds)
           targets = [
               eval_dataset.postprocess_fn(d["targets_plaintext"]) for d in ds
@@ -1171,7 +1138,31 @@ def run(tpu_job_name,
           targets = targets[:eval_dataset.dataset_size]
           cached_targets[eval_dataset.name] = targets
 
+    def input_fn(params):
+      """Eval input function for estimator."""
+      del params
+      # Concatenate all dataset inputs to only have to do one decode loop
+      combined_ds = None
+      for eval_dataset in eval_datasets:
+        # Only cache targets for those tasks with eval functions provides
+        if eval_dataset.metric_fns:
+          ds = eval_dataset.dataset_fn()
+          # Only pass those variables which will be used for decoding
+          ds = ds.map(
+              lambda x: {k: v for k, v in x.items() if k in _INPUT_FEATURES}
+          )
+          combined_ds = ds if not combined_ds else combined_ds.concatenate(ds)
+      return combined_ds
+
+    eval_summary_dir = eval_summary_dir or os.path.join(
+        model_dir, "{}_eval".format(dataset_split)
+    )
+    summary_writer = tf.summary.FileWriter(eval_summary_dir)
+
     for checkpoint_path in get_checkpoint_iterator(checkpoint_step, model_dir):
+      decodes = decode(estimator, input_fn, vocabulary, checkpoint_path)
+      # Keep track of where in the predictions list each EvalDataset starts
+      dataset_start = 0
       for eval_dataset in eval_datasets:
         eval_dataset = transformer_dataset.EvalDataset(*eval_dataset)
         if not eval_dataset.metric_fns:
@@ -1179,37 +1170,19 @@ def run(tpu_job_name,
               "Skipping %s because metric_fns is empty", eval_dataset.name
           )
           continue
-        metric_names = [metric.__name__ for metric in eval_dataset.metric_fns]
-        tf.logging.info(
-            "Evaluating %s on metrics %s", eval_dataset.name, metric_names
-        )
-        tf.logging.info("on split %s", dataset_split)
+        # Extract the portion of decodes corresponding to this dataset
+        dataset_end = dataset_start + eval_dataset.dataset_size
+        dataset_decodes = decodes[dataset_start:dataset_end]
+        predictions = [eval_dataset.postprocess_fn(d) for d in dataset_decodes]
+        # Set the start location for the next dataset to be the number of
+        # batches in this dataset
+        dataset_batches = int(np.ceil(eval_dataset.dataset_size/batch_size))
+        entries_in_padded_dataset = dataset_batches*batch_size
+        padded_dataset_end = dataset_start + entries_in_padded_dataset
+        dataset_start = padded_dataset_end
 
-        def input_fn(params):
-          del params
-          ds = eval_dataset.dataset_fn()
-          # Only pass those variables which will be used for decoding
-          ds = ds.map(
-              lambda x: {k: v for k, v in x.items() if k in _INPUT_FEATURES}
-          )
-          return ds
-
-        decodes = decode(
-            estimator,
-            input_fn,
-            eval_dataset.dataset_size,
-            eval_dataset.padded_dataset_size,
-            batch_size,
-            vocabulary,
-            checkpoint_path=checkpoint_path,
-        )
-        predictions = [eval_dataset.postprocess_fn(d) for d in decodes]
         # TODO(craffel): Log predictions and targets.
 
-        eval_summary_dir = eval_summary_dir or os.path.join(
-            model_dir, "{}_eval".format(dataset_split)
-        )
-        summary_writer = tf.summary.FileWriter(eval_summary_dir)
         global_step = int(get_step_from_checkpoint_path(checkpoint_path))
         for metric_fn in eval_dataset.metric_fns:
           summary = tf.Summary()
@@ -1230,6 +1203,8 @@ def run(tpu_job_name,
             summary.value.add(tag=tag, simple_value=metric_value)
             summary_writer.add_summary(summary, global_step)
         summary_writer.flush()
+
+      assert dataset_start == len(decodes)
 
   elif mode == "infer":
     for checkpoint_path in get_checkpoint_iterator(checkpoint_step, model_dir):

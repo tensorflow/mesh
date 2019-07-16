@@ -718,6 +718,5 @@ EvalDataset = collections.namedtuple(
         "postprocess_fn",  # function which converts decodes to evalable strs
         "metric_fns",  # list of metric_fn(targets, predictions)
         "dataset_size",  # number of entries in the dataset
-        "padded_dataset_size",  # number of entries in the padded dataset
     ]
 )
