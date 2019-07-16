@@ -969,10 +969,9 @@ def run(tpu_job_name,
           feature keys 'inputs' and 'targets_plaintext'.
         - postprocess_fn: function which converts model outputs to evalable str
         - list_of_metric_fns: list of metric functions with the call signature
-          `metric_fn(targets, predictions)` which return either a scalar value
-          or a dict mapping submetric names to scalar values. TensorBoard
-          summaries and other tags will be written out using
-          `metric_fn.__name__`.
+          `metric_fn(targets, predictions)` which returns a dict mapping
+          submetric names to scalar values. TensorBoard summaries and other tags
+          will be written out using the submetric names.
         - dataset_size: number of entries in the dataset.
     dataset_split: a string
     autostack: boolean, internally combine variables
@@ -1186,17 +1185,12 @@ def run(tpu_job_name,
         global_step = int(get_step_from_checkpoint_path(checkpoint_path))
         for metric_fn in eval_dataset.metric_fns:
           summary = tf.Summary()
-          tag = "eval/{}/{}/{}".format(
-              eval_dataset.name, dataset_split, metric_fn.__name__
-          )
           targets = cached_targets[eval_dataset.name]
           metric_result = metric_fn(targets, predictions)
-          if isinstance(metric_result, dict):
-            tags = ["{}.{}".format(tag, key) for key in metric_result]
-            metric_values = metric_result.values()
-          else:
-            tags, metric_values = [tag], [metric_result]
-          for tag, metric_value in zip(tags, metric_values):
+          for metric_name, metric_value in metric_result.items():
+            tag = "eval/{}/{}/{}".format(
+                eval_dataset.name, dataset_split, metric_name
+            )
             tf.logging.info(
                 "%s at step %d: %.3f", tag, global_step, metric_value
             )

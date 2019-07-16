@@ -716,7 +716,7 @@ EvalDataset = collections.namedtuple(
         "name",  # string, the task name
         "dataset_fn",  # function which returns a tf.data.Dataset
         "postprocess_fn",  # function which converts decodes to evalable strs
-        "metric_fns",  # list of metric_fn(targets, predictions)
+        "metric_fns",  # list of metric_fn(targets, predictions) returning dicts
         "dataset_size",  # number of entries in the dataset
     ]
 )
