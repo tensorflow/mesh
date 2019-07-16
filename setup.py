@@ -20,7 +20,7 @@ setup(
     ],
     extras_require={
         'auto_mtf': ['ortools>=7.0.6546'],
-        'gin-config': ['gin-config>=0.1.4'],
+        'gin-config': ['gin-config>=0.2.0'],
         'tensorflow': ['tensorflow>=1.9.0'],
         'tensorflow_gpu': ['tensorflow-gpu>=1.9.0'],
         'tests': [
