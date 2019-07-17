@@ -967,7 +967,8 @@ def run(tpu_job_name,
         - dataset_fn: function which returns a tf.data.Dataset of tokenized and
           padded examples. Must not require any arguments and must include the
           feature keys 'inputs' and 'targets_plaintext'.
-        - postprocess_fn: function which converts model outputs to evalable str
+        - postprocess_fn: function which converts plaintext targets to values
+          that can be processed by a `metric_fn`.
         - list_of_metric_fns: list of metric functions with the call signature
           `metric_fn(targets, predictions)` which returns a dict mapping
           submetric names to scalar values. TensorBoard summaries and other tags
@@ -1129,12 +1130,13 @@ def run(tpu_job_name,
           ds = eval_dataset.dataset_fn()
           # De-batch the dataset so that we iterate over examples, not batches
           ds = ds.flat_map(tf.data.Dataset.from_tensor_slices)
+          # Strip off padded examples.
+          ds = ds.take(eval_dataset.dataset_size)
           # Create list of postprocessed text targets
           ds = tfds.as_numpy(ds)
           targets = [
-              eval_dataset.postprocess_fn(d["targets_plaintext"]) for d in ds
-          ]
-          targets = targets[:eval_dataset.dataset_size]
+              eval_dataset.postprocess_fn(d["targets_plaintext"], example=d)
+              for d in ds]
           cached_targets[eval_dataset.name] = targets
 
     def input_fn(params):
@@ -1172,7 +1174,9 @@ def run(tpu_job_name,
         # Extract the portion of decodes corresponding to this dataset
         dataset_end = dataset_start + eval_dataset.dataset_size
         dataset_decodes = decodes[dataset_start:dataset_end]
-        predictions = [eval_dataset.postprocess_fn(d) for d in dataset_decodes]
+        predictions = [
+            eval_dataset.postprocess_fn(d, example=None)
+            for d in dataset_decodes]
         # Set the start location for the next dataset to be the number of
         # batches in this dataset
         dataset_batches = int(np.ceil(eval_dataset.dataset_size/batch_size))
