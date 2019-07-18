@@ -902,14 +902,18 @@ def get_checkpoint_iterator(checkpoint_step, model_dir):
           closest,
           target_checkpoint,
       )
-    return os.path.join(model_dir, "model.ckpt-{}".format(closest))
+    return closest
+
+  def _get_checkpoint_path(step):
+    return os.path.join(model_dir, "model.ckpt-{}".format(step))
 
   if checkpoint_step is None:
     return tf.contrib.training.checkpoints_iterator(model_dir)
   elif isinstance(checkpoint_step, int):
-    return [_get_closest_checkpoint(checkpoint_step)]
+    return [_get_checkpoint_path(_get_closest_checkpoint(checkpoint_step))]
   else:
-    return [_get_closest_checkpoint(c) for c in checkpoint_step]
+    closests = np.unique([_get_closest_checkpoint(c) for c in checkpoint_step])
+    return [_get_checkpoint_path(closest) for closest in closests]
 
 
 @gin.configurable
@@ -924,7 +928,7 @@ def run(tpu_job_name,
         eval_dataset_fn=None,
         dataset_split="train",
         autostack=True,
-        checkpoint_step=None,
+        eval_checkpoint_step=None,
         mode="train",
         iterations_per_loop=100,
         save_checkpoints_steps=1000,
@@ -976,10 +980,10 @@ def run(tpu_job_name,
         - dataset_size: number of entries in the dataset.
     dataset_split: a string
     autostack: boolean, internally combine variables
-    checkpoint_step: int, list of ints, or None. Only used when mode="eval" or
-      mode="infer". If an int or list of ints, evaluation or inference will be
-      run on the checkpoint files  in `model_dir` whose global steps are closest
-      to the global steps provided. If None and mode="eval", run eval
+    eval_checkpoint_step: int, list of ints, or None. Only used when mode="eval"
+      or mode="infer". If an int or list of ints, evaluation or inference will
+      be run on the checkpoint files in `model_dir` whose global steps are
+      closest to the global steps provided. If None and mode="eval", run eval
       continuously waiting for new checkpoints via
       `tf.contrib.training.checkpoints_iterator`.
     mode: string, train/eval/infer
@@ -1160,7 +1164,8 @@ def run(tpu_job_name,
     )
     summary_writer = tf.summary.FileWriter(eval_summary_dir)
 
-    for checkpoint_path in get_checkpoint_iterator(checkpoint_step, model_dir):
+    checkpoint_paths = get_checkpoint_iterator(eval_checkpoint_step, model_dir)
+    for checkpoint_path in checkpoint_paths:
       decodes = decode(estimator, input_fn, vocabulary, checkpoint_path)
       # Keep track of where in the predictions list each EvalDataset starts
       dataset_start = 0
@@ -1205,7 +1210,8 @@ def run(tpu_job_name,
       assert dataset_start == len(decodes)
 
   elif mode == "infer":
-    for checkpoint_path in get_checkpoint_iterator(checkpoint_step, model_dir):
+    checkpoint_paths = get_checkpoint_iterator(eval_checkpoint_step, model_dir)
+    for checkpoint_path in checkpoint_paths:
       decode_from_file(
           estimator,
           vocabulary=vocabulary,
