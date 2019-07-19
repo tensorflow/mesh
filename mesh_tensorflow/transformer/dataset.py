@@ -526,9 +526,13 @@ def pack_dataset(dataset, length, keys=None, use_custom_ops=False):
   dataset = dataset.padded_batch(
       batch_size, padded_shapes={k: [-1] for k in keys})
   if use_custom_ops and len(keys) <= 2:
-    return _pack_with_custom_ops(dataset, keys, length)
+    dataset = _pack_with_custom_ops(dataset, keys, length)
   else:
-    return _pack_with_tf_ops(dataset, keys, length)
+    dataset = _pack_with_tf_ops(dataset, keys, length)
+
+  # Set the Tensor shapes correctly since they get lost in the process.
+  return dataset.map(
+      lambda x: {k: tf.reshape(v, [length]) for k, v in x.items()})
 
 
 def _pack_with_tf_ops(dataset, keys, length):
