@@ -603,50 +603,18 @@ def decode(estimator,
   return decodes
 
 
-def log_pred_target(decodes, dataset, dataset_size, vocabulary,
-                    pred_output_filename=None,
-                    target_output_filename=None):
-  """Log predictions and targets."""
+def write_lines_to_file(lines, filename):
+  """Write each line to a filename, replacing the file if it exists.
 
-  vocab_size = targets_vocabulary(vocabulary).vocab_size
-
-  # Write out predicted strings
-  if pred_output_filename is not None:
-    if tf.io.gfile.exists(pred_output_filename):
-      tf.io.gfile.remove(pred_output_filename)
-    with tf.io.gfile.GFile(pred_output_filename, "w") as output_file:
-      for d in decodes:
-        output_file.write(d + "\n")
-
-  # Write out targets
-  if target_output_filename is not None:
-    if dataset is None:
-      raise ValueError(
-          "Must provide a dataset if target_output_filename is set.")
-    dataset = tfds.as_numpy(dataset)
-    count = 0
-    # Break through both for-loops by setting broken to be True.
-    broken = False
-    if tf.io.gfile.exists(target_output_filename):
-      tf.io.gfile.remove(target_output_filename)
-    with tf.io.gfile.GFile(target_output_filename, "w") as output_file:
-      for input_target in dataset:
-        if "targets" not in input_target:
-          raise ValueError("The input_fn provided to decode does not have a "
-                           "value for \"targets\"")
-        for ids in input_target["targets"]:
-          output_ids = clean_decodes(ids, vocab_size)
-          output_string = targets_vocabulary(vocabulary).decode(
-              [int(x) for x in output_ids])
-          output_file.write(output_string + "\n")
-          count += 1
-          if count >= dataset_size:
-            broken = True
-            break
-        if broken:
-          break
-
-  return decodes
+  Args:
+    lines: list of str, lines to write out.
+    filename: str, path to filename.
+  """
+  if tf.io.gfile.exists(filename):
+    tf.io.gfile.remove(filename)
+  with tf.io.gfile.GFile(filename, "w") as output_file:
+    for line in lines:
+      output_file.write("{}\n".format(line))
 
 
 def get_step_from_checkpoint_path(checkpoint_path):
@@ -712,8 +680,7 @@ def decode_from_file(estimator,
   dataset_size = len(inputs)
   decodes = decodes[:dataset_size]
   output_filename = "{}-{}".format(output_filename, checkpoint_step)
-  log_pred_target(decodes, None, dataset_size, vocabulary,
-                  pred_output_filename=output_filename)
+  write_lines_to_file(decodes, output_filename)
 
 
 @gin.configurable
@@ -1116,13 +1083,27 @@ def run(tpu_job_name,
         vocabulary=vocabulary,
         dataset_split=dataset_split,
     )
-    # Convert to EvalDataset tuple in case eval_dataset_fn returns raw tuples
-    eval_datasets = [transformer_dataset.EvalDataset(*d) for d in eval_datasets]
 
-    if all([not d.metric_fns for d in eval_datasets]):
+    valid_eval_datasets = []
+    for eval_dataset in eval_datasets:
+      if not eval_dataset.metric_fns:
+        tf.logging.info(
+            "Skipping %s because metric_fns is empty", eval_dataset.name
+        )
+        continue
+      # Convert to EvalDataset tuple in case eval_dataset_fn returns raw tuples
+      valid_eval_datasets.append(transformer_dataset.EvalDataset(*eval_dataset))
+    eval_datasets = valid_eval_datasets
+
+    if not eval_datasets:
       raise ValueError(
           "All provided EvalDatasets have metric_fns=[]; eval is not possible."
       )
+
+    eval_summary_dir = eval_summary_dir or os.path.join(
+        model_dir, "{}_eval".format(dataset_split)
+    )
+    summary_writer = tf.summary.FileWriter(eval_summary_dir)
 
     # Pre-load in all of the targets once before entering continuous eval loop
     cached_targets = {}
@@ -1141,6 +1122,10 @@ def run(tpu_job_name,
           targets = [
               eval_dataset.postprocess_fn(d["targets_plaintext"], example=d)
               for d in ds]
+          targets_filename = os.path.join(
+              eval_summary_dir, "{}_targets".format(eval_dataset.name),
+          )
+          write_lines_to_file(targets, targets_filename)
           cached_targets[eval_dataset.name] = targets
 
     def input_fn(params):
@@ -1159,23 +1144,12 @@ def run(tpu_job_name,
           combined_ds = ds if not combined_ds else combined_ds.concatenate(ds)
       return combined_ds
 
-    eval_summary_dir = eval_summary_dir or os.path.join(
-        model_dir, "{}_eval".format(dataset_split)
-    )
-    summary_writer = tf.summary.FileWriter(eval_summary_dir)
-
     checkpoint_paths = get_checkpoint_iterator(eval_checkpoint_step, model_dir)
     for checkpoint_path in checkpoint_paths:
       decodes = decode(estimator, input_fn, vocabulary, checkpoint_path)
       # Keep track of where in the predictions list each EvalDataset starts
       dataset_start = 0
       for eval_dataset in eval_datasets:
-        eval_dataset = transformer_dataset.EvalDataset(*eval_dataset)
-        if not eval_dataset.metric_fns:
-          tf.logging.info(
-              "Skipping %s because metric_fns is empty", eval_dataset.name
-          )
-          continue
         # Extract the portion of decodes corresponding to this dataset
         dataset_end = dataset_start + eval_dataset.dataset_size
         dataset_decodes = decodes[dataset_start:dataset_end]
@@ -1189,17 +1163,20 @@ def run(tpu_job_name,
         padded_dataset_end = dataset_start + entries_in_padded_dataset
         dataset_start = padded_dataset_end
 
-        # TODO(craffel): Log predictions and targets.
-
         global_step = int(get_step_from_checkpoint_path(checkpoint_path))
+
+        predictions_filename = os.path.join(
+            eval_summary_dir,
+            "{}_{}_predictions".format(eval_dataset.name, global_step),
+        )
+        write_lines_to_file(predictions, predictions_filename)
+
         for metric_fn in eval_dataset.metric_fns:
           summary = tf.Summary()
           targets = cached_targets[eval_dataset.name]
           metric_result = metric_fn(targets, predictions)
           for metric_name, metric_value in metric_result.items():
-            tag = "eval/{}/{}/{}".format(
-                eval_dataset.name, dataset_split, metric_name
-            )
+            tag = "eval/{}/{}".format(eval_dataset.name, metric_name)
             tf.logging.info(
                 "%s at step %d: %.3f", tag, global_step, metric_value
             )
