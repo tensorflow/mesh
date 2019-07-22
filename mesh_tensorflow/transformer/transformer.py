@@ -376,7 +376,8 @@ class Unitransformer(object):
                layout=None,
                mesh_shape=None,
                vocab_divisor=128,
-               loss_fn=None):
+               loss_fn=None,
+               positional_embedding=True):
     self.layer_stack = layer_stack
     self.model_dim = mtf.Dimension("d_model", d_model)
     self.input_vocab_dim = mtf.Dimension(
@@ -399,6 +400,7 @@ class Unitransformer(object):
     self.mesh_shape = mesh_shape
     if loss_fn:
       self._compute_loss = loss_fn
+    self.positional_embedding = positional_embedding
 
   def _compute_loss(self, context, logits, targets, output_vocab_dim):
     """Regular cross entropy loss.
@@ -450,22 +452,23 @@ class Unitransformer(object):
           mesh, self.input_vocab_dim, self.model_dim, context.variable_dtype,
           name="embedding")
     x = mtf.gather(embedding_weights, inputs, self.input_vocab_dim)
-    if "positional_embedding" in context.shared_params:
-      pos_emb_var = context.shared_params["positional_embedding"]
-    else:
-      pos_emb_var = mtf.layers.embedding_weights(
-          mesh, self.max_length_dim, self.model_dim, context.variable_dtype,
-          "positional_embedding")
-    if context.position_is_default:
-      pos_emb = mtf.rename_dimension(
-          mtf.slice(pos_emb_var, 0, context.length_dim.size,
-                    self.max_length_dim.name),
-          self.max_length_dim.name, context.length_dim.name)
-    else:
-      pos_emb = mtf.gather(
-          pos_emb_var, context.position, self.max_length_dim,
-          output_shape=x.shape)
-    x += pos_emb
+    if self.positional_embedding:
+      if "positional_embedding" in context.shared_params:
+        pos_emb_var = context.shared_params["positional_embedding"]
+      else:
+        pos_emb_var = mtf.layers.embedding_weights(
+            mesh, self.max_length_dim, self.model_dim, context.variable_dtype,
+            "positional_embedding")
+      if context.position_is_default:
+        pos_emb = mtf.rename_dimension(
+            mtf.slice(pos_emb_var, 0, context.length_dim.size,
+                      self.max_length_dim.name),
+            self.max_length_dim.name, context.length_dim.name)
+      else:
+        pos_emb = mtf.gather(
+            pos_emb_var, context.position, self.max_length_dim,
+            output_shape=x.shape)
+      x += pos_emb
     x = self.layer_stack.call(context, x)
     if self.output_vocab_dim is None:
       return x
@@ -842,9 +845,11 @@ class Bitransformer(object):
             self.encoder.model_dim,
             variable_dtype,
             name="embedding")
-        shared_params["positional_embedding"] = mtf.layers.embedding_weights(
-            mesh, self.encoder.max_length_dim, self.encoder.model_dim,
-            variable_dtype, "positional_embedding")
+        if (self.encoder.positional_embedding
+            and self.decoder.positional_embedding):
+          shared_params["positional_embedding"] = mtf.layers.embedding_weights(
+              mesh, self.encoder.max_length_dim, self.encoder.model_dim,
+              variable_dtype, "positional_embedding")
     return shared_params
 
   def call_simple(self,

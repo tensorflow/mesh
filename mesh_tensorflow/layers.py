@@ -35,6 +35,7 @@ def dense(x, output_dim, reduced_dims=None, expert_dims=None,
   Args:
     x: a mtf.Tensor of shape [..., reduced_dims].
     output_dim: a mtf.Dimension
+      alternatively, a list of mtf.Dimension
     reduced_dims: an optional list of mtf.Dimensions of x to be reduced. If
       omitted, we reduce the last dimension.
     expert_dims: an optional list of mtf.Dimension which represent different
@@ -49,15 +50,19 @@ def dense(x, output_dim, reduced_dims=None, expert_dims=None,
   Returns:
     a mtf.Tensor of shape [..., output_dim].
   """
+  if isinstance(output_dim, list):
+    output_dims = output_dim
+  else:
+    output_dims = [output_dim]
   if variable_dtype is None:
     variable_dtype = mtf.VariableDType(master_dtype, slice_dtype, x.dtype)
   if expert_dims is None:
     expert_dims = []
   if reduced_dims is None:
     reduced_dims = x.shape.dims[-1:]
-  w_shape = mtf.Shape(expert_dims + reduced_dims + [output_dim])
+  w_shape = mtf.Shape(expert_dims + reduced_dims + output_dims)
   output_shape = mtf.Shape(
-      [d for d in x.shape.dims if d not in reduced_dims] + [output_dim])
+      [d for d in x.shape.dims if d not in reduced_dims] + output_dims)
 
   with tf.variable_scope(name, default_name="dense"):
     stddev = mtf.list_product(d.size for d in reduced_dims) ** -0.5
@@ -73,7 +78,7 @@ def dense(x, output_dim, reduced_dims=None, expert_dims=None,
       b = mtf.get_variable(
           x.mesh,
           "bias",
-          mtf.Shape(expert_dims + [output_dim]),
+          mtf.Shape(expert_dims + output_dims),
           initializer=tf.zeros_initializer(),
           dtype=variable_dtype)
       y += b

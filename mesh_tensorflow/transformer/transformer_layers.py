@@ -20,9 +20,11 @@ from __future__ import division
 from __future__ import print_function
 
 import copy
+import math
 import gin
 
 import mesh_tensorflow as mtf
+from mesh_tensorflow import layers
 from mesh_tensorflow.transformer import attention
 from mesh_tensorflow.transformer import transformer
 
@@ -126,7 +128,10 @@ class SelfAttention(transformer.TransformerLayer):
                key_value_size=128,
                shared_kv=False,
                dropout_rate=0.0,
-               attention_kwargs=None):
+               attention_kwargs=None,
+               relative_attention_bias=False,
+               relative_attention_contextual=False,
+               relative_position_num_buckets=32):
     """Create a SelfAttention Layer.
 
     Args:
@@ -136,6 +141,13 @@ class SelfAttention(transformer.TransformerLayer):
       shared_kv: a boolean
       dropout_rate: a float
       attention_kwargs: a dictionary of kwargs for attention.attention
+      relative_attention_bias: a boolean
+        Add a learned bias to the logit, determined by the relative position
+        and the attention head.
+      relative_attention_contextual: a boolean
+        Add a learned linear function to the logit.  Different functions by
+        relative position and attention head.
+      relative_position_num_buckets: an integer (for relative attention)
     """
     self.num_heads = num_heads
     self.num_memory_heads = num_memory_heads
@@ -143,6 +155,9 @@ class SelfAttention(transformer.TransformerLayer):
     self.shared_kv = shared_kv
     self.dropout_rate = dropout_rate
     self.attention_kwargs = attention_kwargs or {}
+    self.relative_attention_contextual = relative_attention_contextual
+    self.relative_attention_bias = relative_attention_bias
+    self.relative_position_num_buckets = relative_position_num_buckets
 
   def attention_kwargs_from_context(self, context):
     kwargs = copy.copy(self.attention_kwargs)
@@ -197,30 +212,30 @@ class SelfAttention(transformer.TransformerLayer):
         memory_length,
         self.kv_dim,
         self.kv_dim,
-        self.compute_mask(context, memory_position),
+        self.compute_mask(context, memory_position, x),
         **self.attention_kwargs_from_context(context))
     return params.compute_output(o, output_shape=x.shape)
 
-  def compute_mask(self, context, memory_position):
+  def compute_mask(self, context, memory_position, x):
     """Compute attention mask.
 
     Args:
       context: a transformer.Context
       memory_position: an int32 tensor containing memory_length dimension.
+      x: a Tensor - the query antecedent - required for relative attention
     Returns:
       a Tensor or None
     """
     masks = []
     min_relative_position = self.min_relative_position(context)
     max_relative_position = self.max_relative_position(context)
-    if max_relative_position is not None or min_relative_position is not None:
-      relative_position = memory_position - context.position
-      if min_relative_position is not None:
-        illegal = mtf.less(relative_position, min_relative_position)
-        masks.append(mtf.cast(illegal, context.activation_dtype) * -1e9)
-      if max_relative_position is not None:
-        illegal = mtf.greater(relative_position, max_relative_position)
-        masks.append(mtf.cast(illegal, context.activation_dtype) * -1e9)
+    relative_position = memory_position - context.position
+    if min_relative_position is not None:
+      illegal = mtf.less(relative_position, min_relative_position)
+      masks.append(mtf.cast(illegal, context.activation_dtype) * -1e9)
+    if max_relative_position is not None:
+      illegal = mtf.greater(relative_position, max_relative_position)
+      masks.append(mtf.cast(illegal, context.activation_dtype) * -1e9)
     sequence_id = None
     # Subsequence id should only be set if we are in the decoder and have
     # multiple targets per input. This will allow each sub-target to only attend
@@ -236,6 +251,30 @@ class SelfAttention(transformer.TransformerLayer):
                   sequence_id,
                   self.rename_length_to_memory_length(sequence_id, context)),
               context.activation_dtype) * -1e9)
+    if self.relative_attention_bias or self.relative_attention_contextual:
+      buckets_dim = mtf.Dimension("buckets", self.relative_position_num_buckets)
+      heads_dim = mtf.Dimension("heads", self.num_heads)
+      if max_relative_position is not None and max_relative_position <= 0:
+        bidirectional = False
+      else:
+        bidirectional = True
+      rp_bucket = _relative_position_bucket(
+          relative_position,
+          bidirectional=bidirectional,
+          num_buckets=buckets_dim.size)
+      if self.relative_attention_bias:
+        rb = mtf.get_variable(
+            context.mesh, "relative_attention_bias",
+            [heads_dim, buckets_dim], dtype=context.variable_dtype)
+        rb = mtf.gather(rb, rp_bucket, buckets_dim)
+        masks.append(rb)
+      if self.relative_attention_contextual:
+        ra = layers.dense(
+            x, [buckets_dim, heads_dim],
+            variable_dtype=context.variable_dtype,
+            name="relative_attention_contextual")
+        ra = mtf.gather(ra, rp_bucket, buckets_dim)
+        masks.append(ra)
     return mtf.add_n(masks) if masks else None
 
   @property
@@ -470,7 +509,7 @@ class LocalSelfAttention(SelfAttention):
           self.memory_length(context),
           self.kv_dim,
           self.kv_dim,
-          self.compute_mask(context, memory_length),
+          self.compute_mask(context, memory_length, x),
           **self.attention_kwargs_from_context(context))
     else:
       # fancy local attention algorithm
@@ -518,3 +557,48 @@ class LocalSelfAttention(SelfAttention):
   @property
   def window_dim(self):
     return mtf.Dimension("window", self.radius)
+
+
+def _relative_position_bucket(relative_position,
+                              bidirectional=True,
+                              num_buckets=32,
+                              max_distance=128):
+  """Translate relative position to a bucket number for relative attention.
+
+  The relative position is defined as memory_position - query_position, i.e.
+  the distance in tokens from the attending position to the attended-to
+  position.  If bidirectional=False, then positive relative positions are
+  invalid.
+
+  We use smaller buckets for small absolute relative_position and larger buckets
+  for larger absolute relative_positions.  All relative positions >=max_distance
+  map to the same bucket.  All relative positions <=-max_distance map to the
+  same bucket.  This should allow for more graceful generalization to longer
+  sequences than the model has been trained on.
+
+  Args:
+    relative_position: an int32 Tensor
+    bidirectional: a boolean - whether the attention is bidirectional
+    num_buckets: an integer
+    max_distance: an integer
+  Returns:
+    a Tensor with the same shape as relative_position, containing int32
+      values in the range [0, num_buckets)
+  """
+  ret = 0
+  n = -relative_position
+  if bidirectional:
+    num_buckets //= 2
+    ret += mtf.to_int32(mtf.less(n, 0)) * num_buckets
+    n = mtf.abs(n)
+  else:
+    n = mtf.maximum(n, 0)
+  # now n is in the range [0, inf)
+  max_exact = num_buckets // 2
+  is_small = mtf.less(n, max_exact)
+  val_if_large = max_exact + mtf.to_int32(
+      mtf.log(mtf.to_float(n) / max_exact)
+      / math.log(max_distance / max_exact) * (num_buckets - max_exact))
+  val_if_large = mtf.minimum(val_if_large, num_buckets - 1)
+  ret += mtf.where(is_small, n, val_if_large)
+  return ret
