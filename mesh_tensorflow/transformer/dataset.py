@@ -88,7 +88,6 @@ from __future__ import division
 from __future__ import print_function
 
 import collections
-import functools
 import os
 import gin
 import tensorflow as tf
@@ -131,23 +130,12 @@ def pack_and_batch(dataset, batch_size, length, pack=True):
   """
   if pack:
     dataset = pack_dataset(dataset, length=length)
-  # Pad/trim length of each example to length
-  dataset = dataset.map(
-      functools.partial(trim_and_pad_all_features, length=length),
-      num_parallel_calls=tf.data.experimental.AUTOTUNE
-  )
+  # Pad/trim length of each example to length.
+  dataset = trim_and_pad_dataset(dataset, length=length),
   dataset = dataset.batch(batch_size, drop_remainder=False)
-  # Pad batch size of each batch to batch_size
-  dataset = dataset.map(
-      functools.partial(trim_and_pad_all_features, length=batch_size),
-      num_parallel_calls=tf.data.experimental.AUTOTUNE
-  )
-  # Remind TensorFlow of the shape
-  dataset = dataset.map(
-      lambda x: {k: tf.reshape(v, (batch_size, length)) for k, v in x.items()},
-      num_parallel_calls=tf.data.experimental.AUTOTUNE
-  )
-  dataset = dataset.prefetch(100)
+  # Pad final batch.
+  dataset = trim_and_pad_dataset(dataset, length=batch_size),
+  dataset = dataset.prefetch(tf.data.experimental.AUTOTUNE)
   return dataset
 
 
@@ -694,24 +682,30 @@ def _pack_with_custom_ops(dataset, keys, length):
   return dataset
 
 
-def _trim_and_pad(t, length):
-  """Trim/pad to the first axis of t to be of size length.
+def trim_and_pad_dataset(dataset, length, feature_keys=None):
+  """Trim and pad first dimension of features to size `length`.
 
   Args:
-    t: a tf.Tensor
-    length: an integer
+    dataset: tf.data.Dataset, the dataset to trimp/pad examples in.
+    length: int, the length to trim/pad to.
+    feature_keys: (optional) list of strings, the feature names to limit
+      trimming/padding to. Defaults to all features.
   Returns:
-    a tf.Tensor
+    Trimmed/padded tf.data.Dataset.
   """
-  t = t[:length]
-  paddings = [[0, length - tf.shape(t)[0]]] + [[0, 0]]*(t.get_shape().ndims - 1)
-  t = tf.pad(t, paddings)
-  return t
+  def _trim_and_pad(k, t):
+    """Trim/pad to the first axis of `t` to be of size `length`."""
+    if feature_keys and k not in feature_keys:
+      return t
+    t = t[:length]
+    pad_amt = length - tf.shape(t)[0]
+    padded_t = tf.pad(t, [(0, pad_amt)] + [(0, 0)] * (len(t.shape) - 1))
+    padded_t.set_shape([length] + t.shape[1:])
+    return padded_t
 
-
-def trim_and_pad_all_features(features, length):
-  """Trim and pad first dimension of all features to size length."""
-  return {k: _trim_and_pad(v, length) for k, v in features.items()}
+  return dataset.map(
+      lambda x: {k: _trim_and_pad(k, t) for k, t in x.items()},
+      num_parallel_calls=tf.data.experimental.AUTOTUNE)
 
 
 EvalDataset = collections.namedtuple(
@@ -721,6 +715,5 @@ EvalDataset = collections.namedtuple(
         "dataset_fn",  # function which returns a tf.data.Dataset
         "postprocess_fn",  # function which converts decodes to evalable strs
         "metric_fns",  # list of metric_fn(targets, predictions) returning dicts
-        "dataset_size",  # number of entries in the dataset
     ]
 )

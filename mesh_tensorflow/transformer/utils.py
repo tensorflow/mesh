@@ -670,6 +670,7 @@ def decode_from_file(estimator,
     del params
     dataset = tf.data.Dataset.from_tensor_slices({"inputs": all_input_ids})
     dataset = dataset.batch(batch_size, drop_remainder=True)
+    dataset = dataset.prefetch(tf.data.experimental.AUTOTUNE)
     return dataset
 
   checkpoint_step = get_step_from_checkpoint_path(checkpoint_path)
@@ -923,13 +924,11 @@ def run(tpu_job_name,
       targets_vocabulary) tuple.
     train_dataset_fn: A function returning a tf.data.Dataset. Must be provided
       for mode="train". Should accept the following arguments:
-        - batch_size: int, number of entries in each batch.
         - sequence_length: int, length of each packed or padded sequence.
         - vocabulary: Vocabulary instance to use for encoding.
         - dataset_split: str, which dataset split to load.
     eval_dataset_fn: A function returning a list of dataset.EvalDataset tuples.
       Must be provided for mode="eval". Should accept the following arguments:
-        - batch_size: int, number of entries in each batch.
         - sequence_length: int, length of each packed or padded sequence.
         - vocabulary: Vocabulary instance to use for encoding.
         - dataset_split: str, which dataset split to load.
@@ -944,7 +943,6 @@ def run(tpu_job_name,
           `metric_fn(targets, predictions)` which returns a dict mapping
           submetric names to scalar values. TensorBoard summaries and other tags
           will be written out using the submetric names.
-        - dataset_size: number of entries in the dataset.
     dataset_split: a string
     autostack: boolean, internally combine variables
     eval_checkpoint_step: int, list of ints, or None. Only used when mode="eval"
@@ -1065,10 +1063,11 @@ def run(tpu_job_name,
       raise ValueError("Must provide train_dataset_fn through gin for train.")
     def input_fn(params):
       del params
-      dataset = train_dataset_fn(batch_size=batch_size,
-                                 sequence_length=sequence_length,
+      dataset = train_dataset_fn(sequence_length=sequence_length,
                                  vocabulary=vocabulary,
                                  dataset_split=dataset_split)
+      dataset = dataset.repeat().batch(batch_size, drop_remainder=True)
+      dataset = dataset.prefetch(tf.data.experimental.AUTOTUNE)
       return dataset
 
     estimator.train(input_fn=input_fn, max_steps=train_steps)
@@ -1078,7 +1077,6 @@ def run(tpu_job_name,
       raise ValueError("Must provide eval_dataset_fn through gin for eval.")
 
     eval_datasets = eval_dataset_fn(
-        batch_size=batch_size,
         sequence_length=sequence_length,
         vocabulary=vocabulary,
         dataset_split=dataset_split,
@@ -1113,10 +1111,6 @@ def run(tpu_job_name,
       for eval_dataset in eval_datasets:
         if eval_dataset.metric_fns:
           ds = eval_dataset.dataset_fn()
-          # De-batch the dataset so that we iterate over examples, not batches
-          ds = ds.flat_map(tf.data.Dataset.from_tensor_slices)
-          # Strip off padded examples.
-          ds = ds.take(eval_dataset.dataset_size)
           # Create list of postprocessed text targets
           ds = tfds.as_numpy(ds)
           targets = [
@@ -1142,26 +1136,24 @@ def run(tpu_job_name,
               lambda x: {k: v for k, v in x.items() if k in _INPUT_FEATURES}
           )
           combined_ds = ds if not combined_ds else combined_ds.concatenate(ds)
+      combined_ds = combined_ds.batch(batch_size, drop_remainder=False)
+      # Pad the final batch.
+      combined_ds = transformer_dataset.trim_and_pad_dataset(
+          combined_ds, length=batch_size)
+      combined_ds = combined_ds.prefetch(tf.data.experimental.AUTOTUNE)
       return combined_ds
 
     checkpoint_paths = get_checkpoint_iterator(eval_checkpoint_step, model_dir)
     for checkpoint_path in checkpoint_paths:
       decodes = decode(estimator, input_fn, vocabulary, checkpoint_path)
-      # Keep track of where in the predictions list each EvalDataset starts
-      dataset_start = 0
       for eval_dataset in eval_datasets:
         # Extract the portion of decodes corresponding to this dataset
-        dataset_end = dataset_start + eval_dataset.dataset_size
-        dataset_decodes = decodes[dataset_start:dataset_end]
+        dataset_size = len(cached_targets[eval_dataset.name])
         predictions = [
             eval_dataset.postprocess_fn(d, example=None)
-            for d in dataset_decodes]
-        # Set the start location for the next dataset to be the number of
-        # batches in this dataset
-        dataset_batches = int(np.ceil(eval_dataset.dataset_size/batch_size))
-        entries_in_padded_dataset = dataset_batches*batch_size
-        padded_dataset_end = dataset_start + entries_in_padded_dataset
-        dataset_start = padded_dataset_end
+            for d in decodes[:dataset_size]]
+        # Remove the used decodes.
+        del decodes[:dataset_size]
 
         global_step = int(get_step_from_checkpoint_path(checkpoint_path))
 
@@ -1184,7 +1176,9 @@ def run(tpu_job_name,
             summary_writer.add_summary(summary, global_step)
         summary_writer.flush()
 
-      assert dataset_start == len(decodes)
+    # Only padding should remain.
+    assert (len(decodes) ==
+            sum(len(t) for t in cached_targets.values()) % batch_size)
 
   elif mode == "infer":
     checkpoint_paths = get_checkpoint_iterator(eval_checkpoint_step, model_dir)
