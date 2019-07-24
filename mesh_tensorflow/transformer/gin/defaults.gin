@@ -43,8 +43,8 @@ SelfAttention.dropout_rate = %dropout_rate
 LocalSelfAttention.dropout_rate = %dropout_rate
 LayerStack.dropout_rate = %dropout_rate
 
-# label smoothing by default for Bitransofrmer models (but not language models)
-decoder/Unitransformer.label_smoothing = 0.1
+# No label smoothing by default
+decoder/Unitransformer.label_smoothing = 0.0
 
 sequence_length = 512
 # the sequence length for this run
