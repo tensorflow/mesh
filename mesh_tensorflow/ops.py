@@ -2800,6 +2800,39 @@ def shift(x, offset, dim, wrap, name=None):
   return ShiftOperation(x, offset, dim, wrap, name=name).outputs[0]
 
 
+def dynamic_shift(x, offset, dim, wrap):
+  """Shift with dynamic offset.
+
+  Shift x right by +offset in dimension dim.
+
+  Args:
+    x: a Tensor
+    offset: an Tensor whose shape is a subset of x.shape.dims - [dim]
+    dim: a Dimension of x
+    wrap: a boolean - whether to wrap (True) or pad with zeros (False).
+
+  Returns:
+    a Tensor with the same shape and dtype as x
+  """
+  if dim not in x.shape.dims:
+    raise ValueError("dim must be a dimension of x")
+  if dim in offset.shape.dims:
+    raise ValueError("dim may not appear in offset")
+  for d in offset.shape.dims:
+    if d not in x.shape.dims:
+      raise ValueError("offset.shape %s must be a subset of x.shape %s"
+                       % (offset.shape, x.shape))
+  tmp_dim = Dimension("dynamic_shift_tmp", dim.size)
+  x_reshaped = replace_dimensions(x, dim, tmp_dim)
+  dim_range = mtf_range(x.mesh, dim, dtype=tf.int32)
+  tmp_dim_range = mtf_range(x.mesh, tmp_dim, dtype=tf.int32)
+  tmp_dim_range_offset = tmp_dim_range + offset
+  if wrap:
+    tmp_dim_range_offset = mod(tmp_dim_range_offset, dim.size)
+  perm = cast(equal(dim_range, tmp_dim_range_offset), x.dtype)
+  return einsum([x_reshaped, perm], output_shape=x.shape)
+
+
 class SliceOperation(Operation):
   """tf.slice.
 
@@ -3747,15 +3780,16 @@ def einsum(xs, output_shape=None, reduced_dims=None, name=None):
       if d not in input_dim_count:
         input_dims.append(d)
       input_dim_count[d] += 1
+  if reduced_dims is not None:
+    for d in reduced_dims:
+      if not isinstance(d, Dimension):
+        raise ValueError("reduced_dims must be a list of Dimensions.  Got %s."
+                         % (reduced_dims,))
   if output_shape is None:
     if reduced_dims is None:
       reduced_dims = [d for d, c in six.iteritems(input_dim_count) if c > 1]
     output_shape = Shape([d for d in input_dims if d not in reduced_dims])
   elif reduced_dims is not None:
-    for d in reduced_dims:
-      if not isinstance(d, Dimension):
-        raise ValueError("reduced_dims must be a list of Dimensions.  Got %s."
-                         % (reduced_dims,))
     computed_reduced_dims = [
         d for d in input_dims if d not in output_shape.dims]
     if set(computed_reduced_dims) != set(reduced_dims):
