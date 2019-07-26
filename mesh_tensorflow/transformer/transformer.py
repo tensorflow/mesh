@@ -937,8 +937,7 @@ class Bitransformer(object):
       loss += encoder_loss
     return logits, loss
 
-  # TODO(noam): this should say module="Bitransformer" - please fix
-  @gin.configurable(module="Unitransformer")
+  @gin.configurable(module="Bitransformer")
   def decode(self,
              inputs,
              variable_dtype=mtf.VariableDType(tf.float32),
