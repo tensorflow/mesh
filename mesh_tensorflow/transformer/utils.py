@@ -359,7 +359,9 @@ def tpu_estimator_model_fn(model_type,
             variable_dtype=get_variable_dtype())
       elif isinstance(transformer_model, transformer.Unitransformer):
         mtf_samples = transformer_model.sample_autoregressive(
-            inputs, variable_dtype=get_variable_dtype())
+            inputs, variable_dtype=get_variable_dtype(),
+            temperature=0.0,
+            remove_partial_sequences=True)
       elif isinstance(transformer_model,
                       (transformer.Bitransformer, transformer.StudentTeacher)):
         mtf_samples = transformer_model.decode(
@@ -392,10 +394,12 @@ def tpu_estimator_model_fn(model_type,
         Returns:
           a dictionary
         """
-        targets = mtf_features["targets"]
         if model_type == "lm":
-          _, _, length_dim = targets.shape
-          inputs = mtf.shift(targets, offset=1, dim=length_dim, wrap=False)
+          if "inputs" in mtf_features:
+            mtf_features = _dynamic_text2self(mtf_features)
+          _, _, length_dim = mtf_features["targets"].shape
+          inputs = mtf.shift(mtf_features["targets"], offset=1,
+                             dim=length_dim, wrap=False)
         else:
           inputs = mtf_features["inputs"]
 
@@ -421,7 +425,7 @@ def tpu_estimator_model_fn(model_type,
 
         logits, loss = transformer_model.call_simple(
             inputs=inputs,
-            targets=targets,
+            targets=mtf_features["targets"],
             compute_loss=True,
             mode=mode,
             variable_dtype=get_variable_dtype(),
@@ -519,6 +523,91 @@ def tpu_estimator_model_fn(model_type,
               ])
 
   return my_model_fn
+
+
+def _dynamic_text2self(mtf_features):
+  """Convert a packed feature dictionary from text2text into text2self.
+
+  This allows us to train a text2self model on data that has been tokenized and
+  packed in text2text format.
+
+  Inputs and targets for each example get concatenated into the new targets.
+  Length doubles.
+
+  Args:
+    mtf_features: a feature dictionary containing
+       "inputs", "inputs_segmentation", "inputs_position",
+       "targets", "targets_segmentation", "targets_position"
+  Returns:
+    a feature dictionary containing
+      "targets", "targets_segmentation", "targets_position"
+  """
+  tf.logging.info(
+      "_dynamic_text2self: Converting text2text problem to text2self")
+  inputs = mtf_features["inputs"]
+  targets = mtf_features["targets"]
+  inputs_segmentation = mtf_features["inputs_segmentation"]
+  targets_segmentation = mtf_features["targets_segmentation"]
+  inputs_position = mtf_features["inputs_position"]
+  targets_position = mtf_features["targets_position"]
+  length_dim = targets.shape.dims[-1]
+  # compute lengths of inputs and targets portions of each segment
+  segments_dim = mtf.Dimension("segments", length_dim.size)
+  inputs_segment_length = mtf.reduce_sum(
+      mtf.one_hot(inputs_segmentation, segments_dim, dtype=tf.int32),
+      reduced_dim=length_dim)
+  targets_segment_length = mtf.reduce_sum(
+      mtf.one_hot(targets_segmentation, segments_dim, dtype=tf.int32),
+      reduced_dim=length_dim)
+  # segment 0 means padding.  Zero out the segment lengths for segment 0.
+  segments_range = mtf.range(targets.mesh, segments_dim, dtype=tf.int32)
+  nonzero_segment = mtf.to_int32(mtf.not_equal(segments_range, 0))
+  inputs_segment_length *= nonzero_segment
+  targets_segment_length *= nonzero_segment
+  combined_segment_length = inputs_segment_length + targets_segment_length
+  # for targets, position in sequence increases by inputs_segment_length
+  targets_position += mtf.gather(
+      inputs_segment_length, targets_segmentation, segments_dim)
+  # this is the new (2x longer) length dimension
+  new_length_dim = mtf.Dimension("new_length", length_dim.size * 2)
+  new_length_range = mtf.range(
+      targets.mesh, new_length_dim, dtype=tf.int32)
+  # compute permutation tensors mapping from the old length dimension to the
+  # new length dimension
+  combined_segment_length_cumulative = mtf.cumsum(
+      combined_segment_length, segments_dim, exclusive=True)
+  # segment 0 is padding - this causes it to get mapped out of range.
+  combined_segment_length_cumulative += new_length_dim.size * mtf.to_int32(
+      mtf.equal(segments_range, 0))
+  inputs_destination = inputs_position + mtf.gather(
+      combined_segment_length_cumulative, inputs_segmentation, segments_dim)
+  inputs_permutation = mtf.to_int32(mtf.equal(
+      new_length_range, inputs_destination))
+  targets_destination = targets_position + mtf.gather(
+      combined_segment_length_cumulative, targets_segmentation, segments_dim)
+  targets_permutation = mtf.to_int32(mtf.equal(
+      new_length_range, targets_destination))
+  # map from the old length dimension to the new length dimension
+  def _convert(t, perm):
+    return mtf.rename_dimension(
+        mtf.einsum([t, perm],
+                   output_shape=inputs.shape.dims[:-1] + [new_length_dim]),
+        "new_length", "length")
+  targets = (
+      _convert(inputs, inputs_permutation) +
+      _convert(targets, targets_permutation))
+  targets_segmentation = (
+      _convert(inputs_segmentation, inputs_permutation) +
+      _convert(targets_segmentation, targets_permutation))
+  targets_position = (
+      _convert(inputs_position, inputs_permutation) +
+      _convert(targets_position, targets_permutation))
+  mtf_features = {
+      "targets": targets,
+      "targets_segmentation": targets_segmentation,
+      "targets_position": targets_position,
+  }
+  return mtf_features
 
 
 def get_inputs_from_file(input_filename):
@@ -1145,6 +1234,9 @@ def run(tpu_job_name,
 
     checkpoint_paths = get_checkpoint_iterator(eval_checkpoint_step, model_dir)
     for checkpoint_path in checkpoint_paths:
+      global_step = int(get_step_from_checkpoint_path(checkpoint_path))
+      if global_step == 0:
+        continue
       decodes = decode(estimator, input_fn, vocabulary, checkpoint_path)
       for eval_dataset in eval_datasets:
         # Extract the portion of decodes corresponding to this dataset

@@ -565,7 +565,8 @@ class Unitransformer(object):
                             shared_params=None,
                             has_partial_sequences=True,
                             encoder_layer_outputs=None,
-                            never_end=False):
+                            never_end=False,
+                            remove_partial_sequences=False):
     """Sample randomly one token at a time.
 
     The partial_sequences represent partial sequences to be continued.  The
@@ -591,6 +592,8 @@ class Unitransformer(object):
       encoder_layer_outputs: optional - readonly list of tensor activations when
         decoding, one per each input layer + the embedding layer
       never_end: a boolean - if set, then avoid generating stop_at_token
+      remove_partial_sequences: a boolean - whether to remove the partial
+        sequences from the output
 
     Returns:
       a Tensor with shape [<batch_dims>, length_dim]
@@ -633,17 +636,23 @@ class Unitransformer(object):
     if not has_partial_sequences:
       initial_states = [
           mtf.zeros_like(t) for t in context_first_part.new_states]
+      partial_sequences_eos_count = 0
     else:
       initial_states = context_first_part.new_states
+      partial_sequences_eos_count = mtf.reduce_sum(
+          mtf.to_int32(mtf.equal(partial_sequences, stop_at_token)),
+          reduced_dim=length_dim)
 
     def cond_fn(position, ids, *unused_states):
       """Should we run another loop iteration."""
       past_end = mtf.greater_equal(position, length_dim.size)
       is_done = past_end
       if stop_at_token is not None:
-        has_eos = mtf.reduce_any(
-            mtf.equal(ids, stop_at_token), reduced_dim=length_dim)
-        is_done = mtf.logical_or(is_done, has_eos)
+        eos_count = mtf.reduce_sum(
+            mtf.to_int32(mtf.equal(ids, stop_at_token)),
+            reduced_dim=length_dim)
+        has_additional_eos = mtf.greater(eos_count, partial_sequences_eos_count)
+        is_done = mtf.logical_or(is_done, has_additional_eos)
       all_done = mtf.reduce_all(is_done)
       return mtf.logical_not(all_done)
 
@@ -686,6 +695,13 @@ class Unitransformer(object):
     final_position, outputs = mtf.while_loop(
         cond_fn, body_fn, while_loop_inputs)[:2]
     del final_position
+    if has_partial_sequences and remove_partial_sequences:
+      # remove partial sequences from outputs
+      partial_length = mtf.reduce_sum(
+          mtf.to_int32(mtf.not_equal(partial_sequences, 0)),
+          reduced_dim=length_dim)
+      outputs = mtf.dynamic_shift(
+          outputs, -partial_length, length_dim, wrap=False)
     return outputs
 
   def beam_search(self,
@@ -921,6 +937,7 @@ class Bitransformer(object):
       loss += encoder_loss
     return logits, loss
 
+  # TODO(noam): this should say module="Bitransformer" - please fix
   @gin.configurable(module="Unitransformer")
   def decode(self,
              inputs,
@@ -929,7 +946,8 @@ class Bitransformer(object):
              alpha=0.6,
              temperature=0.0,
              decode_length_multiplier=1.5,
-             decode_length_constant=10):
+             decode_length_constant=10,
+             max_decode_length=None):
     """Sampling or beam search.
 
     TODO(noam): should we make the output length dimension different from the
@@ -944,6 +962,7 @@ class Bitransformer(object):
         0.0 means argmax, 1.0 means sample according to predicted distribution.
       decode_length_multiplier: a float
       decode_length_constant: a float
+      max_decode_length: an optional integer
 
     Returns:
       a Tensor with shape [<batch_dims>, beam_dim, length_dim]
@@ -964,8 +983,14 @@ class Bitransformer(object):
     encoder_output = mtf.layers.rename_length_to_memory_length(encoder_output)
     encoder_sequence_id = mtf.layers.rename_length_to_memory_length(
         encoder_sequence_id)
+    batch_dims = inputs.shape[:-1]
+    length_dim = inputs.shape[-1]
+    if max_decode_length is None:
+      decode_length_dim = length_dim
+    else:
+      decode_length_dim = mtf.Dimension("length", max_decode_length)
     if beam_size == 1:
-      ids_shape = inputs.shape
+      ids_shape = mtf.Shape(batch_dims + [decode_length_dim])
       partial_sequences = mtf.zeros(inputs.mesh, ids_shape, dtype=tf.int32)
       return self.decoder.sample_autoregressive(
           partial_sequences,
@@ -982,9 +1007,7 @@ class Bitransformer(object):
             "don't know how to beam search with nonzero temperature")
       # beam search
       beam_dim = mtf.Dimension("beam", beam_size)
-      batch_dims = inputs.shape[:-1]
-      length_dim = inputs.shape[-1]
-      ids_shape = mtf.Shape(batch_dims + [beam_dim, length_dim])
+      ids_shape = mtf.Shape(batch_dims + [beam_dim, decode_length_dim])
       partial_sequences = mtf.zeros(inputs.mesh, ids_shape, dtype=tf.int32)
       input_length = mtf.reduce_sum(
           mtf.to_float(mtf.cast(inputs, tf.bool)),
