@@ -194,6 +194,7 @@ class MeshTensorFlowTest(parameterized.TestCase, tf.test.TestCase):
 class OperationSplittabilityTest(tf.test.TestCase):
 
   def setUp(self):
+    super(OperationSplittabilityTest, self).setUp()
     self.graph = mtf.Graph()
     self.mesh = mtf.Mesh(self.graph, "my_mesh")
 

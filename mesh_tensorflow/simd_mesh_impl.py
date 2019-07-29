@@ -428,17 +428,21 @@ class SimdMeshImpl(mtf.MeshImpl):
       k = coord[mesh_axis]
       if source_pcoord[k] is not None:
         coord[mesh_axis] = source_pcoord[k]
-        target_pnum = mtf.processor_coordinates_to_pnum(self.shape, coord)
+        source_pnum = mtf.processor_coordinates_to_pnum(self.shape, coord)
         source_target_pairs.append(
-            [self.l2p(pnum),
-             self.l2p(target_pnum)])
+            [self.l2p(source_pnum),
+             self.l2p(pnum)])
 
-    if t.dtype in [tf.float32, tf.bfloat16, tf.int32]:
-      return tpu_ops.collective_permute(t, source_target_pairs)
+    if not source_target_pairs:
+      ret = tf.zeros_like(t, t.dtype)
+    elif t.dtype in [tf.float32, tf.bfloat16, tf.int32]:
+      ret = tpu_ops.collective_permute(t, source_target_pairs)
+    else:
+      # If t is not one of the allowed types, cast and cast back.
+      ret = tf.cast(tpu_ops.collective_permute(
+          tf.cast(t, tf.float32), source_target_pairs), t.dtype)
 
-    # If t is not one of the allowed types, cast and cast back.
-    return tf.cast(tpu_ops.collective_permute(
-        tf.cast(t, tf.float32), source_target_pairs), t.dtype)
+    return self.LaidOutTensor([ret])
 
   def slice(self, tf_tensor, tensor_shape):
     """"Slice out the corresponding part of tensor given the pnum variable."""

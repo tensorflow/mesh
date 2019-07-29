@@ -5174,7 +5174,7 @@ def conv2d_with_blocks(
     padding: string, "SAME". The type of padding algorithm to use.
       Valid is not currently supported.
     h_blocks_dim: Dimension representing number of height blocks.
-    w_blocks_dim: Dimension representing number of height blocks.
+    w_blocks_dim: Dimension representing number of witdh blocks.
     name: A name for the operation (optional).
 
   Returns:
