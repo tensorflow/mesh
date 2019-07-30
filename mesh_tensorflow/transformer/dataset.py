@@ -139,6 +139,30 @@ def pack_and_batch(dataset, batch_size, length, pack=True):
   return dataset
 
 
+@gin.configurable
+def pack_or_pad(dataset, length, pack=True):
+  """Creates a 'packed' version of a dataset or pads examples with zeros.
+
+  If pack=True, then multiple examples concatenated to form one combined
+  example with the given length.
+
+  If pack=False, then examples are padded with zeros to 'length'.
+
+  Args:
+    dataset: a tf.data.Dataset
+    length: an integer
+    pack: a boolean
+
+  Returns:
+    a tf.data.Dataset where all features have fixed shape [batch, length].
+  """
+  if pack:
+    dataset = pack_dataset(dataset, length=length)
+  # Pad/trim length of each example to length.
+  dataset = trim_and_pad_dataset(dataset, length=length)
+  return dataset
+
+
 def encode_dataset(dataset, vocabulary):
   """Encode from strings to token ids.
 
@@ -158,7 +182,7 @@ def pretokenized_tfds_dataset(dataset_name=gin.REQUIRED,
                               text2self=gin.REQUIRED,
                               tfds_data_dir=gin.REQUIRED,
                               dataset_split=gin.REQUIRED,
-                              batch_size=gin.REQUIRED,
+                              batch_size=None,
                               sequence_length=gin.REQUIRED,
                               vocabulary=None):
   """Reads a tensorflow_datasets dataset.
@@ -168,12 +192,13 @@ def pretokenized_tfds_dataset(dataset_name=gin.REQUIRED,
     text2self: a boolean
     tfds_data_dir: a boolean
     dataset_split: a string
-    batch_size: an integer
+    batch_size: an integer, DEPRECATED
     sequence_length: an integer
     vocabulary: ignored
   Returns:
     a tf.data.Dataset of batches
   """
+  del batch_size
   del vocabulary
   dataset = tfds.load(
       dataset_name,
@@ -195,39 +220,45 @@ def pretokenized_tfds_dataset(dataset_name=gin.REQUIRED,
               "targets": shift_and_append_eos(targets)}
   dataset = dataset.map(feature_map,
                         num_parallel_calls=tf.data.experimental.AUTOTUNE)
-  return pack_and_batch(dataset, batch_size, sequence_length)
+  return pack_or_pad(dataset, sequence_length)
 
 
 @gin.configurable
-def sample_from_text_line_datasets(glob_weight_list):
+def sample_from_text_line_datasets(glob_weight_list,
+                                   shuffle_buffer_size=100000,
+                                   prefetch=1000):  # pylint: disable=missing-docstring
   globs, weights = zip(*glob_weight_list)
   datasets = [
-      tf.data.TextLineDataset(
-          tf.gfile.Glob(g)).repeat().shuffle(10000).prefetch(100) for g in globs
+      tf.data.TextLineDataset(tf.gfile.Glob(g)).repeat().shuffle(
+          shuffle_buffer_size).prefetch(prefetch) for g in globs
   ]
-  dataset = tf.contrib.data.sample_from_datasets(
+  return tf.contrib.data.sample_from_datasets(
       datasets=datasets, weights=weights)
-  return dataset
 
 
 @gin.configurable
 def make_text_line_dataset(glob=gin.REQUIRED):
-  return tf.data.TextLineDataset(tf.gfile.Glob(glob))
+  return sample_from_text_line_datasets([(glob, 1.0)])
+
+
+@gin.configurable
+def simple_text_line_dataset(glob=gin.REQUIRED, shuffle_buffer_size=100000):
+  return tf.data.TextLineDataset(
+      tf.gfile.Glob(glob)).shuffle(shuffle_buffer_size)
 
 
 @gin.configurable
 def packed_parallel_tsv_dataset(dataset=gin.REQUIRED,
                                 dataset_split=gin.REQUIRED,
-                                batch_size=gin.REQUIRED,
+                                batch_size=None,
                                 sequence_length=gin.REQUIRED,
                                 vocabulary=gin.REQUIRED,
                                 append_eos=True,
-                                shuffle_buffer_size=10000,
                                 eos_id=1,
                                 max_encoded_len=0):
   """Reads parallel tab-separated text file. One example per line."""
-  del shuffle_buffer_size  # TODO(lepikhin): figure out I/O throughput
-  assert dataset_split == "train"
+  del batch_size
+  del dataset_split
 
   def _parse_fn(record):  # pylint: disable=missing-docstring
     tokens = tf.decode_csv(
@@ -263,7 +294,7 @@ def packed_parallel_tsv_dataset(dataset=gin.REQUIRED,
                     max_encoded_len)
     dataset = dataset.filter(_filter_fn)
 
-  return pack_and_batch(dataset, batch_size, sequence_length)
+  return pack_or_pad(dataset, sequence_length)
 
 
 @gin.configurable
@@ -271,7 +302,7 @@ def untokenized_tfds_dataset(dataset_name=gin.REQUIRED,
                              text2self=gin.REQUIRED,
                              tfds_data_dir=gin.REQUIRED,
                              dataset_split=gin.REQUIRED,
-                             batch_size=gin.REQUIRED,
+                             batch_size=None,
                              sequence_length=gin.REQUIRED,
                              vocabulary=gin.REQUIRED,
                              pack=gin.REQUIRED):
@@ -294,6 +325,7 @@ def untokenized_tfds_dataset(dataset_name=gin.REQUIRED,
   Returns:
     a tf.data.Dataset of batches
   """
+  del batch_size
   dataset = tfds.load(
       dataset_name, split=dataset_split,
       as_supervised=not text2self, data_dir=tfds_data_dir)
@@ -303,7 +335,7 @@ def untokenized_tfds_dataset(dataset_name=gin.REQUIRED,
   if not text2self:
     dataset = supervised_to_dict(dataset, text2self)
   dataset = encode_all_features(dataset, vocabulary)
-  return pack_and_batch(dataset, batch_size, sequence_length, pack)
+  return pack_or_pad(dataset, sequence_length, pack)
 
 
 def supervised_to_dict(dataset, text2self):
@@ -377,11 +409,12 @@ def pretokenized_tfrecord_dataset(filenames,
     text2self: a boolean
     eos_included: a boolean
     repeat: a boolean
-    batch_size: an integer
+    batch_size: an integer, DEPRECATED
     sequence_length: an integer
   Returns:
     A tf.data.Dataset of batches
   """
+  del batch_size
   dataset = tf.data.TFRecordDataset(filenames, buffer_size=64 * 1024 * 1024)
   if repeat:
     dataset = dataset.repeat()
@@ -402,7 +435,7 @@ def pretokenized_tfrecord_dataset(filenames,
     return dict(zip(decode_items, decoded))
   dataset = dataset.map(decode_example,
                         num_parallel_calls=tf.data.experimental.AUTOTUNE)
-  return pack_and_batch(dataset, batch_size, sequence_length)
+  return pack_or_pad(dataset, sequence_length)
 
 
 @gin.configurable
@@ -410,7 +443,7 @@ def pretokenized_t2t_dataset(dataset_name=gin.REQUIRED,
                              text2self=False,
                              data_dir=gin.REQUIRED,
                              dataset_split="train",
-                             batch_size=gin.REQUIRED,
+                             batch_size=None,
                              sequence_length=gin.REQUIRED,
                              vocabulary=None):
   """Loads the Tensor2tensor dataset specified by dataset_name.
@@ -420,7 +453,7 @@ def pretokenized_t2t_dataset(dataset_name=gin.REQUIRED,
     text2self: a boolean
     data_dir: string, data_dir for TensorFlow Datasets
     dataset_split: a string - "train" or "dev"
-    batch_size: an integer
+    batch_size: an integer, DEPRECATED
     sequence_length: an integer
     vocabulary: ignored
 
