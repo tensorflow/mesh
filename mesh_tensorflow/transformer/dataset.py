@@ -95,52 +95,8 @@ import tensorflow_datasets as tfds
 
 
 @gin.configurable
-def pack_and_batch(dataset, batch_size, length, pack=True):
-  """Create a tf.data.Dataset which emits training batches.
-
-  The input dataset emits feature-dictionaries where each feature is a vector
-  of integers ending in EOS=1
-
-  The tensors in the returned tf.data.Dataset have shape
-  [batch_size, length].  Zeros indicate padding.
-
-  length indicates the length of the emitted examples.  Examples with
-  inputs/targets longer than length get truncated.
-
-  TODO(noam): for text2self problems, we should just chop too-long
-  sequences into multiple parts and train on all of them.
-
-  If pack=False, then each emitted example will contain one
-  example emitted by load_internal().
-
-  If pack=True, then multiple examples emitted by load_internal() are
-  concatenated to form one combined example with the given length.
-  See comments in the function pack_dataset().
-
-  batch_size indicates the number of (combined) examples per batch,
-  across all cores.
-
-  Args:
-    dataset: a tf.data.Dataset
-    batch_size: an integer
-    length: an integer
-    pack: a boolean
-  Returns:
-    a tf.data.Dataset where all features have fixed shape [batch, length].
-  """
-  if pack:
-    dataset = pack_dataset(dataset, length=length)
-  # Pad/trim length of each example to length.
-  dataset = trim_and_pad_dataset(dataset, length=length),
-  dataset = dataset.batch(batch_size, drop_remainder=False)
-  # Pad final batch.
-  dataset = trim_and_pad_dataset(dataset, length=batch_size),
-  dataset = dataset.prefetch(tf.data.experimental.AUTOTUNE)
-  return dataset
-
-
-@gin.configurable
-def pack_or_pad(dataset, length, pack=True):
+def pack_or_pad(
+    dataset, length, pack=True, feature_keys=None, ensure_eos=False):
   """Creates a 'packed' version of a dataset or pads examples with zeros.
 
   If pack=True, then multiple examples concatenated to form one combined
@@ -151,16 +107,42 @@ def pack_or_pad(dataset, length, pack=True):
   Args:
     dataset: a tf.data.Dataset
     length: an integer
-    pack: a boolean
-
+    pack: a boolean, whether to pack (True) or pad (False).
+    feature_keys: (optional) list of strings, the feature names to limit
+      packing or padding to. Packing will filter out other features whereas
+      padding will pass them through unchanged. Defaults to all features.
+    ensure_eos: a boolean, whether to replace the final token with EOS=1 if it
+      is not PAD=0.
   Returns:
-    a tf.data.Dataset where all features have fixed shape [batch, length].
+    a tf.data.Dataset where all features have fixed shape [length].
   """
+  feature_keys = feature_keys or dataset.output_shapes.keys()
   if pack:
-    dataset = pack_dataset(dataset, length=length)
+    dataset = pack_dataset(dataset, length=length, keys=feature_keys)
   # Pad/trim length of each example to length.
-  dataset = trim_and_pad_dataset(dataset, length=length)
+  dataset = trim_and_pad_dataset(
+      dataset, length=length, feature_keys=feature_keys)
+  if ensure_eos:
+    dataset = ensure_dataset_eos(dataset, feature_keys)
   return dataset
+
+
+def ensure_dataset_eos(dataset, feature_keys=None):
+  """Replaces the final token of features with EOS=1 if it is not PAD=0.
+
+  Args:
+    dataset: a tf.data.Dataset
+    feature_keys: (optional) list of strings, the feature names to ensure end
+      with EOS or padding. Defaults to all features.
+  Returns:
+    a tf.data.Dataset where all specified features end with PAD=0 or EOS=1.
+  """
+  feature_keys = feature_keys or dataset.output_shapes.keys()
+  def _ensure_eos(k, v):
+    if k not in feature_keys:
+      return v
+    return tf.concat([v[0:-1], tf.clip_by_value(v[-1:], 0, 1)], axis=0)
+  return dataset.map(lambda ex: {k: _ensure_eos(k, v) for k, v in ex.items()})
 
 
 def encode_dataset(dataset, vocabulary):
