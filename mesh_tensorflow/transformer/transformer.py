@@ -150,7 +150,9 @@ class Context(object):
         "incremental"
       autoregressive: a boolean - controls whether attention layers shold mask
         out the future.
-      position: an optional Tensor - represents position in the sequence
+      position: an optional Tensor - represents position in the sequence.
+        Passing None means that the position should be considered to be the
+        index in the Tensor (along length_dim).
       sequence_id: an optional int32 Tensor aligned with position - used to
         separate out different sequences which have been concatenated
         to form a single training example.  Also used to mark padding.
@@ -214,6 +216,8 @@ class Context(object):
     self.mesh_shape = mesh_shape
     self.layer_index = 0
     self.encoder_layer_outputs = encoder_layer_outputs
+    # put values here to share them between layers
+    self.cache = {}
 
   @property
   def train(self):
@@ -526,6 +530,12 @@ class Unitransformer(object):
       logits: a Tensor with shape [<batch_dims>, output_vocab_dim]
       loss: an optional Scalar (if compute_loss=True)
     """
+    if not self.positional_embedding:
+      # To make relative attention faster, we drop the information about the
+      #   position in the subsequence.  The relative attention code then
+      #   assumes that the positions are given by index in the tensor,
+      #   which still leads to the correct computation of relative position.
+      position = None
     context = Context(
         mesh=inputs.mesh,
         batch_dims=inputs.shape.dims[:-1],

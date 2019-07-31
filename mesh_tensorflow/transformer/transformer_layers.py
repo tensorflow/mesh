@@ -129,9 +129,8 @@ class SelfAttention(transformer.TransformerLayer):
                shared_kv=False,
                dropout_rate=0.0,
                attention_kwargs=None,
-               relative_attention_bias=False,
-               relative_attention_contextual=False,
-               relative_position_num_buckets=32):
+               relative_attention_type=None,
+               relative_attention_num_buckets=32):
     """Create a SelfAttention Layer.
 
     Args:
@@ -141,13 +140,9 @@ class SelfAttention(transformer.TransformerLayer):
       shared_kv: a boolean
       dropout_rate: a float
       attention_kwargs: a dictionary of kwargs for attention.attention
-      relative_attention_bias: a boolean
-        Add a learned bias to the logit, determined by the relative position
-        and the attention head.
-      relative_attention_contextual: a boolean
-        Add a learned linear function to the logit.  Different functions by
-        relative position and attention head.
-      relative_position_num_buckets: an integer (for relative attention)
+      relative_attention_type: an optional string - one of
+        (None, "bias", "bias_shared", "contextual")
+      relative_attention_num_buckets: an integer
     """
     self.num_heads = num_heads
     self.num_memory_heads = num_memory_heads
@@ -155,9 +150,8 @@ class SelfAttention(transformer.TransformerLayer):
     self.shared_kv = shared_kv
     self.dropout_rate = dropout_rate
     self.attention_kwargs = attention_kwargs or {}
-    self.relative_attention_contextual = relative_attention_contextual
-    self.relative_attention_bias = relative_attention_bias
-    self.relative_position_num_buckets = relative_position_num_buckets
+    self.relative_attention_type = relative_attention_type
+    self.relative_attention_num_buckets = relative_attention_num_buckets
 
   def attention_kwargs_from_context(self, context):
     kwargs = copy.copy(self.attention_kwargs)
@@ -226,9 +220,21 @@ class SelfAttention(transformer.TransformerLayer):
     Returns:
       a Tensor or None
     """
-    masks = []
     min_relative_position = self.min_relative_position(context)
     max_relative_position = self.max_relative_position(context)
+    # we can often cache the result of this function between similar layers
+    can_cache = (
+        self.relative_attention_type is None or
+        self.relative_attention_type == "bias_shared")
+    if can_cache:
+      cache_key = ("self_attention_mask",
+                   min_relative_position,
+                   max_relative_position,
+                   self.relative_attention_type,
+                   self.num_heads)
+      if cache_key in context.cache:
+        return context.cache[cache_key]
+    masks = []
     relative_position = memory_position - context.position
     if min_relative_position is not None:
       illegal = mtf.less(relative_position, min_relative_position)
@@ -251,8 +257,9 @@ class SelfAttention(transformer.TransformerLayer):
                   sequence_id,
                   self.rename_length_to_memory_length(sequence_id, context)),
               context.activation_dtype) * -1e9)
-    if self.relative_attention_bias or self.relative_attention_contextual:
-      buckets_dim = mtf.Dimension("buckets", self.relative_position_num_buckets)
+    if self.relative_attention_type is not None:
+      buckets_dim = mtf.Dimension(
+          "buckets", self.relative_attention_num_buckets)
       heads_dim = mtf.Dimension("heads", self.num_heads)
       if max_relative_position is not None and max_relative_position <= 0:
         bidirectional = False
@@ -262,20 +269,24 @@ class SelfAttention(transformer.TransformerLayer):
           relative_position,
           bidirectional=bidirectional,
           num_buckets=buckets_dim.size)
-      if self.relative_attention_bias:
-        rb = mtf.get_variable(
+      if (self.relative_attention_type == "bias" or
+          self.relative_attention_type == "bias_shared"):
+        values = mtf.get_variable(
             context.mesh, "relative_attention_bias",
             [heads_dim, buckets_dim], dtype=context.variable_dtype)
-        rb = mtf.gather(rb, rp_bucket, buckets_dim)
-        masks.append(rb)
-      if self.relative_attention_contextual:
-        ra = layers.dense(
+      elif self.relative_attention_type == "contextual":
+        values = layers.dense(
             x, [buckets_dim, heads_dim],
             variable_dtype=context.variable_dtype,
             name="relative_attention_contextual")
-        ra = mtf.gather(ra, rp_bucket, buckets_dim)
-        masks.append(ra)
-    return mtf.add_n(masks) if masks else None
+      else:
+        raise ValueError("unrecognized relative_attention_type \"%s\"" %
+                         self.relative_attention_type)
+      masks.append(mtf.gather(values, rp_bucket, buckets_dim))
+    ret = mtf.add_n(masks) if masks else None
+    if can_cache:
+      context.cache[cache_key] = ret
+    return ret
 
   @property
   def kv_dim(self):
