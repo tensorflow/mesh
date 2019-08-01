@@ -2569,23 +2569,19 @@ class Conv2dOperation(Operation):
     lowering.add_counter("conv2d_unique/forward", computation_shape.size)
 
 
-def conv2d(conv_input, conv_filter, strides, padding, name=None):
-  """conv2d."""
-  return Conv2dOperation(
-      conv_input, conv_filter, strides, padding, name=name).outputs[0]
-
-
 class Conv2or3dBackpropInputOperation(Operation):
   """like tf.nn.conv2d/conv3d_backprop_input."""
 
-  def __init__(self, conv_dimension,
+  def __init__(self, conv_dimension, is_transpose,
                input_shape, conv_filter, dy, strides, padding, name=None):
     assert conv_dimension in [2, 3]
-    default_name = "conv%dd_backprop" % conv_dimension
+    self._trans = "_trans" if is_transpose else ""
+    default_name = "conv%dd%s_backprop" % (conv_dimension, self._trans)
     super(Conv2or3dBackpropInputOperation, self).__init__(
         [dy, conv_filter], name=name or default_name)
 
     self._conv_dimension = conv_dimension
+    self._is_transpose = is_transpose
     self._padding = padding
     self._strides = strides
     self._input_shape = input_shape
@@ -2603,35 +2599,53 @@ class Conv2or3dBackpropInputOperation(Operation):
     input_sizes = [list_product(input_sizes[:-self._num_nonbatch_dims])] + (
         input_sizes[-self._num_nonbatch_dims:])
 
-    if self._conv_dimension == 2:
-      backprop_fn = tf.nn.conv2d_backprop_input
-    else:
-      backprop_fn = conv3d_backprop_input_v2
+    if self._is_transpose:
+      if self._conv_dimension == 2:
+        backprop_fn = tf.nn.conv2d
+      else:
+        backprop_fn = tf.nn.conv3d
+      def tf_fn(tf_dy, tf_filter):
+        return _tf_restore_batch_dims(
+            backprop_fn(
+                _tf_flatten_batch_dims(tf_dy, self._num_nonbatch_dims),
+                tf_filter,
+                self._strides, self._padding),
+            self._num_nonbatch_dims, tf_dy)
+      dx = mesh_impl.slicewise(
+          tf_fn, lowering.tensors[dy], lowering.tensors[conv_filter])
 
-    def tf_fn(tf_dy, tf_filter):
-      return _tf_restore_batch_dims(
-          backprop_fn(
-              input_sizes, tf_filter,
-              _tf_flatten_batch_dims(tf_dy, self._num_nonbatch_dims),
-              self._strides, self._padding), self._num_nonbatch_dims, tf_dy)
-
-    dx = mesh_impl.slicewise(
-        tf_fn, lowering.tensors[dy], lowering.tensors[conv_filter])
+    else:  # if not self._is_transpose:
+      if self._conv_dimension == 2:
+        backprop_fn = tf.nn.conv2d_backprop_input
+      else:
+        backprop_fn = conv3d_backprop_input_v2
+      def tf_fn(tf_dy, tf_filter):
+        return _tf_restore_batch_dims(
+            backprop_fn(
+                input_sizes, tf_filter,
+                _tf_flatten_batch_dims(tf_dy, self._num_nonbatch_dims),
+                self._strides, self._padding),
+            self._num_nonbatch_dims, tf_dy)
+      dx = mesh_impl.slicewise(
+          tf_fn, lowering.tensors[dy], lowering.tensors[conv_filter])
 
     # reducing out output channels - may need to allreduce
     out_mesh_axis = mesh_impl.tensor_dimension_to_mesh_axis(dy.shape.dims[-1])
     if out_mesh_axis is not None:
       def add_counter_fn():
         lowering.add_counter(
-            "allreduce/%s/conv%dd_op" % ([out_mesh_axis], self._conv_dimension),
+            "allreduce/%s/conv%dd%s_op" % (
+                [out_mesh_axis], self._conv_dimension, self._trans),
             mesh_impl.laid_out_size(self.outputs[0].shape))
       dx = LazyAllreduceSum(mesh_impl, dx, [out_mesh_axis], add_counter_fn)
     lowering.set_tensor_lowering(self.outputs[0], dx)
     computation_shape = _shape_union([conv_filter.shape, dy.shape])
-    lowering.add_counter("conv%dd/backprop_input" % self._conv_dimension,
-                         mesh_impl.laid_out_size(computation_shape))
-    lowering.add_counter("conv%dd_unique/backprop_input" % self._conv_dimension,
-                         computation_shape.size)
+    lowering.add_counter(
+        "conv%dd%s/backprop_input" % (self._conv_dimension, self._trans),
+        mesh_impl.laid_out_size(computation_shape))
+    lowering.add_counter(
+        "conv%dd%s_unique/backprop_input" % (self._conv_dimension, self._trans),
+        computation_shape.size)
 
 
 def conv2d_backprop_input(input_shape,
@@ -2639,7 +2653,7 @@ def conv2d_backprop_input(input_shape,
                           dy,
                           strides,
                           padding, name=None):
-  return Conv2or3dBackpropInputOperation(2,
+  return Conv2or3dBackpropInputOperation(2, False,
                                          input_shape,
                                          conv_filter,
                                          dy,
@@ -2651,14 +2665,16 @@ def conv2d_backprop_input(input_shape,
 class Conv2or3dBackpropFilterOperation(Operation):
   """Like tf.nn.conv2d_backprop_filter."""
 
-  def __init__(self, conv_dimension,
+  def __init__(self, conv_dimension, is_transpose,
                conv_input, filter_shape, dy, strides, padding, name=None):
     assert conv_dimension in [2, 3]
-    default_name = "conv%dd_backprop_filter" % conv_dimension
+    self._trans = "_trans" if is_transpose else ""
+    default_name = "conv%dd%s_backprop_filter" % (conv_dimension, self._trans)
     super(Conv2or3dBackpropFilterOperation, self).__init__(
         [conv_input, dy], name=name or default_name)
 
     self._conv_dimension = conv_dimension
+    self._is_transpose = is_transpose
     self._padding = padding
     self._strides = strides
     self._filter_shape = filter_shape
@@ -2680,10 +2696,14 @@ class Conv2or3dBackpropFilterOperation(Operation):
       backprop_fn = conv3d_backprop_filter_v2
 
     def tf_fn(tf_input, tf_dy):
+      if self._is_transpose:
+        y, x = tf_input, tf_dy
+      else:
+        x, y = tf_input, tf_dy
       return backprop_fn(
-          _tf_flatten_batch_dims(tf_input, self._num_nonbatch_dims),
+          _tf_flatten_batch_dims(x, self._num_nonbatch_dims),
           filter_sizes,
-          _tf_flatten_batch_dims(tf_dy, self._num_nonbatch_dims),
+          _tf_flatten_batch_dims(y, self._num_nonbatch_dims),
           self._strides,
           self._padding)
 
@@ -2699,17 +2719,19 @@ class Conv2or3dBackpropFilterOperation(Operation):
     if reduced_mesh_axes:
       def add_counter_fn():
         lowering.add_counter(
-            "allreduce/%s/conv%dd_backprop_filter" % (reduced_mesh_axes,
-                                                      self._conv_dimension),
+            "allreduce/%s/conv%dd%s_backprop_filter" % (
+                reduced_mesh_axes, self._conv_dimension, self._trans),
             mesh_impl.laid_out_size(self.outputs[0].shape))
       df = LazyAllreduceSum(mesh_impl, df, reduced_mesh_axes, add_counter_fn)
 
     lowering.set_tensor_lowering(self.outputs[0], df)
     computation_shape = _shape_union([self.outputs[0].shape, dy.shape])
-    lowering.add_counter("conv%dd/backprop_filter" % self._conv_dimension,
+    lowering.add_counter("conv%dd%s/backprop_filter" % (self._conv_dimension,
+                                                        self._trans),
                          mesh_impl.laid_out_size(computation_shape))
     lowering.add_counter(
-        "conv%dd_unique/backprop_filter" % self._conv_dimension,
+        "conv%dd%s_unique/backprop_filter" % (self._conv_dimension,
+                                              self._trans),
         computation_shape.size)
 
 
@@ -2718,7 +2740,7 @@ def conv2d_backprop_filter(conv_input,
                            dy,
                            strides,
                            padding, name=None):
-  return Conv2or3dBackpropFilterOperation(2,
+  return Conv2or3dBackpropFilterOperation(2, False,
                                           conv_input,
                                           filter_shape,
                                           dy,
@@ -2731,7 +2753,7 @@ class Conv3dOperation(Operation):
   """like tf.nn.conv3d.
 
   Currently we assume that the data format is always "NDHWC".
-  # TODO(lehou): support more options such as dilations
+  # TODO(lehou): support more options such as dilation.
   Always dilation rate of 1
   padding: "SAME" or "VALID"
   """
@@ -2827,18 +2849,12 @@ class Conv3dOperation(Operation):
     lowering.add_counter("conv3d_unique/forward", computation_shape.size)
 
 
-def conv3d(conv_input, conv_filter, strides, padding, name=None):
-  """conv3d."""
-  return Conv3dOperation(
-      conv_input, conv_filter, strides, padding, name=name).outputs[0]
-
-
 def conv3d_backprop_input(input_shape,
                           conv_filter,
                           dy,
                           strides,
                           padding, name=None):
-  return Conv2or3dBackpropInputOperation(3,
+  return Conv2or3dBackpropInputOperation(3, False,
                                          input_shape,
                                          conv_filter,
                                          dy,
@@ -2852,7 +2868,152 @@ def conv3d_backprop_filter(conv_input,
                            dy,
                            strides,
                            padding, name=None):
-  return Conv2or3dBackpropFilterOperation(3,
+  return Conv2or3dBackpropFilterOperation(3, False,
+                                          conv_input,
+                                          filter_shape,
+                                          dy,
+                                          strides,
+                                          padding,
+                                          name=name).outputs[0]
+
+
+class Conv3dTransposeOperation(Operation):
+  """like tf.nn.conv3d_transpose.
+
+  Currently we assume that the data format is always "NDHWC".
+  # TODO(lehou): support more options such as dilation.
+  Always dilation rate of 1
+  padding: "SAME" or "VALID"
+  """
+
+  def __init__(self, conv_input, conv_filter, strides, padding, name=None):
+    super(Conv3dTransposeOperation, self).__init__(
+        [conv_input, conv_filter], name=name or "conv3d_transpose")
+    self._padding = padding
+    self._batch_dims = conv_input.shape.dims[:-4]
+    self._in_d_dim, self._in_h_dim, self._in_w_dim, self._in_dim = (
+        conv_input.shape.dims[-4:])
+    self._fd_dim, self._fh_dim, self._fw_dim = conv_filter.shape.dims[:3]
+    f_in_dim, self._out_dim = conv_filter.shape.dims[3:]
+    if f_in_dim != self._in_dim:
+      raise ValueError("Dimensions do not match input=%s filter=%s"
+                       % (conv_input, conv_filter))
+
+    # compute output shape.
+    # now we assume the padding doesn't change the output shape.
+    # TODO(lehou): work out the output shape in general cases.
+    out_d = self._in_d_dim.size
+    out_h = self._in_h_dim.size
+    out_w = self._in_w_dim.size
+    self._strides = strides
+    if strides is not None:
+      out_d *= strides[1]
+      out_h *= strides[2]
+      out_w *= strides[3]
+
+    # name output shape.
+    self._out_d_dim = Dimension(self._in_d_dim.name, out_d)
+    self._out_h_dim = Dimension(self._in_h_dim.name, out_h)
+    self._out_w_dim = Dimension(self._in_w_dim.name, out_w)
+    output_shape = Shape(self._batch_dims + [self._out_d_dim, self._out_h_dim,
+                                             self._out_w_dim, self._out_dim])
+    self._outputs = [Tensor(self, output_shape, conv_input.dtype)]
+
+    unsplittable_dims = [self._in_d_dim, self._in_h_dim, self._in_w_dim,
+                         self._fd_dim, self._fh_dim, self._fw_dim]
+    self._splittable_dims, self._unsplittable_dims = (
+        self._initialize_splittable_and_unsplittable_dims(
+            "splittable", [dim.name for dim in unsplittable_dims]))
+
+  def gradient(self, grad_ys):
+    dy = grad_ys[0]
+    conv_input, conv_filter = self.inputs
+    return [
+        conv3d_transpose_backprop_input(self._inputs[0].shape,
+                                        conv_filter,
+                                        dy,
+                                        self._strides,
+                                        self._padding),
+        conv3d_transpose_backprop_filter(conv_input,
+                                         self._inputs[1].shape,
+                                         dy,
+                                         self._strides,
+                                         self._padding)]
+
+  def lower(self, lowering):
+    mesh_impl = lowering.mesh_impl(self)
+    conv_input, conv_filter = self.inputs
+    if mesh_impl.tensor_dimension_to_mesh_axis(self._in_d_dim) is not None:
+      raise ValueError("can't slice along dimension d")
+    if mesh_impl.tensor_dimension_to_mesh_axis(self._in_h_dim) is not None:
+      raise ValueError("can't slice along dimension h")
+    if mesh_impl.tensor_dimension_to_mesh_axis(self._in_w_dim) is not None:
+      raise ValueError("can't slice along dimension w")
+    if mesh_impl.tensor_dimension_to_mesh_axis(self._fd_dim) is not None:
+      raise ValueError("can't slice along dimension fd")
+    if mesh_impl.tensor_dimension_to_mesh_axis(self._fh_dim) is not None:
+      raise ValueError("can't slice along dimension fh")
+    if mesh_impl.tensor_dimension_to_mesh_axis(self._fw_dim) is not None:
+      raise ValueError("can't slice along dimension fw")
+
+    # run conv3d_transpose in each slice.
+    def tf_fn(tf_input, tf_filter):
+      """conv3d_transpose in tensorflow."""
+      # Get the output shape.
+      # Here, we compute flattened batch size from tf_input, since there can be
+      # split along batch dimensions.
+      flattened_batch_size = 1
+      for dim in tf_input.shape[:-4]:
+        flattened_batch_size *= dim
+      flattened_output_shape = [flattened_batch_size,
+                                self._out_d_dim.size, self._out_h_dim.size,
+                                self._out_w_dim.size, self._out_dim.size]
+
+      output = conv3d_backprop_input_v2(
+          flattened_output_shape, tf_filter,
+          _tf_flatten_batch_dims(tf_input, 4),
+          self._strides, self._padding)
+      return _tf_restore_batch_dims(output, 4, tf_input)
+
+    y = mesh_impl.slicewise(
+        tf_fn, lowering.tensors[conv_input], lowering.tensors[conv_filter])
+
+    # reducing out input channels - may need to allreduce
+    in_mesh_axis = mesh_impl.tensor_dimension_to_mesh_axis(self._in_dim)
+    if in_mesh_axis is not None:
+      def add_counter_fn():
+        lowering.add_counter(
+            "allreduce/%s/conv3d_transpose_op" % [in_mesh_axis],
+            mesh_impl.laid_out_size(self.outputs[0].shape))
+      y = LazyAllreduceSum(mesh_impl, y, [in_mesh_axis], add_counter_fn)
+    lowering.set_tensor_lowering(self.outputs[0], y)
+    computation_shape = _shape_union([conv_filter.shape, self.outputs[0].shape])
+    lowering.add_counter("conv3d_transpose/forward",
+                         mesh_impl.laid_out_size(computation_shape))
+    lowering.add_counter("conv3d_transpose_unique/forward",
+                         computation_shape.size)
+
+
+def conv3d_transpose_backprop_input(input_shape,
+                                    conv_filter,
+                                    dy,
+                                    strides,
+                                    padding, name=None):
+  return Conv2or3dBackpropInputOperation(3, True,
+                                         input_shape,
+                                         conv_filter,
+                                         dy,
+                                         strides,
+                                         padding,
+                                         name=name).outputs[0]
+
+
+def conv3d_transpose_backprop_filter(conv_input,
+                                     filter_shape,
+                                     dy,
+                                     strides,
+                                     padding, name=None):
+  return Conv2or3dBackpropFilterOperation(3, True,
                                           conv_input,
                                           filter_shape,
                                           dy,
@@ -5319,138 +5480,6 @@ def left_halo_exchange(x, blocks_dim, block_size_dim, halo_size, wrap=False):
     parts = ([shift(right_margin, num_complete_blocks + 1, blocks_dim, wrap)]
              + parts)
   return concat(parts, block_size_dim.name)
-
-
-def conv2d_with_blocks(
-    conv_input,
-    conv_filter,
-    strides,
-    padding,
-    h_blocks_dim=None,
-    w_blocks_dim=None,
-    name=None):
-  """conv2d operation with spatial partitioning.
-
-  Spatial partitioning is implemented by decomposing the image into blocks.
-  Block dimensions represented as h_blocks_dim and w_blocks_dim can be split
-  along the mesh axis. If split, then we do a halo exchange where each block
-  receives the part of the image from its left and right neighbors necessary to
-  do the convolution. Exchange can involve complete or partial blocks depending
-  on the filter height and width.
-
-  Currently, only "SAME" padding with dilation rate of 1 is supported.
-
-  Args:
-    conv_input: a Tensor of shape
-      [batch, h_blocks_dim, w_blocks_dim, h_dim, w_dim, in_channels_dim]
-    conv_filter: a Tensor of shape
-      [filter_height, filter_width, in_channels_dim, out_channels_dim]
-    strides: A list of ints. 1-D tensor of length 4.
-    padding: string, "SAME". The type of padding algorithm to use.
-      Valid is not currently supported.
-    h_blocks_dim: Dimension representing number of height blocks.
-    w_blocks_dim: Dimension representing number of witdh blocks.
-    name: A name for the operation (optional).
-
-  Returns:
-    A Tensor of shape
-      [batch, h_blocks_dim, w_blocks_dim, h_dim, w_dim, out_channels_dim]
-  """
-  filter_h_dim, filter_w_dim = conv_filter.shape.dims[:2]
-  assert filter_h_dim.size % 2 == 1
-  assert filter_w_dim.size % 2 == 1
-  h_dim, w_dim = conv_input.shape.dims[-3:-1]
-
-  # If h_blocks_dim and w_blocks_dim are not split, directly call conv2d.
-  if h_blocks_dim is None and w_blocks_dim is None:
-    return conv2d(conv_input, conv_filter, strides, padding, name)
-
-  # Padding 'VALID' is not supported yet.
-  if padding != "SAME":
-    raise NotImplementedError("conv2d_with_blocks requires padding=SAME")
-
-  # Halo exchange for h_blocks and w_blocks.
-  for blocks_dim, block_size_dim, halo_size in [
-      (h_blocks_dim, h_dim, filter_h_dim.size // 2),
-      (w_blocks_dim, w_dim, filter_w_dim.size // 2)]:
-    if halo_size > 0:
-      if blocks_dim is not None:
-        conv_input = halo_exchange(
-            conv_input, blocks_dim, block_size_dim, halo_size)
-      else:
-        conv_input = pad(
-            conv_input, [halo_size, halo_size], block_size_dim.name)
-  return conv2d(conv_input, conv_filter, strides, "VALID", name)
-
-
-def conv3d_with_blocks(
-    conv_input,
-    conv_filter,
-    strides,
-    padding,
-    d_blocks_dim=None,
-    h_blocks_dim=None,
-    name=None):
-  """conv3d operation with spatial partitioning.
-
-  Spatial partitioning is implemented by decomposing the image into blocks.
-  Block dimensions represented as d_blocks_dim and h_blocks_dim can be split
-  along the mesh axis. If split, then we do a halo exchange where each block
-  receives the part of the image from its left and right neighbors necessary to
-  do the convolution. Exchange can involve complete or partial blocks depending
-  on the filter height and width.
-
-  Currently, only "SAME" padding with dilation rate of 1 is supported. Only
-  splitting along the depth and height dimensions are supported.
-
-  Args:
-    conv_input: a Tensor of shape
-      [batch, d_blocks_dim, h_blocks_dim, d_dim, h_dim, w_dim, in_channels_dim]
-    conv_filter: a Tensor of shape
-      [filter_depth, filter_height, filter_width,
-       in_channels_dim, out_channels_dim]
-    strides: A list of ints. 1-D tensor of length 5.
-    padding: string, "SAME". The type of padding algorithm to use.
-      Valid is not currently supported.
-    d_blocks_dim: Dimension representing number of depth blocks.
-    h_blocks_dim: Dimension representing number of height blocks.
-    name: A name for the operation (optional).
-
-  Returns:
-    A Tensor of shape
-      [batch, d_blocks_dim, h_blocks_dim, w_blocks_dim,
-       d_dim, h_dim, w_dim, out_channels_dim]
-  """
-  filter_d_dim, filter_h_dim, filter_w_dim = conv_filter.shape.dims[:3]
-  assert filter_d_dim.size % 2 == 1
-  assert filter_h_dim.size % 2 == 1
-  assert filter_w_dim.size % 2 == 1
-  d_dim, h_dim, w_dim = conv_input.shape.dims[-4:-1]
-
-  # If d_blocks_dim and h_blocks_dim are not split, directly call conv3d.
-  if d_blocks_dim is None and h_blocks_dim is None:
-    return conv3d(conv_input, conv_filter, strides, padding, name)
-
-  # Padding 'VALID' is not supported yet.
-  if padding != "SAME":
-    raise NotImplementedError("conv3d_with_blocks requires padding=SAME")
-
-  # Halo exchange for d_blocks and h_blocks.
-  for blocks_dim, block_size_dim, halo_size in [
-      (d_blocks_dim, d_dim, filter_d_dim.size // 2),
-      (h_blocks_dim, h_dim, filter_h_dim.size // 2)]:
-    if halo_size > 0:
-      if blocks_dim is not None:
-        conv_input = halo_exchange(
-            conv_input, blocks_dim, block_size_dim, halo_size)
-      else:
-        conv_input = pad(
-            conv_input, [halo_size, halo_size], block_size_dim.name)
-
-  # Pad w dimension with zeros.
-  conv_input = pad(conv_input, [filter_w_dim.size // 2, filter_w_dim.size // 2],
-                   dim_name=w_dim.name, name="conv3d_pad_w_dim")
-  return conv3d(conv_input, conv_filter, strides, "VALID", name)
 
 
 def tensor_dim_to_mesh_dim_size(layout, mesh_shape, tensor_dim):

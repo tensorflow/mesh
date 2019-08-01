@@ -87,6 +87,302 @@ def dense(x, output_dim, reduced_dims=None, expert_dims=None,
     return y
 
 
+def conv2d(x, output_dim, filter_size=(3, 3),
+           strides=(1, 1), padding="SAME", filter_initializer=None, name=None):
+  """2D Convolution.
+
+  Args:
+    x: a mtf.Tensor of format NHWC.
+    output_dim: a mtf.Dimension, indicating the output channel dimension.
+    filter_size: a list or tuple in format [filter_height, filter_width].
+    strides: a list or tuple in format [stride_height, stride_width].
+    padding: either "SAME" or "VALID".
+    filter_initializer: the initialize for tf.get_variable.
+    name: a name for the operation (optional).
+
+  Returns:
+    a mtf.Tensor.
+  """
+  fh_dim = mtf.Dimension("fh", filter_size[0])
+  fw_dim = mtf.Dimension("fw", filter_size[1])
+  input_dim = x.shape[-1]
+  conv_filter = mtf.get_variable(
+      x.mesh, "kernel_%s" % name, [fh_dim, fw_dim, input_dim, output_dim],
+      initializer=filter_initializer)
+  # Pad stride in batch and channel dimensions.
+  strides = [1] + strides + [1]
+
+  return mtf.Conv2dOperation(
+      x, conv_filter, strides, padding, name=name).outputs[0]
+
+
+def conv2d_with_blocks(
+    x, output_dim, filter_size=(3, 3),
+    strides=(1, 1), padding="SAME",
+    h_blocks_dim=None, w_blocks_dim=None, filter_initializer=None, name=None):
+  """2D Convolution with spatial partitioning.
+
+  Spatial partitioning is implemented by decomposing the image into blocks.
+  Block dimensions represented as h_blocks_dim and w_blocks_dim can be split
+  along the mesh axis. If split, then we do a halo exchange where each block
+  receives the part of the image from its left and right neighbors necessary to
+  do the convolution. Exchange can involve complete or partial blocks depending
+  on the filter height and width.
+
+  Currently, only "SAME" padding with dilation rate of 1 is supported.
+
+  Args:
+    x: a Tensor of shape
+        [batch, h_blocks_dim, w_blocks_dim, h_dim, w_dim, in_channels_dim]
+    output_dim: a mtf.Dimension, indicating the output channel dimension.
+    filter_size: a list or tuple in format [filter_height, filter_width].
+    strides: a list or tuple in format [stride_height, stride_width].
+    padding: string, "SAME". The type of padding algorithm to use.
+        "Valid" is not currently supported.
+    h_blocks_dim: Dimension representing number of height blocks.
+    w_blocks_dim: Dimension representing number of witdh blocks.
+    filter_initializer: the initialize for tf.get_variable.
+    name: a name for the operation (optional).
+
+  Returns:
+    A Tensor of shape
+      [batch, h_blocks_dim, w_blocks_dim, h_dim, w_dim, out_channels_dim]
+  """
+  # If h_blocks_dim and w_blocks_dim are not split, directly call conv2d.
+  if h_blocks_dim is None and w_blocks_dim is None:
+    return conv2d(x, output_dim,
+                  filter_size, strides, padding, filter_initializer, name)
+
+  assert filter_size[0] % 2 == 1
+  assert filter_size[1] % 2 == 1
+
+  # Padding 'VALID' is not supported yet.
+  if padding != "SAME":
+    raise NotImplementedError("conv2d_with_blocks requires padding=SAME")
+
+  # Halo exchange for h_blocks and w_blocks.
+  h_dim, w_dim = x.shape.dims[-3:-1]
+  for blocks_dim, block_size_dim, halo_size in [
+      (h_blocks_dim, h_dim, filter_size[0] // 2),
+      (w_blocks_dim, w_dim, filter_size[1] // 2)]:
+    if halo_size > 0:
+      if blocks_dim is not None:
+        x = mtf.halo_exchange(x, blocks_dim, block_size_dim, halo_size)
+      else:
+        x = mtf.pad(x, [halo_size, halo_size], block_size_dim.name)
+  return conv2d(x, output_dim,
+                filter_size, strides, "VALID", filter_initializer, name)
+
+
+def conv3d(x, output_dim, filter_size=(3, 3, 3),
+           strides=(1, 1, 1), padding="SAME",
+           filter_initializer=None, name=None):
+  """3D Convolution.
+
+  Args:
+    x: a mtf.Tensor of format NDHWC.
+    output_dim: a mtf.Dimension, indicating the output channel dimension.
+    filter_size: a list or tuple in format
+        [filter_depth, filter_height, filter_width].
+    strides: a list or tuple in format
+        [stride_depth, stride_height, stride_width].
+    padding: either "SAME" or "VALID".
+    filter_initializer: the initialize for tf.get_variable.
+    name: a name for the operation (optional).
+
+  Returns:
+    a mtf.Tensor.
+  """
+  fd_dim = mtf.Dimension("fd", filter_size[0])
+  fh_dim = mtf.Dimension("fh", filter_size[1])
+  fw_dim = mtf.Dimension("fw", filter_size[2])
+  input_dim = x.shape[-1]
+  conv_filter = mtf.get_variable(
+      x.mesh, "kernel_%s" % name,
+      [fd_dim, fh_dim, fw_dim, input_dim, output_dim],
+      initializer=filter_initializer)
+  # Pad stride in batch and channel dimensions.
+  strides = [1] + strides + [1]
+
+  return mtf.Conv3dOperation(
+      x, conv_filter, strides, padding, name=name).outputs[0]
+
+
+def conv3d_with_blocks(
+    x, output_dim, filter_size=(3, 3, 3),
+    strides=(1, 1, 1), padding="SAME",
+    d_blocks_dim=None, h_blocks_dim=None, filter_initializer=None, name=None):
+  """3D Convolution with spatial partitioning.
+
+  Spatial partitioning is implemented by decomposing the image into blocks.
+  Block dimensions represented as d_blocks_dim and h_blocks_dim can be split
+  along the mesh axis. If split, then we do a halo exchange where each block
+  receives the part of the image from its left and right neighbors necessary to
+  do the convolution. Exchange can involve complete or partial blocks depending
+  on the filter depth and height.
+
+  Currently, only "SAME" padding with dilation rate of 1 is supported. Only
+  splitting along the depth and height dimensions are supported.
+
+  Args:
+    x: a Tensor of shape
+        [batch, d_blocks_dim, h_blocks_dim, d_dim, h_dim, w_dim, in_channel_dim]
+    output_dim: a mtf.Dimension, indicating the output channel dimension.
+    filter_size: a list or tuple in format
+        [filter_depth, filter_height, filter_width].
+    strides: a list or tuple in format
+        [stride_depth, stride_height, stride_width].
+    padding: string, "SAME". The type of padding algorithm to use.
+        "Valid" is not currently supported.
+    d_blocks_dim: Dimension representing number of depth blocks.
+    h_blocks_dim: Dimension representing number of height blocks.
+    filter_initializer: the initialize for tf.get_variable.
+    name: a name for the operation (optional).
+
+  Returns:
+    A Tensor of shape
+      [batch, d_blocks_dim, h_blocks_dim, w_blocks_dim,
+       d_dim, h_dim, w_dim, out_channels_dim]
+  """
+  # If d_blocks_dim and h_blocks_dim are not split, directly call conv3d.
+  if d_blocks_dim is None and h_blocks_dim is None:
+    return conv3d(x, output_dim,
+                  filter_size, strides, padding, filter_initializer, name)
+
+  assert filter_size[0] % 2 == 1
+  assert filter_size[1] % 2 == 1
+  assert filter_size[2] % 2 == 1
+
+  # Padding 'VALID' is not supported yet.
+  if padding != "SAME":
+    raise NotImplementedError("conv3d_with_blocks requires padding=SAME")
+
+  # Halo exchange for d_blocks and h_blocks.
+  d_dim, h_dim, w_dim = x.shape.dims[-4:-1]
+  for blocks_dim, block_size_dim, halo_size in [
+      (d_blocks_dim, d_dim, filter_size[0] // 2),
+      (h_blocks_dim, h_dim, filter_size[1] // 2)]:
+    if halo_size > 0:
+      if blocks_dim is not None:
+        x = mtf.halo_exchange(x, blocks_dim, block_size_dim, halo_size)
+      else:
+        x = mtf.pad(x, [halo_size, halo_size], block_size_dim.name)
+
+  # Pad w dimension with zeros.
+  x = mtf.pad(x, [filter_size[2] // 2, filter_size[2] // 2],
+              dim_name=w_dim.name, name="conv3d_pad_w_dim")
+  return conv3d(x, output_dim,
+                filter_size, strides, "VALID", filter_initializer, name)
+
+
+def conv3d_transpose(x, output_dim,
+                     filter_size=(2, 2, 2), strides=(2, 2, 2),
+                     padding="SAME", filter_initializer=None, name=None):
+  """3D Transposed Convolution.
+
+  Args:
+    x: a mtf.Tensor of format NDHWC.
+    output_dim: a mtf.Dimension, indicating the output channel dimension.
+    filter_size: a list or tuple in format
+        [filter_depth, filter_height, filter_width].
+        Only filter_size of (2, 2, 2) is tested.
+    strides: a list or tuple in format
+        [stride_depth, stride_height, stride_width].
+        Only strides of (2, 2, 2) is tested.
+    padding: either "SAME" or "VALID".
+    filter_initializer: the initialize for tf.get_variable.
+    name: a name for the operation (optional).
+
+  Returns:
+    a mtf.Tensor.
+  """
+  fd_dim = mtf.Dimension("fd", filter_size[0])
+  fh_dim = mtf.Dimension("fh", filter_size[1])
+  fw_dim = mtf.Dimension("fw", filter_size[2])
+  input_dim = x.shape[-1]
+  conv_filter = mtf.get_variable(
+      x.mesh, "kernel_%s" % name,
+      [fd_dim, fh_dim, fw_dim, input_dim, output_dim],
+      initializer=filter_initializer)
+  # Pad stride in batch and channel dimensions.
+  strides = [1] + strides + [1]
+
+  return mtf.Conv3dTransposeOperation(
+      x, conv_filter, strides, padding, name=name).outputs[0]
+
+
+def conv3d_transpose_with_blocks(
+    x, output_dim, filter_size=(2, 2, 2),
+    strides=(2, 2, 2), padding="SAME",
+    d_blocks_dim=None, h_blocks_dim=None, filter_initializer=None, name=None):
+  """3D Transposed Convolution with spatial partitioning.
+
+  Spatial partitioning is implemented by decomposing the image into blocks.
+  Block dimensions represented as d_blocks_dim and h_blocks_dim can be split
+  along the mesh axis. If split, then we do a halo exchange where each block
+  receives the part of the image from its left and right neighbors necessary to
+  do the convolution. Exchange can involve complete or partial blocks depending
+  on the filter depth and height.
+
+  Currently, only "SAME" padding with dilation rate of 1 is supported. Only
+  splitting along the depth and height dimensions are supported.
+
+  Args:
+    x: a Tensor of shape
+        [batch, d_blocks_dim, h_blocks_dim, d_dim, h_dim, w_dim, in_channel_dim]
+    output_dim: a mtf.Dimension, indicating the output channel dimension.
+    filter_size: a list or tuple in format
+        [filter_depth, filter_height, filter_width].
+        Only filter_size of (2, 2, 2) is tested.
+    strides: a list or tuple in format
+        [stride_depth, stride_height, stride_width].
+        Only strides of (2, 2, 2) is tested.
+    padding: string, "SAME". The type of padding algorithm to use.
+        "Valid" is not currently supported.
+    d_blocks_dim: Dimension representing number of depth blocks.
+    h_blocks_dim: Dimension representing number of height blocks.
+    filter_initializer: the initialize for tf.get_variable.
+    name: a name for the operation (optional).
+
+  Returns:
+    A Tensor of shape
+      [batch, d_blocks_dim, h_blocks_dim, w_blocks_dim,
+       d_dim, h_dim, w_dim, out_channels_dim]
+  """
+  # If d_blocks_dim and h_blocks_dim are not split, directly call conv3d_trans.
+  if d_blocks_dim is None and h_blocks_dim is None:
+    return conv3d_transpose(
+        x, output_dim, filter_size, strides, padding, filter_initializer, name)
+
+  # Now only supports even-sized filters.
+  assert filter_size[0] % 2 == 0
+  assert filter_size[1] % 2 == 0
+  assert filter_size[2] % 2 == 0
+
+  # Padding 'VALID' is not supported yet.
+  if padding != "SAME":
+    raise NotImplementedError(
+        "conv3d_transpose_with_blocks requires padding=SAME")
+
+  # Halo exchange for d_blocks and h_blocks.
+  # TODO(lehou): figure out the halo_size in general cases.
+  d_dim, h_dim, w_dim = x.shape.dims[-4:-1]
+  for blocks_dim, block_size_dim, halo_size in [
+      (d_blocks_dim, d_dim, filter_size[0] // 2 - 1),
+      (h_blocks_dim, h_dim, filter_size[1] // 2 - 1)]:
+    if halo_size > 0:
+      if blocks_dim is not None:
+        x = mtf.halo_exchange(x, blocks_dim, block_size_dim, halo_size)
+      else:
+        x = mtf.pad(x, [halo_size, halo_size], block_size_dim.name)
+
+  # Pad w dimension with zeros.
+  x = mtf.pad(x, [filter_size[2] // 2 - 1, filter_size[2] // 2 - 1],
+              dim_name=w_dim.name, name="conv3d_trans_pad_w_dim")
+  return conv3d_transpose(
+      x, output_dim, filter_size, strides, "VALID", filter_initializer, name)
+
+
 def layer_norm(x, dim, epsilon=1e-6, name="layer_prepostprocess"):
   """Layer normalization over dimension dim.
 
@@ -704,7 +1000,7 @@ def multihead_attention_params(mesh, heads, io_channels, kv_channels,
         initializer=qkvo_initializer, dtype=variable_dtype)
     return mtf.unstack(var, qkvo)
   else:
-    return [mtf.get_variable(
+    return [mtf.get_variable(  # pylint: disable=g-complex-comprehension
         mesh, name, mtf.Shape([heads, io_channels, kv_channels]),
         initializer=tf.random_normal_initializer(stddev=stddev),
         dtype=variable_dtype) for name, stddev in zip(

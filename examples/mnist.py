@@ -78,21 +78,14 @@ def mnist_model(image, labels, mesh):
       rows_dim, cols_dim, one_channel_dim])
 
   # add some convolutional layers to demonstrate that convolution works.
-  fh_dim = mtf.Dimension("fh", 9)
-  fw_dim = mtf.Dimension("fw", 9)
   filters1_dim = mtf.Dimension("filters1", 16)
   filters2_dim = mtf.Dimension("filters2", 16)
-  kernel1 = mtf.get_variable(
-      mesh, "kernel1", [fh_dim, fw_dim, one_channel_dim, filters1_dim])
-  kernel2 = mtf.get_variable(
-      mesh, "kernel2", [fh_dim, fw_dim, filters1_dim, filters2_dim])
-
   f1 = mtf.relu(mtf.conv2d_with_blocks(
-      x, kernel1, strides=[1, 1, 1, 1], padding="SAME",
-      h_blocks_dim=row_blocks_dim, w_blocks_dim=col_blocks_dim))
+      x, filters1_dim, filter_size=[9, 9], strides=[1, 1], padding="SAME",
+      h_blocks_dim=row_blocks_dim, w_blocks_dim=col_blocks_dim, name="conv0"))
   f2 = mtf.relu(mtf.conv2d_with_blocks(
-      f1, kernel2, strides=[1, 1, 1, 1], padding="SAME",
-      h_blocks_dim=row_blocks_dim, w_blocks_dim=col_blocks_dim))
+      f1, filters2_dim, filter_size=[9, 9], strides=[1, 1], padding="SAME",
+      h_blocks_dim=row_blocks_dim, w_blocks_dim=col_blocks_dim, name="conv1"))
   x = mtf.reduce_mean(f2, reduced_dim=filters2_dim)
 
   # add some fully-connected dense layers.

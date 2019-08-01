@@ -354,7 +354,7 @@ class OperationSplittabilityTest(tf.test.TestCase):
     d_output = mtf.zeros(self.mesh, output.shape)
 
     conv2d_backprop_input_operation = mtf.Conv2or3dBackpropInputOperation(
-        2, conv_input.shape, conv_filter, d_output, strides, padding)
+        2, False, conv_input.shape, conv_filter, d_output, strides, padding)
     self.assertEqual(conv2d_backprop_input_operation.splittable_dims,
                      frozenset(["batch", "filter_h", "filter_w", "grid_h",
                                 "grid_w", "in", "out"]))
@@ -362,7 +362,7 @@ class OperationSplittabilityTest(tf.test.TestCase):
                      frozenset())
 
     conv2d_backprop_filter_operation = mtf.Conv2or3dBackpropFilterOperation(
-        2, conv_input, conv_filter.shape, d_output, strides, padding)
+        2, False, conv_input, conv_filter.shape, d_output, strides, padding)
     self.assertEqual(conv2d_backprop_filter_operation.splittable_dims,
                      frozenset(["batch", "filter_h", "filter_w", "grid_h",
                                 "grid_w", "in", "out"]))
