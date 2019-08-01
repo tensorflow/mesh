@@ -479,13 +479,13 @@ def batch_norm(x, is_training, momentum, epsilon=1e-9,
 
       # Update running mean and running variance.
       moving_mean = mtf.assign(
-          moving_mean, momentum * moving_mean + (1-momentum) * mean)
+          moving_mean, momentum * moving_mean + (1 - momentum) * mean)
       moving_variance = mtf.assign(
           moving_variance,
           momentum * moving_variance + (1 - momentum) * variance)
     else:
       # At eval and test time, use the running mean and variance.
-      norm_x = (x - moving_mean) * mtf.rsqrt(moving_variance + epsilon)
+      norm_x = (x - moving_mean) / mtf.rsqrt(moving_variance + epsilon)
 
     return (norm_x * scale) + bias
 
