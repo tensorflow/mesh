@@ -1269,8 +1269,11 @@ def run(tpu_job_name,
         summary_writer.flush()
 
     # Only padding should remain.
-    assert (len(decodes) ==
-            sum(len(t) for t in cached_targets.values()) % batch_size)
+    expected_pad = -sum(len(t) for t in cached_targets.values()) % batch_size
+    if len(decodes) != expected_pad:
+      raise ValueError(
+          "{} padded decodes, {} expected.".format(len(decodes), expected_pad)
+      )
 
   elif mode == "infer":
     checkpoint_paths = get_checkpoint_iterator(eval_checkpoint_step, model_dir)
