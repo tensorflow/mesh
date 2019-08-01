@@ -416,6 +416,7 @@ def layer_norm(x, dim, epsilon=1e-6, name="layer_prepostprocess"):
 
 
 def batch_norm(x, is_training, momentum, epsilon=1e-9,
+               dims_idx_start=0, dims_idx_end=3,
                init_zero=False, name=None):
   """Batch normalization.
 
@@ -424,6 +425,10 @@ def batch_norm(x, is_training, momentum, epsilon=1e-9,
     is_training: a boolean, whether mode is training.
     momentum: a floating point number, specifying batch norm decay value.
     epsilon: a floating point number.
+    dims_idx_start: an integer. Dimension with indices in
+      [dims_idx_start, dims_idx_end] will be normalized.
+    dims_idx_end: an integer. Dimension with indices in
+      [dims_idx_start, dims_idx_end] will be normalized.
     init_zero: a boolean, whether to initialize scale with 0's or 1's.
     name: a string. variable scope.
 
@@ -436,7 +441,7 @@ def batch_norm(x, is_training, momentum, epsilon=1e-9,
     else:
       gamma_initializer = tf.ones_initializer()
 
-    norm_dim = x.shape.dims[0:3]
+    norm_dim = x.shape.dims[dims_idx_start:dims_idx_end]
     reduced_shape = x.shape - norm_dim
 
     scale = mtf.get_variable(
@@ -470,7 +475,7 @@ def batch_norm(x, is_training, momentum, epsilon=1e-9,
       variance = mtf.reduce_mean(
           mtf.square(x - mean), output_shape=reduced_shape)
 
-      norm_x = (x - mean) * mtf.rsqrt(variance + epsilon)
+      norm_x = (x - mean) / mtf.rsqrt(variance + epsilon)
 
       # Update running mean and running variance.
       moving_mean = mtf.assign(
