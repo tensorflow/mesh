@@ -1454,3 +1454,85 @@ def embedding(indices, vocab_dim, output_dim, variable_dtype, name="embedding"):
   weights = embedding_weights(
       indices.mesh, vocab_dim, output_dim, variable_dtype, name)
   return mtf.gather(weights, indices, vocab_dim)
+
+
+def max_pool2d(x, ksize=(2, 2), name="max_pool2d"):
+  """2D max pooling.
+
+  Pooling is applied on the HW dimensions. We assume the dimensions of x is
+  [NHWC]. There can be multiple batch dimensions, e.g., [10, 4, 4, 10, 10, 3].
+  Currently we only support unoverlapping pooling: strides == ksize. Also the
+  input HW dimensions must be divisible by ksize.
+
+  Args:
+    x: a Tensor
+    ksize: kernel size. A list or tuple
+    name: an optional string
+
+  Returns:
+    a Tensor
+  """
+  return mtf.PoolOperation(x, ksize, strides=ksize,
+                           pool_fn_string="MAX_2D", name=name).outputs[0]
+
+
+def max_pool3d(x, ksize=(2, 2, 2), name="max_pool3d"):
+  """3D max pooling.
+
+  Pooling is applied on the DHW dimensions. We assume the dimensions of x is
+  [NDHWC]. There can be multiple batch dimensions, e.g.,
+  [10, 4, 4, 10, 10, 10, 3].
+  Currently we only support unoverlapping pooling: strides == ksize. Also the
+  input DHW dimensions must be divisible by ksize.
+
+  Args:
+    x: a Tensor
+    ksize: kernel size. A list or tuple
+    name: an optional string
+
+  Returns:
+    a Tensor
+  """
+  return mtf.PoolOperation(x, ksize, strides=ksize,
+                           pool_fn_string="MAX_3D", name=name).outputs[0]
+
+
+def avg_pool2d(x, ksize=(2, 2), name="avg_pool2d"):
+  """2D average pooling.
+
+  Pooling is applied on the HW dimensions. We assume the dimensions of x is
+  [NHWC]. There can be multiple batch dimensions, e.g., [10, 4, 4, 10, 10, 3].
+  Currently we only support unoverlapping pooling: strides == ksize. Also the
+  input HW dimensions must be divisible by ksize.
+
+  Args:
+    x: a Tensor
+    ksize: kernel size. A list or tuple
+    name: an optional string
+
+  Returns:
+    a Tensor
+  """
+  return mtf.PoolOperation(x, ksize, strides=ksize,
+                           pool_fn_string="AVG_2D", name=name).outputs[0]
+
+
+def avg_pool3d(x, ksize=(2, 2, 2), name="avg_pool3d"):
+  """3D average pooling.
+
+  Pooling is applied on the DHW dimensions. We assume the dimensions of x is
+  [NDHWC]. There can be multiple batch dimensions, e.g.,
+  [10, 4, 4, 10, 10, 10, 3].
+  Currently we only support unoverlapping pooling: strides == ksize. Also the
+  input DHW dimensions must be divisible by ksize.
+
+  Args:
+    x: a Tensor
+    ksize: kernel size. A list or tuple
+    name: an optional string
+
+  Returns:
+    a Tensor
+  """
+  return mtf.PoolOperation(x, ksize, strides=ksize,
+                           pool_fn_string="AVG_3D", name=name).outputs[0]

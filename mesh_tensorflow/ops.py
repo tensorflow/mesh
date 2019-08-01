@@ -2130,6 +2130,198 @@ class ReduceOperation(Operation):
     lowering.set_tensor_lowering(self.outputs[0], y)
 
 
+def _pool_helper(ksize,
+                 strides,
+                 pool_fn_string="MAX_2D"):
+  """Returns slicewise function and reduced mesh dimensions.
+
+  Args:
+    ksize: kernel size, a tuple or list.
+    strides: a tuple or list.
+    pool_fn_string: "MAX" or "AVERAGE"
+  Returns:
+    pool_slice_fn: a function from tf.Tensor to tf.Tensor
+  """
+  def pool_slice_fn(xslice):
+    ret = pool_fn(pool_fn_string)(xslice, ksize, strides, "VALID")
+    return ret
+  return pool_slice_fn
+
+
+def _tf_upscale(x, dim_idx_start, dim_idx_end, xscales):
+  """Upscale the tf.Tensor x.
+
+  N-dimensional version of tf.image.resize_images with NEAREST interpolation.
+  Similar to: https://github.com/tensorflow/tensorflow/issues/2169
+
+  Args:
+    x: a tf.Tensor
+    dim_idx_start: the index of starting dimension
+    dim_idx_end: the index of ending dimension
+    xscales: an integer list of upscaling factors
+  Returns:
+    a tf Tensor. Dimensions in [dim_idx_start, dim_idx_end - 1] will be upscaled
+    xscales[i]-times.
+  """
+
+  xscales = list(xscales)
+  if dim_idx_start < 0:
+    dim_idx_start += len(x.get_shape().as_list())
+
+  def _tf_upscale_one_trailing_dim(x_1tdim):
+    """Upscaling with dim_idx_end = -1."""
+    x_shape = x_1tdim.get_shape().as_list()
+    x_scaled_shape = [ori_size * scale for ori_size, scale \
+                      in zip(x_shape[dim_idx_start:-1], xscales)]
+
+    dim_idx_len = len(x_shape[dim_idx_start:-1])
+    x_1tdim = tf.reshape(x_1tdim, [-1] + x_shape[-dim_idx_len:])
+
+    for dim_idx in range(dim_idx_len, 0, -1):
+      x_1tdim = tf.concat([x_1tdim] * xscales.pop(), dim_idx)
+    output_shape = x_shape[:dim_idx_start] + x_scaled_shape + x_shape[-1:]
+    x_1tdim = tf.reshape(x_1tdim, output_shape)
+    return x_1tdim
+
+  x_shape = x.get_shape().as_list()
+  trailing_shape = x_shape[dim_idx_end:]
+  x = tf.reshape(x, x_shape[:dim_idx_end] + [-1])
+  x = _tf_upscale_one_trailing_dim(x)
+  x = tf.reshape(x, x.shape[:-1] + trailing_shape)
+
+  return x
+
+
+class PoolOperation(Operation):
+  """Pooling - average or max pool data along HW (2D) or DHW (3D) dimensions.
+
+  For the current implementation of backpropagation, we only handle cases
+  when strides == ksize and the input dimensions are divisible by ksize.
+  """
+
+  def __init__(self, x, ksize, strides, pool_fn_string, name=None):
+    super(PoolOperation, self).__init__([x], name=name or "pool")
+    assert ksize == strides
+    if "2D" in pool_fn_string:
+      assert len(ksize) == 2
+    else:
+      assert "3D" in pool_fn_string
+      assert len(ksize) == 3
+
+    self._ksize = ksize
+    self._strides = strides
+    self._pool_fn_string = pool_fn_string
+
+    if "2D" in pool_fn_string:
+      batch_dims = x.shape.dims[:-3]
+      spatial_dims = x.shape.dims[-3:-1]
+      channel_dim = x.shape.dims[-1:]
+    else:
+      batch_dims = x.shape.dims[:-4]
+      spatial_dims = x.shape.dims[-4:-1]
+      channel_dim = x.shape.dims[-1:]
+
+    # Compute output_shape and allocate output Tensor.
+    output_spatial_dims = []
+    for spatial_dim, kernel_size, stride_size in zip(
+        spatial_dims, ksize, strides):
+      output_dim_size = (spatial_dim.size - kernel_size) // stride_size + 1
+      output_spatial_dim = Dimension(spatial_dim.name, output_dim_size)
+      output_spatial_dims.append(output_spatial_dim)
+
+    output_shape = Shape(batch_dims + output_spatial_dims + channel_dim)
+    self._outputs = [Tensor(self, output_shape, x.dtype)]
+
+    # Claim unsplittable dims.
+    self._splittable_dims, self._unsplittable_dims = (
+        self._initialize_splittable_and_unsplittable_dims(
+            "splittable", [dim.name for dim in spatial_dims]))
+
+  def gradient(self, grad_ys):
+    """Returns the gradient to input, for unoverlapping pooling."""
+    x = self.inputs[0]
+    y = self.outputs[0]
+    dy = grad_ys[0]
+    dx = pool_backprop(x, y, dy,
+                       self._ksize, self._strides, self._pool_fn_string)
+    return [dx]
+
+  def lower(self, lowering):
+    mesh_impl = lowering.mesh_impl(self)
+    slicewise_fn = _pool_helper(
+        self._ksize, self._strides, self._pool_fn_string)
+
+    x = lowering.tensors[self.inputs[0]]
+    y = mesh_impl.slicewise(slicewise_fn, x)
+
+    lowering.set_tensor_lowering(self.outputs[0], y)
+
+
+class PoolBackPropOperation(Operation):
+  """Pooling backpropagation.
+
+  For the current implementation, we only handle cases when
+  strides == ksize and the input dimensions are divisible by ksize.
+  """
+
+  def __init__(self, x, y, dy,
+               ksize, strides, pool_fn_string, name=None):
+    super(PoolBackPropOperation, self).__init__(
+        [x, y, dy], name=name or "pool_backprop")
+    assert ksize == strides
+    if "2D" in pool_fn_string:
+      assert len(ksize) == 2
+    else:
+      assert "3D" in pool_fn_string
+      assert len(ksize) == 3
+
+    self._ksize = ksize
+    self._strides = strides
+    self._pool_fn_string = pool_fn_string
+    self._outputs = [Tensor(self, x.shape, dy.dtype)]
+
+  def lower(self, lowering):
+    """Returns the gradient to input, for unoverlapping pooling."""
+    mesh_impl = lowering.mesh_impl(self)
+
+    if self._pool_fn_string == "MAX_2D":
+      def slicewise_fn(x, y, dy):
+        y_scaled_back = _tf_upscale(y, -3, -1, self._strides)
+        dy_scaled_back = _tf_upscale(dy, -3, -1, self._strides)
+        return tf.cast(tf.equal(x, y_scaled_back), x.dtype) * dy_scaled_back
+    elif self._pool_fn_string == "MAX_3D":
+      def slicewise_fn(x, y, dy):
+        y_scaled_back = _tf_upscale(y, -4, -1, self._strides)
+        dy_scaled_back = _tf_upscale(dy, -4, -1, self._strides)
+        return tf.cast(tf.equal(x, y_scaled_back), x.dtype) * dy_scaled_back
+    elif self._pool_fn_string == "AVG_2D":
+      def slicewise_fn(x, y, dy):
+        del y
+        dy_scaled_back = _tf_upscale(dy, -3, -1, self._strides)
+        return dy_scaled_back / tf.constant(
+            self._strides[0] * self._strides[1], dtype=x.dtype)
+    elif self._pool_fn_string == "AVG_3D":
+      def slicewise_fn(x, y, dy):
+        del y
+        dy_scaled_back = _tf_upscale(dy, -4, -1, self._strides)
+        return dy_scaled_back / tf.constant(
+            self._strides[0] * self._strides[1] * self._strides[2],
+            dtype=x.dtype)
+    else:
+      raise ValueError("Pooling %s is not implemented." % self._pool_fn_string)
+
+    dx = mesh_impl.slicewise(
+        slicewise_fn, *[lowering.tensors[x] for x in self.inputs])
+
+    lowering.set_tensor_lowering(self.outputs[0], dx)
+
+
+def pool_backprop(x, y, dy, ksize, strides, pool_fn_string, name=None):
+  return PoolBackPropOperation(x, y, dy,
+                               ksize, strides, pool_fn_string,
+                               name).outputs[0]
+
+
 class ConcatOperation(Operation):
   """tf.concat.
 
@@ -4984,6 +5176,37 @@ def reduction_fn(reduction_fn_string):
     return tf.reduce_min
   else:
     raise ValueError("Unknown reduction_fn_string %s" % reduction_fn_string)
+
+
+def pool_fn(pool_fn_string):
+  """Converts a string function name to actual function."""
+  def avg_pool2d_fn(x, ksize, strides, padding):
+    return _tf_restore_batch_dims(
+        tf.nn.avg_pool2d(_tf_flatten_batch_dims(x, 3), ksize, strides, padding),
+        3, x)
+  def avg_pool3d_fn(x, ksize, strides, padding):
+    return _tf_restore_batch_dims(
+        tf.nn.avg_pool3d(_tf_flatten_batch_dims(x, 4), ksize, strides, padding),
+        4, x)
+  def max_pool2d_fn(x, ksize, strides, padding):
+    return _tf_restore_batch_dims(
+        tf.nn.max_pool2d(_tf_flatten_batch_dims(x, 3), ksize, strides, padding),
+        3, x)
+  def max_pool3d_fn(x, ksize, strides, padding):
+    return _tf_restore_batch_dims(
+        tf.nn.max_pool3d(_tf_flatten_batch_dims(x, 4), ksize, strides, padding),
+        4, x)
+
+  if pool_fn_string == "AVG_2D":
+    return avg_pool2d_fn
+  elif pool_fn_string == "AVG_3D":
+    return avg_pool3d_fn
+  elif pool_fn_string == "MAX_2D":
+    return max_pool2d_fn
+  elif pool_fn_string == "MAX_3D":
+    return max_pool3d_fn
+  else:
+    raise ValueError("Unknown pool_fn_string %s" % pool_fn_string)
 
 
 class MtfCheckpointSaverListener(tf.train.CheckpointSaverListener):

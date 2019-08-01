@@ -212,6 +212,8 @@ class OperationSplittabilityTest(tf.test.TestCase):
     self.filter_w_dim = mtf.Dimension("filter_w", 5)
     self.in_dim = mtf.Dimension("in", 10)
     self.out_dim = mtf.Dimension("out", 10)
+    self.image = mtf.zeros(self.mesh, [self.batch_dim, self.grid_h_dim,
+                                       self.grid_w_dim, self.in_dim])
 
   def testOperation(self):
     operation = mtf.Operation([self.x], name="operation")
@@ -296,6 +298,13 @@ class OperationSplittabilityTest(tf.test.TestCase):
                                            "sum")
     self.assertEqual(reduce_operation.splittable_dims, frozenset(["a", "b"]))
     self.assertEqual(reduce_operation.unsplittable_dims, frozenset())
+
+  def testPoolOperation(self):
+    reduce_operation = mtf.PoolOperation(self.image, [2, 2], [2, 2], "AVG_2D")
+    self.assertEqual(reduce_operation.splittable_dims,
+                     frozenset(["batch", "in"]))
+    self.assertEqual(reduce_operation.unsplittable_dims,
+                     frozenset(["grid_h", "grid_w"]))
 
   def testConcatOperation(self):
     concat_dim1 = mtf.Dimension("concat", 5)

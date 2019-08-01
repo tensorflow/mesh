@@ -22,6 +22,7 @@ from __future__ import print_function
 from absl.testing import parameterized
 
 import mesh_tensorflow as mtf
+import numpy as np
 
 from tensor2tensor.layers import common_layers
 
@@ -276,6 +277,104 @@ class LayersTest(parameterized.TestCase, tf.test.TestCase):
     actual = self.evaluate(actual_outputs)
 
     self.assertEqual(actual.shape, query.shape)
+
+  @parameterized.parameters(
+      ("MAX_2D",), ("AVG_2D",), ("MAX_3D",), ("AVG_3D",),
+  )
+  def testPool(self, pooling_method):
+    batch = 2
+    depth = 3
+    height = 4
+    width = 6
+    channels = 3
+    tf.random.set_random_seed(1234)
+    inputs = tf.random_normal([batch, depth, height, width, channels])
+
+    stride_d = 3
+    stride_h = 2
+    stride_w = 3
+
+    graph = mtf.Graph()
+    mesh = mtf.Mesh(graph, "my_mesh")
+    batch_dim = mtf.Dimension("batch", batch)
+    depth_dim = mtf.Dimension("depth", depth)
+    height_dim = mtf.Dimension("height", height)
+    width_dim = mtf.Dimension("width", width)
+    channels_dim = mtf.Dimension("channels", channels)
+
+    mtf_inputs = mtf.import_tf_tensor(
+        mesh, inputs, shape=mtf.Shape(
+            [batch_dim, depth_dim, height_dim, width_dim, channels_dim]))
+
+    if pooling_method == "MAX_2D":
+      mtf_outputs = mtf.layers.max_pool2d(
+          mtf_inputs, ksize=(stride_h, stride_w))
+      inputs = tf.reshape(inputs, [batch * depth, height, width, channels])
+      expected_outputs = tf.keras.layers.MaxPooling2D(
+          (stride_h, stride_w))(inputs)
+      expected_outputs = tf.reshape(
+          expected_outputs,
+          [batch, depth, int(height / stride_h),
+           int(width / stride_w), channels])
+
+    elif pooling_method == "AVG_2D":
+      mtf_outputs = mtf.layers.avg_pool2d(
+          mtf_inputs, ksize=(stride_h, stride_w))
+      inputs = tf.reshape(inputs, [batch * depth, height, width, channels])
+      expected_outputs = tf.keras.layers.AveragePooling2D(
+          (stride_h, stride_w))(inputs)
+      expected_outputs = tf.reshape(
+          expected_outputs,
+          [batch, depth, int(height / stride_h),
+           int(width / stride_w), channels])
+
+    elif pooling_method == "MAX_3D":
+      mtf_outputs = mtf.layers.max_pool3d(
+          mtf_inputs, ksize=[stride_d, stride_h, stride_w])
+      expected_outputs = tf.keras.layers.MaxPooling3D(
+          [stride_d, stride_h, stride_w])(inputs)
+
+    elif pooling_method == "AVG_3D":
+      mtf_outputs = mtf.layers.avg_pool3d(
+          mtf_inputs, ksize=[stride_d, stride_h, stride_w])
+      expected_outputs = tf.keras.layers.AveragePooling3D(
+          [stride_d, stride_h, stride_w])(inputs)
+
+    mtf_gradient = mtf.gradients([mtf_outputs], [mtf_inputs])[0]
+
+    mesh_impl = mtf.placement_mesh_impl.PlacementMeshImpl(
+        shape=[], layout={}, devices=[""])
+    lowering = mtf.Lowering(graph, {mesh: mesh_impl})
+    actual_outputs = lowering.export_to_tf_tensor(mtf_outputs)
+    actual_gradient = lowering.export_to_tf_tensor(mtf_gradient)
+
+    tf_group = lowering.copy_masters_to_slices()
+    init = tf.global_variables_initializer()
+    self.evaluate(init)
+    self.evaluate(tf_group)
+    actual, expected = self.evaluate([actual_outputs, expected_outputs])
+    self.assertAllClose(actual, expected)
+
+    actual = self.evaluate(actual_gradient)
+    if pooling_method == "MAX_2D":
+      expected_non_zeros = batch * depth * height * width * channels / (
+          stride_h * stride_w)
+      self.assertEqual(np.count_nonzero(actual), expected_non_zeros)
+
+    elif pooling_method == "AVG_2D":
+      expected = np.ones((batch, depth, height, width, channels),
+                         dtype=np.float32) / stride_h / stride_w
+      self.assertAllClose(actual, expected)
+
+    elif pooling_method == "MAX_3D":
+      expected_non_zeros = batch * depth * height * width * channels / (
+          stride_d * stride_h * stride_w)
+      self.assertEqual(np.count_nonzero(actual), expected_non_zeros)
+
+    elif pooling_method == "AVG_3D":
+      expected = np.ones((batch, depth, height, width, channels),
+                         dtype=np.float32) / stride_d / stride_h / stride_w
+      self.assertAllClose(actual, expected)
 
 if __name__ == "__main__":
   tf.test.main()
