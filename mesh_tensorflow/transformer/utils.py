@@ -337,6 +337,7 @@ def tpu_estimator_model_fn(model_type,
           x, [outer_batch_size, batch_size // outer_batch_size, sequence_length]
       )
       if not use_tpu:
+        tf.logging.info("feature %s : %s" % (key, x))
         x = tf.Print(
             x, [x], "import feature %s" % key, summarize=1000, first_n=1)
       mtf_features[key] = mtf.import_fully_replicated(

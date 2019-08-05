@@ -30,7 +30,7 @@ def attention(q,
               memory_length_dim,
               key_dim,
               value_dim,
-              mask=None,
+              bias=None,
               dropout_rate=0.0,
               dropout_broadcast_dims=None,
               extra_logit=None):
@@ -55,7 +55,7 @@ def attention(q,
     memory_length_dim: a Dimension
     key_dim: a Dimension
     value_dim: a Dimension
-    mask: mask Tensor (see attention_mask())
+    bias: a Tensor to be added into the attention logits.
     dropout_rate: a float.
     dropout_broadcast_dims: an optional list of mtf.Dimension
     extra_logit: an optional scalar or tensor
@@ -64,8 +64,8 @@ def attention(q,
     Tensor with shape q.shape - key_dim + value_dim
   """
   logits = mtf.einsum([q, k], reduced_dims=[key_dim])
-  if mask is not None:
-    logits += mask
+  if bias is not None:
+    logits += bias
   weights = mtf.softmax(logits, memory_length_dim, extra_logit=extra_logit)
   if dropout_rate != 0.0:
     weights = mtf.dropout(
@@ -292,18 +292,24 @@ def local_attention_1d(q,
                        length_dim,
                        key_dim,
                        value_dim,
-                       autoregressive=True,
+                       fully_autoregressive=True,
                        length_dim_num_splits=1,
                        radius=128,
                        sequence_id=1,
+                       write_priority=None,
+                       read_priority=None,
                        attention_kwargs=None):
   """Attention to the a neighborood around the source.
 
-  If autoregressive, then query position p can only see memory positions
+  If fully_autoregressive, then query position p can only see memory positions
   in the range (p - radius, p].
 
-  If not autoregressive, then query position p can only see memory positions
-  in the range (p - window_size, p + radius].
+  If not fully_autoregressive, then query position p can only see memory
+  positions in the range (p - window_size, p + radius].
+
+  In addition, if write_priority and read_priority are provided, then attention
+  is limited to position pairs where
+  read_priority[query position] >= write_priority[memory position]
 
   Args:
     q: a Tensor containing length_dim
@@ -312,11 +318,13 @@ def local_attention_1d(q,
     length_dim: a Dimension
     key_dim: a Dimension (the channels dimension of q and k)
     value_dim: a Dimension (the channels dimension of v)
-    autoregressive: a boolean
+    fully_autoregressive: a boolean
     length_dim_num_splits: an optional integer indicating how many ways the
       length dimension is split
     radius: an integer
     sequence_id: a Tensor or an integer
+    write_priority: an optional Tensor containing length_dim
+    read_priority: an optional Tensor containing length_dim
     attention_kwargs: optional keyword arguments for attention()
 
   Returns:
@@ -343,8 +351,9 @@ def local_attention_1d(q,
   def _reshape_memory(x):
     x = mtf.replace_dimensions(
         x, length_dim, [num_blocks, memory_block_length])
-    return (mtf.left_halo_exchange if autoregressive else mtf.halo_exchange)(
-        x, num_blocks, memory_block_length, radius)
+    return (mtf.left_halo_exchange if fully_autoregressive
+            else mtf.halo_exchange)(
+                x, num_blocks, memory_block_length, radius)
   q = _reshape_query(q)
   k = _reshape_memory(k)
   if v:
@@ -364,14 +373,35 @@ def local_attention_1d(q,
 
   padded_memory_block_length = mtf.Dimension(
       "memory_block_length",
-      (1 if autoregressive else 2) * radius + block_length)
+      (1 if fully_autoregressive else 2) * radius + block_length)
 
   relative_position = m_pos - q_pos
-  illegal = mtf.not_equal(q_sequence_id, m_sequence_id)
-  illegal = mtf.logical_or(illegal, mtf.less_equal(relative_position, -radius))
-  illegal = mtf.logical_or(illegal, mtf.greater(
-      relative_position, 0 if autoregressive else radius))
-  mask = mtf.cast(illegal, q.dtype) * -1e9
+  visible = mtf.equal(q_sequence_id, m_sequence_id)
+  visible = mtf.logical_and(visible, mtf.greater(relative_position, -radius))
+  visible = mtf.logical_and(visible, mtf.less_equal(
+      relative_position, 0 if fully_autoregressive else radius))
+  if read_priority is not None:
+    write_priority = _reshape_memory(write_priority)
+    read_priority = _reshape_query(read_priority)
+    visible = mtf.logical_and(
+        visible, mtf.greater_equal(read_priority, write_priority))
+
+  bias = visibility_mask_to_attention_bias(visible, q.dtype)
   o = attention(q, k, v, padded_memory_block_length,
-                key_dim, value_dim, mask, **attention_kwargs)
+                key_dim, value_dim, bias, **attention_kwargs)
   return mtf.replace_dimensions(o, [num_blocks, query_block_length], length_dim)
+
+
+def visibility_mask_to_attention_bias(visible, dtype):
+  """Convert a boolean visibility mask to an attention bias.
+
+  The returned Tensor has large negative values in positions where
+  visible=False.
+
+  Args:
+    visible: a boolean Tensor
+    dtype: a dtype
+  Returns:
+    a Tensor with the given dtype and the same shape as "visible"
+  """
+  return mtf.cast(mtf.logical_not(visible), dtype) * -1e9

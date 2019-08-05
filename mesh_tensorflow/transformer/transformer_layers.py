@@ -107,9 +107,9 @@ def attention_params(context,
         mtf.Dimension("query_heads", num_heads // num_memory_heads)]
   return attention.AttentionParams(
       context.mesh,
-      query_input_dim=context.model_dim,
-      memory_input_dim=context.model_dim,
-      output_dim=context.model_dim,
+      query_input_dim=context.model.model_dim,
+      memory_input_dim=context.model.model_dim,
+      output_dim=context.model.model_dim,
       key_dim=kv_dim,
       value_dim=kv_dim,
       query_heads_dims=query_heads_dims,
@@ -206,12 +206,12 @@ class SelfAttention(transformer.TransformerLayer):
         memory_length,
         self.kv_dim,
         self.kv_dim,
-        self.compute_mask(context, memory_position, x),
+        self.compute_bias(context, memory_position, x),
         **self.attention_kwargs_from_context(context))
     return params.compute_output(o, output_shape=x.shape)
 
-  def compute_mask(self, context, memory_position, x):
-    """Compute attention mask.
+  def compute_bias(self, context, memory_position, x):
+    """Compute attention bias.
 
     Args:
       context: a transformer.Context
@@ -234,14 +234,23 @@ class SelfAttention(transformer.TransformerLayer):
                    self.num_heads)
       if cache_key in context.cache:
         return context.cache[cache_key]
-    masks = []
+    biases = []
     relative_position = memory_position - context.position
     if min_relative_position is not None:
-      illegal = mtf.less(relative_position, min_relative_position)
-      masks.append(mtf.cast(illegal, context.activation_dtype) * -1e9)
+      visible = mtf.greater_equal(relative_position, min_relative_position)
+      biases.append(attention.visibility_mask_to_attention_bias(
+          visible, context.activation_dtype))
     if max_relative_position is not None:
-      illegal = mtf.greater(relative_position, max_relative_position)
-      masks.append(mtf.cast(illegal, context.activation_dtype) * -1e9)
+      visible = mtf.less_equal(relative_position, max_relative_position)
+      biases.append(attention.visibility_mask_to_attention_bias(
+          visible, context.activation_dtype))
+    if context.read_priority is not None:
+      visible = mtf.greater_equal(
+          context.read_priority,
+          mtf.layers.rename_length_to_memory_length(context.write_priority))
+      biases.append(attention.visibility_mask_to_attention_bias(
+          visible, context.activation_dtype))
+
     sequence_id = None
     # Subsequence id should only be set if we are in the decoder and have
     # multiple targets per input. This will allow each sub-target to only attend
@@ -251,20 +260,16 @@ class SelfAttention(transformer.TransformerLayer):
     elif isinstance(context.sequence_id, mtf.Tensor):
       sequence_id = context.sequence_id
     if (sequence_id is not None and context.length_dim in sequence_id.shape):
-      masks.append(
-          mtf.cast(
-              mtf.not_equal(
-                  sequence_id,
-                  self.rename_length_to_memory_length(sequence_id, context)),
-              context.activation_dtype) * -1e9)
+      visible = mtf.equal(
+          sequence_id,
+          self.rename_length_to_memory_length(sequence_id, context))
+      biases.append(attention.visibility_mask_to_attention_bias(
+          visible, context.activation_dtype))
     if self.relative_attention_type is not None:
       buckets_dim = mtf.Dimension(
           "buckets", self.relative_attention_num_buckets)
       heads_dim = mtf.Dimension("heads", self.num_heads)
-      if max_relative_position is not None and max_relative_position <= 0:
-        bidirectional = False
-      else:
-        bidirectional = True
+      bidirectional = not context.model.fully_autoregressive
       rp_bucket = _relative_position_bucket(
           relative_position,
           bidirectional=bidirectional,
@@ -282,8 +287,8 @@ class SelfAttention(transformer.TransformerLayer):
       else:
         raise ValueError("unrecognized relative_attention_type \"%s\"" %
                          self.relative_attention_type)
-      masks.append(mtf.gather(values, rp_bucket, buckets_dim))
-    ret = mtf.add_n(masks) if masks else None
+      biases.append(mtf.gather(values, rp_bucket, buckets_dim))
+    ret = mtf.add_n(biases) if biases else None
     if can_cache:
       context.cache[cache_key] = ret
     return ret
@@ -303,7 +308,7 @@ class SelfAttention(transformer.TransformerLayer):
     return None
 
   def max_relative_position(self, context):
-    return 0 if context.autoregressive else None
+    return None
 
 
 @gin.configurable
@@ -317,7 +322,7 @@ class EncDecAttention(SelfAttention):
     """Call the layer."""
     memory_antecedent = self._get_memory_antecedent(context)
     memory_input_dim = memory_antecedent.shape[-1]
-    if memory_input_dim != context.model_dim:
+    if memory_input_dim != context.model.model_dim:
       raise NotImplementedError(
           "TODO(noam): support different model_dim in encoder and decoder.")
     params = self.make_params(context)
@@ -337,18 +342,17 @@ class EncDecAttention(SelfAttention):
       if context.mode == "first_part":
         context.record_constant_state((k, v, memory_length))
     if context.encoder_sequence_id and context.sequence_id:
-      mask = mtf.cast(
-          mtf.not_equal(
-              context.sequence_id, context.encoder_sequence_id),
-          context.activation_dtype) * -1e9
+      visible = mtf.equal(context.sequence_id, context.encoder_sequence_id)
+      bias = attention.visibility_mask_to_attention_bias(
+          visible, context.activation_dtype)
     else:
-      mask = None
+      bias = None
     o = attention.attention(
         q, k, v,
         memory_length,
         self.kv_dim,
         self.kv_dim,
-        mask,
+        bias,
         **self.attention_kwargs_from_context(context))
     return params.compute_output(o, output_shape=x.shape)
 
@@ -498,8 +502,9 @@ class LocalSelfAttention(SelfAttention):
                       output_shape=prev_v.shape)
         context.record_new_states([k, v])
       window_pos = mtf.range(context.mesh, self.window_dim, tf.int32)
-      mask = mtf.cast(mtf.less(context.position, window_pos),
-                      context.activation_dtype) * -1e9
+      visible = mtf.greater_equal(context.position, window_pos)
+      bias = attention.visibility_mask_to_attention_bias(
+          visible, context.activation_dtype)
       o = attention.attention(
           q,
           k,
@@ -507,7 +512,7 @@ class LocalSelfAttention(SelfAttention):
           self.window_dim,
           self.kv_dim,
           self.kv_dim,
-          mask,
+          bias,
           **self.attention_kwargs_from_context(context))
     elif context.length_dim.size <= max(256, self.radius * 4):
       # nothing fancy - just do full attention and mask
@@ -520,7 +525,7 @@ class LocalSelfAttention(SelfAttention):
           self.memory_length(context),
           self.kv_dim,
           self.kv_dim,
-          self.compute_mask(context, memory_length, x),
+          self.compute_bias(context, memory_length, x),
           **self.attention_kwargs_from_context(context))
     else:
       # fancy local attention algorithm
@@ -532,9 +537,11 @@ class LocalSelfAttention(SelfAttention):
           key_dim=self.kv_dim,
           value_dim=self.kv_dim,
           length_dim_num_splits=1,  # TODO(noam): look at the layout
-          autoregressive=context.autoregressive,
+          autoregressive=context.model.fully_autoregressive,
           radius=self.radius,
           sequence_id=context.sequence_id,
+          write_priority=context.write_priority,
+          read_priority=context.read_priority,
           attention_kwargs=self.attention_kwargs_from_context(context))
     if context.mode == "first_part":
       window_pos = mtf.range(context.mesh, self.window_dim, tf.int32)
@@ -563,7 +570,7 @@ class LocalSelfAttention(SelfAttention):
     return 1 - self.radius
 
   def max_relative_position(self, context):
-    return 0 if context.autoregressive else self.radius
+    return None if context.model.fully_autoregressive else self.radius
 
   @property
   def window_dim(self):

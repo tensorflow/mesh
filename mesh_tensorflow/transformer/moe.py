@@ -85,12 +85,12 @@ class MoE1D(transformer.TransformerLayer):
       x = mtf.reshape(x, shape_with_length)
     y, loss = transformer_moe_layer_v1(
         x,
-        context.model_dim,
+        context.model.model_dim,
         self._hparams,
         context.train,
         context.variable_dtype,
-        layout=context.layout,
-        mesh_shape=context.mesh_shape,
+        layout=context.model.layout,
+        mesh_shape=context.model.mesh_shape,
         nonpadding=context.nonpadding)
     if context.losses is not None:
       context.losses.append(loss)
@@ -142,12 +142,12 @@ class MoE2D(transformer.TransformerLayer):
       x = mtf.reshape(x, shape_with_length)
     y, loss = transformer_moe_layer_v2(
         x,
-        context.model_dim,
+        context.model.model_dim,
         self._hparams,
         context.train,
         context.variable_dtype,
-        layout=context.layout,
-        mesh_shape=context.mesh_shape,
+        layout=context.model.layout,
+        mesh_shape=context.model.mesh_shape,
         nonpadding=context.nonpadding)
     if context.losses is not None:
       context.losses.append(loss)

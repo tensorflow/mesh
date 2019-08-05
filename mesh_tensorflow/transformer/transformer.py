@@ -113,15 +113,15 @@ class Context(object):
   """
 
   def __init__(self,
+               model,
                mesh,
                batch_dims,
                length_dim,
-               model_dim,
                variable_dtype,
                beam_dim=None,
                mode=tf.estimator.ModeKeys.TRAIN,
-               autoregressive=False,
                position=None,
+               position_is_default=False,
                sequence_id=None,
                subsequence_id=None,
                states=None,
@@ -133,26 +133,27 @@ class Context(object):
                encoder_sequence_id=None,
                constant_states=None,
                shared_params=None,
-               layout=None,
-               mesh_shape=None,
-               encoder_layer_outputs=None):
+               encoder_layer_outputs=None,
+               write_priority=None,
+               read_priority=None):
     """Create a context.
 
     Args:
+      model: a pointer back at the unitransformer object
       mesh: a mtf.Mesh
       batch_dims: a list of mtf.Dimension
       length_dim: a mtf.Dimension
-      model_dim: a mtf.Dimension
       variable_dtype: a mtf.VariableDType
       beam_dim: an optional mtf.Dimension (present in beam search)
       mode: either a tf.estimator.ModeKeys or one of the follwing:
         "first_part"
         "incremental"
-      autoregressive: a boolean - controls whether attention layers shold mask
-        out the future.
       position: an optional Tensor - represents position in the sequence.
         Passing None means that the position should be considered to be the
         index in the Tensor (along length_dim).
+      position_is_default: a boolean - is the position equal to
+        mtf.range(mesh, length_dim, tf.int32).  This allows a shortcut in
+        embedding lookup, as we can just slice the embedding variable.
       sequence_id: an optional int32 Tensor aligned with position - used to
         separate out different sequences which have been concatenated
         to form a single training example.  Also used to mark padding.
@@ -179,27 +180,22 @@ class Context(object):
       shared_params: an optional dictionary which can be populated by
         parameters that are shared between Transformers - e.g. between the
         encoder and decoder Unitransformers in a Bitransformer.
-      layout: optional - an input to mtf.convert_to_layout_rules
-        Some layers (e.g. MoE layers) cheat by looking at layout and mesh_shape
-      mesh_shape: optional - an input to mtf.convert_to_shape
-        Some layers (e.g. MoE layers) cheat by looking at layout and mesh_shape
       encoder_layer_outputs: optional - readonly list of tensor activations when
         decoding, one per each input layer + the embedding layer
+      write_priority: an optional Tensor
+        in self-attention, position a can see position b iff
+        read_priority[a] >= write_priority[b]
+      read_priority: an optional Tensor
     """
+    self.model = model
     self.mesh = mesh
     self.batch_dims = batch_dims
     self.length_dim = length_dim
     self.variable_dtype = variable_dtype
     self.beam_dim = beam_dim
-    self.model_dim = model_dim
     self.mode = mode
-    self.autoregressive = autoregressive
-    if position is None:
-      self.position_is_default = True
-      self.position = mtf.range(mesh, length_dim, dtype=tf.int32)
-    else:
-      self.position_is_default = False
-      self.position = position
+    self.position = position
+    self.position_is_default = position_is_default
     self.sequence_id = sequence_id
     self.subsequence_id = subsequence_id
     self.states = states
@@ -212,12 +208,12 @@ class Context(object):
     self.constant_states = constant_states
     self.next_constant_state = 0
     self.shared_params = shared_params or {}
-    self.layout = layout
-    self.mesh_shape = mesh_shape
     self.layer_index = 0
     self.encoder_layer_outputs = encoder_layer_outputs
     # put values here to share them between layers
     self.cache = {}
+    self.write_priority = write_priority
+    self.read_priority = read_priority
 
   @property
   def train(self):
@@ -336,17 +332,18 @@ class LayerStack(TransformerLayer):
     if context.train and self._dropout_rate > 0:
       return mtf.dropout(
           x, keep_prob=1.0 - self._dropout_rate,
-          noise_shape=mtf.Shape(context.batch_dims + [context.model_dim]))
+          noise_shape=mtf.Shape(context.batch_dims + [context.model.model_dim]))
     else:
       return x
 
   def _layer_norm(self, context, x, name=None):
     with tf.variable_scope(name, default_name="layer_norm"):
       scale = mtf.get_variable(
-          context.mesh, "scale", mtf.Shape([context.model_dim]),
+          context.mesh, "scale", mtf.Shape([context.model.model_dim]),
           initializer=tf.ones_initializer(),
           dtype=context.variable_dtype)
-      variance = mtf.reduce_mean(mtf.square(x), reduced_dim=context.model_dim)
+      variance = mtf.reduce_mean(
+          mtf.square(x), reduced_dim=context.model.model_dim)
     return x * mtf.rsqrt(variance + self._norm_epsilon) * scale
 
   @property
@@ -381,7 +378,40 @@ class Unitransformer(object):
                mesh_shape=None,
                vocab_divisor=128,
                loss_fn=None,
-               positional_embedding=True):
+               positional_embedding=True,
+               input_full_attention=False,
+               loss_on_targets_only=False):
+    """Create a Unitransformer.
+
+    Args:
+      layer_stack: a LayerStack
+      d_model: an integer
+      input_vocab_size: an integer
+      output_vocab_size: an integer
+      autoregressive: a boolean
+      max_length: an integer
+      shared_embedding_and_softmax_weights: a boolean
+      label_smoothing: a float
+      z_loss: a float
+      name: a string
+      layout: optional - an input to mtf.convert_to_layout_rules
+        Some layers (e.g. MoE layers) cheat by looking at layout and mesh_shape
+      mesh_shape: optional - an input to mtf.convert_to_shape
+        Some layers (e.g. MoE layers) cheat by looking at layout and mesh_shape
+      vocab_divisor: an integer
+      loss_fn: an optional function to override self._compute_loss
+      positional_embedding: a boolean
+      input_full_attention: a boolean
+        This is an option for seq-to-seq as a language model.  Each example
+        consists of [<inputs>, EOS=1, <targets>, EOS=1].  In the self-attention
+        layers, positions in the inputs portion of the sequence can see the
+        entire inputs portion, while positions in the targets portion of the
+        sequence cannot see future positions.
+      loss_on_targets_only: a boolean
+        This is an option for seq-to-seq as a language model.  Each example
+        consists of [<inputs>, EOS=1, <targets>, EOS=1].  We zero-out the
+        loss for the inputs portion of the example.
+    """
     self.layer_stack = layer_stack
     self.model_dim = mtf.Dimension("d_model", d_model)
     self.input_vocab_dim = mtf.Dimension(
@@ -405,6 +435,15 @@ class Unitransformer(object):
     if loss_fn:
       self._compute_loss = loss_fn
     self.positional_embedding = positional_embedding
+    self.input_full_attention = input_full_attention
+    self.loss_on_targets_only = loss_on_targets_only
+    if self.input_full_attention and not self.autoregressive:
+      raise ValueError(
+          "input_full_attention only makes sense with autoregressive")
+
+  @property
+  def fully_autoregressive(self):
+    return self.autoregressive and not self.input_full_attention
 
   def _compute_loss(self, context, logits, targets, output_vocab_dim):
     """Regular cross entropy loss.
@@ -433,6 +472,9 @@ class Unitransformer(object):
         z_loss=self.z_loss if context.train else 0.0)
     weights = mtf.layers.weights_nonzero(
         targets, dtype=context.activation_dtype)
+    if self.loss_on_targets_only:
+      weights *= mtf.cast(mtf.logical_not(text2self_inputs_mask(targets)),
+                          dtype=context.activation_dtype)
     return mtf.reduce_mean(loss * weights)
 
   def _call_internal(self, context, inputs, targets=None):
@@ -530,31 +572,58 @@ class Unitransformer(object):
       logits: a Tensor with shape [<batch_dims>, output_vocab_dim]
       loss: an optional Scalar (if compute_loss=True)
     """
+    batch_dims = inputs.shape.dims[:-1]
+    length_dim = inputs.shape.dims[-1]
+    length_range = mtf.range(inputs.mesh, length_dim, dtype=tf.int32)
     if not self.positional_embedding:
       # To make relative attention faster, we drop the information about the
       #   position in the subsequence.  The relative attention code then
       #   assumes that the positions are given by index in the tensor,
       #   which still leads to the correct computation of relative position.
       position = None
+    if position is None:
+      position_is_default = True
+      position = length_range
+    else:
+      position_is_default = False
+    if self.input_full_attention:
+      # The inputs part of each sequence can fully attend within itself.
+      full_attention_region = text2self_inputs_mask(targets)
+      # We can include one additional position to the right - the position
+      #   where the final EOS of the inputs is read and the first target token
+      #   is predicted.
+      full_attention_region = mtf.logical_or(
+          full_attention_region,
+          mtf.shift(full_attention_region, offset=1, dim=length_dim, wrap=False)
+      )
+      # We set read_priority and write_priority to 0 in the full-attention
+      #   region and equal to the position elsewhere.
+      read_priority = write_priority = length_range * mtf.cast(
+          mtf.logical_not(full_attention_region), tf.int32)
+    elif self.autoregressive:
+      # Vanilla autoregressive model - each position can see previous positions.
+      read_priority = write_priority = length_range
+    else:
+      read_priority = write_priority = None
     context = Context(
+        model=self,
         mesh=inputs.mesh,
-        batch_dims=inputs.shape.dims[:-1],
-        length_dim=inputs.shape.dims[-1],
-        model_dim=self.model_dim,
+        batch_dims=batch_dims,
+        length_dim=length_dim,
         variable_dtype=variable_dtype,
         mode=mode,
-        autoregressive=self.autoregressive,
         losses=[] if compute_loss else None,
         sequence_id=sequence_id,
         subsequence_id=subsequence_id,
         position=position,
+        position_is_default=position_is_default,
         encoder_output=encoder_output,
         encoder_sequence_id=encoder_sequence_id,
         shared_params=shared_params,
-        layout=self.layout,
-        mesh_shape=self.mesh_shape,
         layer_outputs=layer_outputs,
-        encoder_layer_outputs=encoder_layer_outputs)
+        encoder_layer_outputs=encoder_layer_outputs,
+        write_priority=write_priority,
+        read_priority=read_priority)
     with tf.variable_scope(self.name):
       logits = self._call_internal(context, inputs, targets)
     if compute_loss:
@@ -619,14 +688,22 @@ class Unitransformer(object):
         mtf.to_int32(mtf.not_equal(inputs, 0)), reduced_dim=length_dim)
     sequence_id = 1 if encoder_sequence_id is not None else None
 
+    length_range = mtf.range(inputs.mesh, length_dim, tf.int32)
+    if self.input_full_attention:
+      read_priority = write_priority = length_range * mtf.to_int32(
+          mtf.greater(length_range, initial_position))
+    else:
+      read_priority = write_priority = length_range
+
     context_first_part = Context(
+        model=self,
         mesh=inputs.mesh,
         batch_dims=batch_dims,
         length_dim=length_dim,
-        model_dim=self.model_dim,
         variable_dtype=variable_dtype,
         mode="first_part",
-        autoregressive=self.autoregressive,
+        position=length_range,
+        position_is_default=True,
         new_states=[],
         initial_position=initial_position,
         sequence_id=sequence_id,
@@ -634,9 +711,9 @@ class Unitransformer(object):
         encoder_sequence_id=encoder_sequence_id,
         constant_states=[],
         shared_params=shared_params,
-        layout=self.layout,
-        mesh_shape=self.mesh_shape,
-        encoder_layer_outputs=encoder_layer_outputs)
+        encoder_layer_outputs=encoder_layer_outputs,
+        write_priority=write_priority,
+        read_priority=read_priority)
 
     shifted_inputs = mtf.shift(inputs, offset=1, dim=length_dim, wrap=False)
     with tf.variable_scope(self.name):
@@ -669,13 +746,12 @@ class Unitransformer(object):
     def body_fn(position, ids, *states):
       """One step in the decode loop."""
       context_incremental = Context(
+          model=self,
           mesh=inputs.mesh,
           batch_dims=batch_dims,
           length_dim=length_dim,
-          model_dim=self.model_dim,
           variable_dtype=variable_dtype,
           mode="incremental",
-          autoregressive=self.autoregressive,
           position=position,
           states=states,
           new_states=[],
@@ -684,9 +760,9 @@ class Unitransformer(object):
           encoder_sequence_id=encoder_sequence_id,
           constant_states=constant_states,
           shared_params=shared_params,
-          layout=self.layout,
-          mesh_shape=self.mesh_shape,
-          encoder_layer_outputs=encoder_layer_outputs)
+          encoder_layer_outputs=encoder_layer_outputs,
+          write_priority=write_priority,
+          read_priority=position)
       inputs_this_step = mtf.gather(ids, position - 1, length_dim)
       with tf.variable_scope(self.name, reuse=True):
         logits = self._call_internal(context_incremental, inputs_this_step)
@@ -749,18 +825,29 @@ class Unitransformer(object):
           "beam search supports exactly one batch dimension.")
     beam_dim = inputs.shape.dims[-2]
     length_dim = inputs.shape.dims[-1]
+    length_range = mtf.range(inputs.mesh, length_dim, tf.int32)
     initial_position = mtf.reduce_sum(
         mtf.to_int32(mtf.not_equal(inputs, 0)), reduced_dim=length_dim)
     sequence_id = 1 if encoder_sequence_id is not None else None
 
+    if self.input_full_attention:
+      # This only makes sense in the case of beam search with given partial
+      # sequences, which is not yet implemented.
+      # TODO(noam): implement
+      raise NotImplementedError(
+          "Beam search for language models not yet implemented")
+    else:
+      read_priority = write_priority = length_range
+
     context_first_part = Context(
+        model=self,
         mesh=inputs.mesh,
         batch_dims=batch_dims + [beam_dim],
         length_dim=length_dim,
-        model_dim=self.model_dim,
         variable_dtype=variable_dtype,
         mode="first_part",
-        autoregressive=self.autoregressive,
+        position=length_range,
+        position_is_default=True,
         new_states=[],
         initial_position=initial_position,
         sequence_id=sequence_id,
@@ -768,9 +855,9 @@ class Unitransformer(object):
         encoder_sequence_id=encoder_sequence_id,
         constant_states=[],
         shared_params=shared_params,
-        layout=self.layout,
-        mesh_shape=self.mesh_shape,
-        encoder_layer_outputs=encoder_layer_outputs)
+        encoder_layer_outputs=encoder_layer_outputs,
+        write_priority=write_priority,
+        read_priority=read_priority)
 
     shifted_inputs = mtf.shift(inputs, offset=1, dim=length_dim, wrap=False)
     with tf.variable_scope(self.name):
@@ -784,13 +871,12 @@ class Unitransformer(object):
     def logits_fn(step_num, ids, states):
       """logits_fn for mtf.beam_search.beam_search()."""
       context_incremental = Context(
+          model=self,
           mesh=inputs.mesh,
           batch_dims=batch_dims + [beam_dim],
           length_dim=length_dim,
-          model_dim=self.model_dim,
           variable_dtype=variable_dtype,
           mode="incremental",
-          autoregressive=self.autoregressive,
           position=step_num,
           states=states,
           new_states=[],
@@ -799,9 +885,9 @@ class Unitransformer(object):
           encoder_sequence_id=encoder_sequence_id,
           constant_states=constant_states,
           shared_params=shared_params,
-          layout=self.layout,
-          mesh_shape=self.mesh_shape,
-          encoder_layer_outputs=encoder_layer_outputs)
+          encoder_layer_outputs=encoder_layer_outputs,
+          write_priority=write_priority,
+          read_priority=step_num)
       inputs_this_step = mtf.gather(ids, step_num - 1, length_dim)
       with tf.variable_scope(self.name, reuse=True):
         logits = self._call_internal(context_incremental, inputs_this_step)
@@ -1288,3 +1374,24 @@ def make_bi_student_teacher(input_vocab_size=gin.REQUIRED,
 
 def _round_up_to_multiple(n, divisor):
   return n + -n % divisor
+
+
+def text2self_inputs_mask(ids, eos_id=1):
+  """Binary mask indicating which parts of the ids represent the inputs.
+
+  Assumes that the ids consist of packed sequences where each example is
+  represented by two eos-terminated sequences, i.e.
+  [<inputs0>, EOS, <targets0>, EOS, <inputs1>, EOS, <targets1>, EOS ...]
+
+  As such, the inputs are the parts where the number of previous EOS tokens
+  is even.
+
+  Args:
+    ids: an int32 mtf.Tensor with shape [..., length_dim]
+    eos_id: an integer
+  Returns:
+    a boolean mtf.Tensor with the same shape as ids
+  """
+  length_dim = ids.shape.dims[-1]
+  return mtf.equal(mtf.mod(mtf.cumsum(mtf.to_int32(mtf.equal(ids, eos_id)),
+                                      length_dim, exclusive=True), 2), 0)
