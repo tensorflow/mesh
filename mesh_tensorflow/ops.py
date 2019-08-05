@@ -478,7 +478,7 @@ class Graph(object):
     for op in operations:
       if isinstance(op, Assign):
         for v in op._variables:
-          var_to_assign_ops[v.name] += op.name + ", "
+          var_to_assign_ops[v] += op.name + ", "
     # Two variables with the same "key" can be stacked together.
     def var_key(v):
       return str([v.mesh,
