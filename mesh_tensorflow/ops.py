@@ -3086,7 +3086,9 @@ class Conv3dTransposeOperation(Operation):
     self._in_d_dim, self._in_h_dim, self._in_w_dim, self._in_dim = (
         conv_input.shape.dims[-4:])
     self._fd_dim, self._fh_dim, self._fw_dim = conv_filter.shape.dims[:3]
-    f_in_dim, self._out_dim = conv_filter.shape.dims[3:]
+
+    # Filter shape is transposed.
+    self._out_dim, f_in_dim = conv_filter.shape.dims[3:]
     if f_in_dim != self._in_dim:
       raise ValueError("Dimensions do not match input=%s filter=%s"
                        % (conv_input, conv_filter))
@@ -3436,7 +3438,8 @@ class PadOperation(Operation):
   def gradient(self, grad_ys):
     slice_dim_name = self._output_dim.name
     slice_size = self._inputs[0].shape.dims[self._axis].size
-    return [slice(grad_ys[0], self._paddings[0], slice_size, slice_dim_name)]
+    return [mtf_slice(grad_ys[0], self._paddings[0],
+                      slice_size, slice_dim_name)]
 
   def lower(self, lowering):
     mesh_impl = lowering.mesh_impl(self)
@@ -3867,8 +3870,7 @@ def assign_sub_slice(variable, slice_var, val):
 class Assign(Operation):
   """Assign to one or more variables."""
 
-  def __init__(self, variables, new_values, assign_fn=assign_slice,
-               name=None):
+  def __init__(self, variables, new_values, assign_fn=assign_slice, name=None):
     super(Assign, self).__init__(
         new_values, variables[0].mesh, name=name or "assign")
     self._variables = variables
@@ -3892,7 +3894,7 @@ class Assign(Operation):
     return self._variables
 
 
-def assign(var, new_val, assign_fn=assign_slice):
+def assign(var, new_val, assign_fn=assign_slice, name=None):
   """Assign a new value to a variable.
 
   Args:
@@ -3900,6 +3902,7 @@ def assign(var, new_val, assign_fn=assign_slice):
     new_val: a Tensor
     assign_fn: a function from
         (mtf.Variable, tf.Variable, tf.Tensor) -> tf.Operation
+    name: a string for the Assign op.
   Returns:
     an Operation
   Raises:
@@ -3909,7 +3912,7 @@ def assign(var, new_val, assign_fn=assign_slice):
     var = var.operation
   if not isinstance(var, Variable):
     raise ValueError("var must be a mtf.Variable or its output Tensor.")
-  return Assign([var], [new_val], assign_fn=assign_fn)
+  return Assign([var], [new_val], assign_fn=assign_fn, name=name)
 
 
 def assign_add(var, new_val):

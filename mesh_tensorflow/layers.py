@@ -45,7 +45,7 @@ def dense(x, output_dim, reduced_dims=None, expert_dims=None,
     master_dtype: a tf.dtype (deprecated - use variable_dtype)
     slice_dtype: a tf.dtype (deprecated - use variable_dtype)
     variable_dtype: a mtf.VariableDType
-    name: a string. variable scope.
+    name: a string used for tf.variable_scope.
 
   Returns:
     a mtf.Tensor of shape [..., output_dim].
@@ -98,7 +98,7 @@ def conv2d(x, output_dim, filter_size=(3, 3),
     strides: a list or tuple in format [stride_height, stride_width].
     padding: either "SAME" or "VALID".
     filter_initializer: the initialize for tf.get_variable.
-    name: a name for the operation (optional).
+    name: a string used for tf.variable_scope.
 
   Returns:
     a mtf.Tensor.
@@ -106,14 +106,14 @@ def conv2d(x, output_dim, filter_size=(3, 3),
   fh_dim = mtf.Dimension("fh", filter_size[0])
   fw_dim = mtf.Dimension("fw", filter_size[1])
   input_dim = x.shape[-1]
-  conv_filter = mtf.get_variable(
-      x.mesh, "kernel_%s" % name, [fh_dim, fw_dim, input_dim, output_dim],
-      initializer=filter_initializer)
-  # Pad stride in batch and channel dimensions.
-  strides = [1] + strides + [1]
+  with tf.variable_scope(name, default_name="conv2d"):
+    conv_filter = mtf.get_variable(
+        x.mesh, "kernel", [fh_dim, fw_dim, input_dim, output_dim],
+        initializer=filter_initializer)
+    # Pad stride in batch and channel dimensions.
+    strides = [1] + list(strides) + [1]
 
-  return mtf.Conv2dOperation(
-      x, conv_filter, strides, padding, name=name).outputs[0]
+    return mtf.Conv2dOperation(x, conv_filter, strides, padding).outputs[0]
 
 
 def conv2d_with_blocks(
@@ -188,7 +188,7 @@ def conv3d(x, output_dim, filter_size=(3, 3, 3),
         [stride_depth, stride_height, stride_width].
     padding: either "SAME" or "VALID".
     filter_initializer: the initialize for tf.get_variable.
-    name: a name for the operation (optional).
+    name: a string used for tf.variable_scope.
 
   Returns:
     a mtf.Tensor.
@@ -197,15 +197,14 @@ def conv3d(x, output_dim, filter_size=(3, 3, 3),
   fh_dim = mtf.Dimension("fh", filter_size[1])
   fw_dim = mtf.Dimension("fw", filter_size[2])
   input_dim = x.shape[-1]
-  conv_filter = mtf.get_variable(
-      x.mesh, "kernel_%s" % name,
-      [fd_dim, fh_dim, fw_dim, input_dim, output_dim],
-      initializer=filter_initializer)
-  # Pad stride in batch and channel dimensions.
-  strides = [1] + strides + [1]
+  with tf.variable_scope(name, default_name="conv3d"):
+    conv_filter = mtf.get_variable(
+        x.mesh, "kernel", [fd_dim, fh_dim, fw_dim, input_dim, output_dim],
+        initializer=filter_initializer)
+    # Pad stride in batch and channel dimensions.
+    strides = [1] + list(strides) + [1]
 
-  return mtf.Conv3dOperation(
-      x, conv_filter, strides, padding, name=name).outputs[0]
+    return mtf.Conv3dOperation(x, conv_filter, strides, padding).outputs[0]
 
 
 def conv3d_with_blocks(
@@ -291,7 +290,7 @@ def conv3d_transpose(x, output_dim,
         Only strides of (2, 2, 2) is tested.
     padding: either "SAME" or "VALID".
     filter_initializer: the initialize for tf.get_variable.
-    name: a name for the operation (optional).
+    name: a string used for tf.variable_scope.
 
   Returns:
     a mtf.Tensor.
@@ -300,15 +299,15 @@ def conv3d_transpose(x, output_dim,
   fh_dim = mtf.Dimension("fh", filter_size[1])
   fw_dim = mtf.Dimension("fw", filter_size[2])
   input_dim = x.shape[-1]
-  conv_filter = mtf.get_variable(
-      x.mesh, "kernel_%s" % name,
-      [fd_dim, fh_dim, fw_dim, input_dim, output_dim],
-      initializer=filter_initializer)
-  # Pad stride in batch and channel dimensions.
-  strides = [1] + strides + [1]
+  with tf.variable_scope(name, default_name="conv3d_transpose"):
+    conv_filter = mtf.get_variable(
+        x.mesh, "kernel", [fd_dim, fh_dim, fw_dim, output_dim, input_dim],
+        initializer=filter_initializer)
+    # Pad stride in batch and channel dimensions.
+    strides = [1] + list(strides) + [1]
 
-  return mtf.Conv3dTransposeOperation(
-      x, conv_filter, strides, padding, name=name).outputs[0]
+    return mtf.Conv3dTransposeOperation(
+        x, conv_filter, strides, padding).outputs[0]
 
 
 def conv3d_transpose_with_blocks(
@@ -390,7 +389,7 @@ def layer_norm(x, dim, epsilon=1e-6, name="layer_prepostprocess"):
     x: a mtf.Tensor whose shape contains dim.
     dim: a mtf.Dimension
     epsilon: a floating point number
-    name: a string. variable scope.
+    name: a string used for tf.variable_scope.
 
   Returns:
     a mtf.Tensor with same shape as x.
@@ -430,7 +429,7 @@ def batch_norm(x, is_training, momentum, epsilon=1e-9,
     dims_idx_end: an integer. Dimension with indices in
       [dims_idx_start, dims_idx_end] will be normalized.
     init_zero: a boolean, whether to initialize scale with 0's or 1's.
-    name: a string. variable scope.
+    name: a string used for tf.variable_scope.
 
   Returns:
     a mtf.Tensor with same shape as x.
@@ -458,12 +457,12 @@ def batch_norm(x, is_training, momentum, epsilon=1e-9,
         activation_dtype=x.dtype)
 
     moving_mean = mtf.get_variable(
-        x.mesh, "moving_mean", reduced_shape,
+        x.mesh, "bn_moving_mean", reduced_shape,
         initializer=tf.random_normal_initializer(stddev=1.0),
         activation_dtype=x.dtype,
         trainable=False)
     moving_variance = mtf.get_variable(
-        x.mesh, "moving_variance",
+        x.mesh, "bn_moving_variance",
         reduced_shape, initializer=tf.ones_initializer(),
         activation_dtype=x.dtype,
         trainable=False)
@@ -478,16 +477,20 @@ def batch_norm(x, is_training, momentum, epsilon=1e-9,
       norm_x = (x - mean) / mtf.rsqrt(variance + epsilon)
 
       # Update running mean and running variance.
-      moving_mean = mtf.assign(
-          moving_mean, momentum * moving_mean + (1 - momentum) * mean)
-      moving_variance = mtf.assign(
+      # TODO(lehou): do not return update_ops; handle them inside MTF.
+      bn_stats_update_ops = []
+      bn_stats_update_ops.append(mtf.assign(
+          moving_mean, momentum * moving_mean + (1 - momentum) * mean,
+          name="{}/bn_mean_update".format(name)))
+      bn_stats_update_ops.append(mtf.assign(
           moving_variance,
-          momentum * moving_variance + (1 - momentum) * variance)
+          momentum * moving_variance + (1 - momentum) * variance,
+          name="{}/bn_var_update".format(name)))
     else:
       # At eval and test time, use the running mean and variance.
       norm_x = (x - moving_mean) / mtf.rsqrt(moving_variance + epsilon)
 
-    return (norm_x * scale) + bias
+    return (norm_x * scale) + bias, bn_stats_update_ops
 
 
 def softmax_cross_entropy_with_logits(logits, targets, vocab_dim, z_loss=0.0):
