@@ -4088,6 +4088,7 @@ def Print(x, data, message, **kwargs):  # pylint: disable=invalid-name
   Returns:
     a Tensor which is identical in value to x
   """
+  message += " %s" % data
   return PrintOperation(x, data, message, **kwargs).outputs[0]
 
 
