@@ -415,7 +415,7 @@ def layer_norm(x, dim, epsilon=1e-6, name="layer_prepostprocess"):
 
 
 def batch_norm(x, is_training, momentum, epsilon=1e-9,
-               dims_idx_start=0, dims_idx_end=3,
+               dims_idx_start=0, dims_idx_end=-1,
                init_zero=False, name=None):
   """Batch normalization.
 
@@ -425,9 +425,9 @@ def batch_norm(x, is_training, momentum, epsilon=1e-9,
     momentum: a floating point number, specifying batch norm decay value.
     epsilon: a floating point number.
     dims_idx_start: an integer. Dimension with indices in
-      [dims_idx_start, dims_idx_end] will be normalized.
+      [dims_idx_start, dims_idx_end - 1] will be normalized.
     dims_idx_end: an integer. Dimension with indices in
-      [dims_idx_start, dims_idx_end] will be normalized.
+      [dims_idx_start, dims_idx_end - 1] will be normalized.
     init_zero: a boolean, whether to initialize scale with 0's or 1's.
     name: a string used for tf.variable_scope.
 
@@ -474,7 +474,7 @@ def batch_norm(x, is_training, momentum, epsilon=1e-9,
       variance = mtf.reduce_mean(
           mtf.square(x - mean), output_shape=reduced_shape)
 
-      norm_x = (x - mean) / mtf.rsqrt(variance + epsilon)
+      norm_x = (x - mean) * mtf.rsqrt(variance + epsilon)
 
       # Update running mean and running variance.
       # TODO(lehou): do not return update_ops; handle them inside MTF.
@@ -488,7 +488,8 @@ def batch_norm(x, is_training, momentum, epsilon=1e-9,
           name="{}/bn_var_update".format(name)))
     else:
       # At eval and test time, use the running mean and variance.
-      norm_x = (x - moving_mean) / mtf.rsqrt(moving_variance + epsilon)
+      norm_x = (x - moving_mean) * mtf.rsqrt(moving_variance + epsilon)
+      bn_stats_update_ops = []
 
     return (norm_x * scale) + bias, bn_stats_update_ops
 

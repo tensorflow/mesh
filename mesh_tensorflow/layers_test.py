@@ -99,6 +99,46 @@ class LayersTest(parameterized.TestCase, tf.test.TestCase):
     self.assertEqual(actual.shape, expected.shape)
 
   @tf.contrib.eager.run_test_in_graph_and_eager_modes()
+  def testBatchNorm(self):
+    batch = 2
+    channels = 3
+    inputs = tf.constant([[0, 1, 2], [4, 5, 6]], dtype=np.float32)
+
+    graph = mtf.Graph()
+    mesh = mtf.Mesh(graph, "my_mesh")
+    batch_dim = mtf.Dimension("batch", batch)
+    channels_dim = mtf.Dimension("channels", channels)
+
+    mtf_inputs = mtf.import_tf_tensor(
+        mesh, inputs, shape=mtf.Shape([batch_dim, channels_dim]))
+
+    mtf_outputs_0, _ = mtf.layers.batch_norm(
+        mtf_inputs,
+        is_training=True, momentum=0.95, epsilon=1e-6,
+        dims_idx_start=0, dims_idx_end=1, name="bn0")
+    mtf_outputs_1, _ = mtf.layers.batch_norm(
+        mtf_outputs_0 * 2 + 1,
+        is_training=True, momentum=0.95, epsilon=1e-6,
+        dims_idx_start=0, dims_idx_end=1, name="bn1")
+
+    mesh_impl = mtf.placement_mesh_impl.PlacementMeshImpl(
+        shape=[], layout={}, devices=[""])
+    lowering = mtf.Lowering(graph, {mesh: mesh_impl})
+
+    actual_outputs_0 = lowering.export_to_tf_tensor(mtf_outputs_0)
+    actual_outputs_1 = lowering.export_to_tf_tensor(mtf_outputs_1)
+
+    tf_group = lowering.copy_masters_to_slices()
+    init = tf.global_variables_initializer()
+    self.evaluate(init)
+    self.evaluate(tf_group)
+    [actual_0, actual_1] = self.evaluate([actual_outputs_0, actual_outputs_1])
+
+    expected = np.array([[-1, -1, -1], [1, 1, 1]])
+    self.assertAllClose(actual_0, expected)
+    self.assertAllClose(actual_1, expected)
+
+  @tf.contrib.eager.run_test_in_graph_and_eager_modes()
   def testWeightsNonzero(self):
     inputs = tf.constant([[3, 1, 0], [1, 0, 0]])
 
