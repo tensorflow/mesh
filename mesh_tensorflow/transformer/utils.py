@@ -796,6 +796,69 @@ def clean_decodes(ids, vocab_size, eos_id=1):
   return ret
 
 
+def export_model(estimator, export_path, vocabulary, sequence_length):
+  """Export a model in TF SavedModel format to be used for inference on CPUs.
+
+  Args:
+    estimator: Estimator object, estimator created with the appropriate
+      model_fn.
+    export_path: str, path to export the model.
+    vocabulary: sentencepiece vocab, vocabulary instance to use for encoding.
+    sequence_length: int, sequence length used for training the model.
+  Returns:
+    None
+  """
+
+  def serving_input_fn():
+    """Constructs input portion of Graph in serving.
+
+    Input is a batch of one serialized tf.Example protos.
+    """
+    serialized_example = tf.placeholder(
+        dtype=tf.string,
+        shape=[None],
+        name="serialized_example")
+
+    def parse_example(serialized_example):
+      """Function to parse serialized example with default features."""
+      # Inputs and targets are required for text2text models.
+      # For text2self models, inputs provide partial sequences that are used to
+      # generate outputs.
+      example_specs = {
+          "inputs": tfds.features.Text().get_serialized_info(),
+          "targets": tfds.features.Text().get_serialized_info(),
+      }
+
+      parser = tfds.core.example_parser.ExampleParser(example_specs)
+      return parser.parse_example(serialized_example)
+
+    dataset = tf.data.Dataset.from_tensor_slices(serialized_example)
+    dataset = dataset.map(parse_example)
+    dataset = transformer_dataset.encode_all_features(dataset, vocabulary)
+    dataset = transformer_dataset.pack_or_pad(
+        dataset=dataset,
+        length=sequence_length,
+        pack=False,
+        feature_keys=["inputs", "targets"]
+    )
+
+    dataset = dataset.padded_batch(
+        tf.shape(serialized_example, out_type=tf.int64)[0],
+        dataset.output_shapes)
+
+    features = tf.data.experimental.get_single_element(dataset)
+
+    return tf.estimator.export.ServingInputReceiver(
+        features=features, receiver_tensors=serialized_example)
+
+  tpu_estimator.export_estimator_savedmodel(
+      estimator=estimator,
+      export_dir_base=export_path,
+      serving_input_receiver_fn=serving_input_fn,
+      as_text=True
+  )
+
+
 def compute_batch_size(sequence_length,
                        mesh_shape,
                        layout_rules,
@@ -987,6 +1050,7 @@ def run(tpu_job_name,
         dataset_split="train",
         autostack=True,
         eval_checkpoint_step=None,
+        export_path="",
         mode="train",
         iterations_per_loop=100,
         save_checkpoints_steps=1000,
@@ -1041,6 +1105,7 @@ def run(tpu_job_name,
       closest to the global steps provided. If None and mode="eval", run eval
       continuously waiting for new checkpoints via
       `tf.contrib.training.checkpoints_iterator`.
+    export_path: a string, path to export the saved model
     mode: string, train/eval/infer
     iterations_per_loop: integer, steps per train loop
     save_checkpoints_steps: integer, steps per checkpoint
@@ -1286,6 +1351,10 @@ def run(tpu_job_name,
           batch_size=batch_size,
           sequence_length=sequence_length,
           checkpoint_path=checkpoint_path)
+
+  elif mode == "export":
+    export_model(estimator, export_path, vocabulary, sequence_length)
+
   else:
     raise ValueError(
-        "unknown mode %s - must be train/eval/infer" % mode)
+        "unknown mode %s - must be train/eval/infer/export" % mode)

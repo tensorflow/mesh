@@ -5243,7 +5243,11 @@ class MtfRestoreHook(tf.train.SessionRunHook):
     self._lowering = lowering
 
   def begin(self):
-    self._op = self._lowering.copy_masters_to_slices()
+    # This namescope is useful in adding the hook operation when the graph is
+    # constructed. It's also necessary to call the op when the exported model is
+    # loaded in another session.
+    with tf.name_scope("mtf_restore_hook"):
+      self._op = self._lowering.copy_masters_to_slices()
 
   def after_create_session(self, session, coord):
     tf.logging.info("Before copy master to slices.")
