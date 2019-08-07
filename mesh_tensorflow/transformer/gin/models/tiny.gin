@@ -4,8 +4,6 @@
 
 import mesh_tensorflow.transformer.moe
 
-utils.auto_batch_size.tokens_per_split = 512
-
 d_model=128
 d_ff=512
 num_heads=4
