@@ -637,7 +637,7 @@ class Unitransformer(object):
                             partial_sequences,
                             stop_at_token=1,
                             max_steps=None,
-                            temperature=1.0,
+                            temperature=0.0,
                             variable_dtype=mtf.VariableDType(tf.float32),
                             encoder_output=None,
                             encoder_sequence_id=None,

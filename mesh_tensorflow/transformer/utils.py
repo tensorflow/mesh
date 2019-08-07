@@ -361,7 +361,6 @@ def tpu_estimator_model_fn(model_type,
       elif isinstance(transformer_model, transformer.Unitransformer):
         mtf_samples = transformer_model.sample_autoregressive(
             inputs, variable_dtype=get_variable_dtype(),
-            temperature=0.0,
             remove_partial_sequences=True)
       elif isinstance(transformer_model,
                       (transformer.Bitransformer, transformer.StudentTeacher)):
