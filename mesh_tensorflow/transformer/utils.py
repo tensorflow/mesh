@@ -820,12 +820,13 @@ def export_model(estimator, export_path, vocabulary, sequence_length):
 
     def parse_example(serialized_example):
       """Function to parse serialized example with default features."""
-      # Inputs and targets are required for text2text models.
-      # For text2self models, inputs provide partial sequences that are used to
-      # generate outputs.
+      # For text2text models, "inputs" provides conditioning text. ("targets"
+      # is only used for train and eval).
+      #
+      # For text2self models, "inputs" provide partial sequences that are used
+      # to generate outputs.
       example_specs = {
           "inputs": tfds.features.Text().get_serialized_info(),
-          "targets": tfds.features.Text().get_serialized_info(),
       }
 
       parser = tfds.core.example_parser.ExampleParser(example_specs)
@@ -838,7 +839,7 @@ def export_model(estimator, export_path, vocabulary, sequence_length):
         dataset=dataset,
         length=sequence_length,
         pack=False,
-        feature_keys=["inputs", "targets"]
+        feature_keys=["inputs"]
     )
 
     dataset = dataset.padded_batch(
