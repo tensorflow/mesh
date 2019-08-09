@@ -5837,3 +5837,62 @@ def serialize_training_step(features, model_fn, batch_dim, num_splits):
     combined_outputs[k] = v
   combined_grads = while_out[1 + num_outputs:]
   return combined_grads, combined_outputs
+
+
+class NthSmallestElementOperation(Operation):
+  """Reduce out last dimension - output is nth-smallest (or largest) element.
+
+  TODO(noam): make n a tensor instead of an integer
+  """
+
+  def __init__(self, x, n, reverse, name=None):
+    super(NthSmallestElementOperation, self).__init__(
+        [x], name=name or "nth_element")
+    reduced_dim = x.shape.dims[-1]
+    output_shape = x.shape - reduced_dim
+    self._outputs = [Tensor(self, output_shape, x.dtype)]
+    self._n = n
+    self._initialize_splittable_and_unsplittable_dims(
+        "splittable", [reduced_dim])
+    self._reverse = reverse
+
+  def gradient(self, grad_ys):
+    raise NotImplementedError("TODO(noam): implement gradient")
+
+  def lower(self, lowering):
+    mesh_impl = lowering.mesh_impl(self)
+    def slicewise_fn(x):
+      return tf.contrib.nn.nth_element(x, self._n, reverse=self._reverse)
+    y = mesh_impl.slicewise(slicewise_fn, lowering.tensors[self.inputs[0]])
+    lowering.set_tensor_lowering(self.outputs[0], y)
+
+
+def nth_smallest_element(x, n, reduced_dim=None, reverse=False, name=None):
+  """Nth-smallest (or largest) reduction on specified axis.
+
+  Note that n is zero-indexed.
+
+  In the case that reduced_dim is split, we do something inefficient:
+    shift data around so that it is replicated and do the computation
+    everywhere.
+
+  Args:
+    x: a Tensor
+    n: an integer
+    reduced_dim: an optional Dimension - defaults to the last dimension of n
+    reverse: a boolean
+    name: an optional string
+  Returns:
+    a Tensor
+  """
+  if reduced_dim is None:
+    reduced_dim = x.shape.dims[-1]
+  # remove the reduced dimension from the shape and insert it at the end
+  x = transpose(x, x.shape - reduced_dim + reduced_dim)
+  # Since the NthSmallestElementOperation does not know how to reduce over a
+  # split dimension, we rename the reduced dimension so that we ensure that it
+  # is not split.  This may cause the tensor to get all-concatenated, causing
+  # redundant computation.
+  unsplit_dim = Dimension("_unsplit", reduced_dim.size)
+  x = replace_dimensions(x, reduced_dim, unsplit_dim)
+  return NthSmallestElementOperation(x, n, reverse, name).outputs[0]
