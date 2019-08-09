@@ -254,7 +254,8 @@ def tpu_estimator_model_fn(model_type,
                            optimizer=None,
                            outer_batch_size=1,
                            tpu_summaries=False,
-                           predict_fn=None):
+                           predict_fn=None,
+                           variable_filter=None):
   """Create a TPUEstimator model function.
 
   Args:
@@ -278,6 +279,9 @@ def tpu_estimator_model_fn(model_type,
     tpu_summaries: a boolean - if True, then use rewrites to make summaries work
       on TPU.  This may be slow, since it uses a host call hack.
     predict_fn: an optional function, see docs for run for more information
+    variable_filter: a string, a variable will only be trained if
+      this string appears in its name. If None (default), train all trainable
+      variables.
 
   Returns:
     a function to be passed to TPUEstimator
@@ -455,8 +459,16 @@ def tpu_estimator_model_fn(model_type,
       else:
         learning_rate = learning_rate_schedule
 
+      filter_string = variable_filter or ""
+      train_vars = graph.trainable_variables
+      filtered_vars = [v for v in train_vars if filter_string in v.name]
+      filtered_grads = [
+          g for g, v in zip(var_grads, train_vars) if filter_string in v.name
+      ]
+
       update_ops = optimizer(learning_rate=learning_rate).apply_grads(
-          var_grads, graph.trainable_variables)
+          filtered_grads, filtered_vars
+      )
 
       lowering = mtf.Lowering(graph, {mesh: mesh_impl}, autostack=autostack)
 
@@ -1039,9 +1051,7 @@ def get_checkpoint_iterator(checkpoint_step, model_dir):
 
 @gin.configurable
 def run(tpu_job_name,
-        tpu,
-        gcp_project,
-        tpu_zone,
+        tpu, gcp_project, tpu_zone,
         model_dir,
         model_type="bitransformer",
         vocabulary=gin.REQUIRED,
@@ -1063,7 +1073,8 @@ def run(tpu_job_name,
         layout_rules=gin.REQUIRED,
         learning_rate_schedule=None,
         optimizer=None,
-        predict_fn=None):
+        predict_fn=None,
+        variable_filter=None):
   """Run training/eval/inference.
 
   Args:
@@ -1132,6 +1143,9 @@ def run(tpu_job_name,
         - features: a dict representing an example. Every value will be an
           mtf.Tensor with shape [batch_dim, length_dim].
         - variable_dtype: an mtf.VariableDType
+    variable_filter: a string, a variable will only be trained if
+      this string appears in its name. If None (default), train all trainable
+      variables.
   """
   if not isinstance(batch_size, int):
     batch_size = compute_batch_size(
@@ -1201,7 +1215,8 @@ def run(tpu_job_name,
       keep_checkpoint_max=keep_checkpoint_max,
       save_checkpoints_steps=save_checkpoints_steps,
       optimizer=optimizer,
-      predict_fn=predict_fn)
+      predict_fn=predict_fn,
+      variable_filter=variable_filter)
 
   estimator = tpu_estimator.TPUEstimator(
       model_fn=model_fn,
