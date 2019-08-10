@@ -5213,7 +5213,7 @@ def pool_fn(pool_fn_string):
     raise ValueError("Unknown pool_fn_string %s" % pool_fn_string)
 
 
-class MtfCheckpointSaverListener(tf.train.CheckpointSaverListener):
+class MtfCheckpointSaverListener(tf.estimator.CheckpointSaverListener):
   """Copy slices to masters before saving."""
 
   def __init__(self, lowering):
