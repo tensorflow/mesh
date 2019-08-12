@@ -380,9 +380,22 @@ def tpu_estimator_model_fn(model_type,
       lowering = mtf.Lowering(graph, {mesh: mesh_impl}, autostack=autostack)
       outputs = lowering.export_to_tf_tensor(mtf_samples)
       predictions = {"outputs": outputs}
+
+      # When exporting a model, we need to communicate to TF-Serving that
+      # master variables need to be copied to their slave slice variables.
+      # Estimator uses a Scaffold's "local_init_op" for this purpose, so we
+      # augment the default "local_init_op" here.
+      def scaffold_fn():
+        return tf.train.Scaffold(
+            local_init_op=tf.group(
+                tf.train.Scaffold.default_local_init_op(),
+                lowering.copy_masters_to_slices(),
+                name="mtf_local_init_op"))
+
       return tpu_estimator.TPUEstimatorSpec(
           mode=tf.estimator.ModeKeys.PREDICT,
           predictions=predictions,
+          scaffold_fn=scaffold_fn,
           prediction_hooks=[mtf.MtfRestoreHook(lowering)])
 
     elif mode == tf.estimator.ModeKeys.EVAL:
