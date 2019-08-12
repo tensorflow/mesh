@@ -97,6 +97,13 @@ class TransformerLayer(object):
   def to_json(self):
     return json.dumps(self, cls=json.JSONEncoder)
 
+  def set_name(self, name):
+    self._name = name
+
+  @property
+  def name(self):
+    return getattr(self, "_name", None)
+
 
 class Context(object):
   """Extra information that layers need at call time.
@@ -309,7 +316,7 @@ class LayerStack(TransformerLayer):
     if context.layer_outputs is not None:
       context.layer_outputs.append(x)
     for lnum, layer in enumerate(self._layers):
-      with tf.variable_scope("layer_%03d" % lnum):
+      with tf.variable_scope(layer.name or ""):
         norm_x = self._layer_norm(context, (x * mask) if mask else x)
         with tf.variable_scope(layer.__class__.__name__):
           y = layer.call(context, norm_x)
@@ -1262,16 +1269,46 @@ class StudentTeacher(object):
 
 # gin-configurable constructors
 @gin.configurable
-def make_layer_stack(layers=gin.REQUIRED, num_layers=6):
+def make_layer_stack(layers=gin.REQUIRED, num_layers=6, block_scope=True):
   """Configurable layer stack.
 
   Args:
-    layers: a list of subclasses of TransformerLayer
+    layers: a list of subclasses of TransformerLayer, or a list of tuples. If an
+      entry of this list is a tuple, the first entry of the tuple is assumed to
+      be the layer name (string) and the second entry is a subclass of
+      TransformerLayer.
     num_layers: an integer
+    block_scope: a bool, if True then use scopes of the format
+      ```
+      block_000/layer_000/...
+      block_000/layer_001/...
+      ...
+      block_001/layer_000/...
+      block_001/layer_001/...
+      ```
+      If False then use scopes of the format
+      ```
+      layer_000/...
+      layer_001/...
+      layer_002/...
+      ...
+      ```
   Returns:
     a LayerStack
   """
-  return LayerStack([cls() for cls in layers] * num_layers)
+  layer_stack = []
+  for block in range(num_layers):
+    for n, cls in enumerate(layers):
+      # Set name to None if it wasn't provided which simplifies the logic below
+      name, cls = cls if isinstance(cls, (list, tuple)) else (None, cls)
+      if block_scope:
+        name = "block_{:03d}/{}".format(block, name or "layer_{:03d}".format(n))
+      else:
+        name = name or "layer_{:03d}".format(len(layer_stack))
+      layer = cls()
+      layer.set_name(name)
+      layer_stack.append(layer)
+  return LayerStack(layer_stack)
 
 
 @gin.configurable
