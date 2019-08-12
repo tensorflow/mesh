@@ -255,7 +255,8 @@ def tpu_estimator_model_fn(model_type,
                            outer_batch_size=1,
                            tpu_summaries=False,
                            predict_fn=None,
-                           variable_filter=None):
+                           variable_filter=None,
+                           init_checkpoint=None):
   """Create a TPUEstimator model function.
 
   Args:
@@ -282,6 +283,9 @@ def tpu_estimator_model_fn(model_type,
     variable_filter: a string, a variable will only be trained if
       this string appears in its name. If None (default), train all trainable
       variables.
+    init_checkpoint: a string, if not None then read in variables from this
+      checkpoint path when initializing variables. Will only initialize
+      variables that appear both in the current graph and the checkpoint.
 
   Returns:
     a function to be passed to TPUEstimator
@@ -487,6 +491,21 @@ def tpu_estimator_model_fn(model_type,
           transformer_model.initialize()
 
       with mtf.utils.outside_all_rewrites():
+
+        if init_checkpoint:
+          ckpt_vars = {v for v, _ in tf.train.list_variables(init_checkpoint)}
+          global_vars = {v.op.name for v in tf.global_variables()}
+          restore_vars = ckpt_vars.intersection(global_vars)
+          tf.logging.info("Initializing variables from %s:", init_checkpoint)
+          tf.logging.info(restore_vars)
+          tf.logging.info("Variables in %s but not in graph:", init_checkpoint)
+          tf.logging.info(ckpt_vars - global_vars)
+          tf.logging.info("Variables in graph but not in %s:", init_checkpoint)
+          tf.logging.info(global_vars - ckpt_vars)
+          tf.train.init_from_checkpoint(
+              init_checkpoint, {v: v for v in restore_vars}
+          )
+
         # Copy master variables to slices. Must be called first.
         restore_hook = mtf.MtfRestoreHook(lowering)
         saver = tf.train.Saver(
