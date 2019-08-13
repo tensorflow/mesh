@@ -186,7 +186,8 @@ def pretokenized_tfds_dataset(dataset_name=gin.REQUIRED,
       dataset_name,
       split=dataset_split,
       as_supervised=True,
-      data_dir=tfds_data_dir)
+      data_dir=tfds_data_dir,
+      shuffle_files=dataset_split == "train")
   if dataset_split == "train":
     dataset = dataset.repeat()
     dataset = dataset.shuffle(1000)
