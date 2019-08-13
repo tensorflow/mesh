@@ -510,11 +510,11 @@ def tpu_estimator_model_fn(model_type,
           global_vars = {v.op.name for v in tf.global_variables()}
           restore_vars = ckpt_vars.intersection(global_vars)
           tf.logging.info("Initializing variables from %s:", init_checkpoint)
-          tf.logging.info(restore_vars)
+          tf.logging.info("\n".join(sorted(restore_vars)))
           tf.logging.info("Variables in %s but not in graph:", init_checkpoint)
-          tf.logging.info(ckpt_vars - global_vars)
+          tf.logging.info("\n".join(sorted(ckpt_vars - global_vars)))
           tf.logging.info("Variables in graph but not in %s:", init_checkpoint)
-          tf.logging.info(global_vars - ckpt_vars)
+          tf.logging.info("\n".join(sorted(global_vars - ckpt_vars)))
           tf.train.init_from_checkpoint(
               init_checkpoint, {v: v for v in restore_vars}
           )
