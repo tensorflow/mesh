@@ -47,6 +47,31 @@ def constant_learning_rate(step, total_train_steps, learning_rate=gin.REQUIRED):
 
 
 @gin.configurable
+def linear_decay_learning_rate(step,
+                               total_train_steps,
+                               initial_lr=0.1,
+                               offset=0):
+  """Linearly decay the learning rate to 0.
+
+
+  Args:
+    step: a tf.scalar representing the step we want the learning rate for.
+    total_train_steps: a number, the total number of training steps.
+    initial_lr: initial learning rate. Decays from here.
+    offset: a number used for finetuning. Starts the learning-rate decay
+      schedule from this step forwards.
+
+  Returns:
+    a tf.Scalar, the learning rate for the step.
+  """
+
+  if step < offset:
+    return initial_lr
+  slope = initial_lr / float(total_train_steps - offset)
+  return initial_lr - slope * (step - offset)
+
+
+@gin.configurable
 def learning_rate_schedule_noam(step,
                                 total_train_steps,
                                 warmup_steps=10000,
