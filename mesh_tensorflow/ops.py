@@ -3997,6 +3997,14 @@ def zeros_like(t):
   return zeros(t.mesh, t.shape, dtype=t.dtype)
 
 
+def ones(mesh, shape, dtype=tf.float32):
+  return constant(mesh, 1, shape=convert_to_shape(shape), dtype=dtype)
+
+
+def ones_like(t):
+  return ones(t.mesh, t.shape, dtype=t.dtype)
+
+
 class StopGradient(Operation):
   """Similar to tf.stop_gradient."""
 

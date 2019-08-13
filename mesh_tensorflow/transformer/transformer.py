@@ -652,7 +652,8 @@ class Unitransformer(object):
                             has_partial_sequences=True,
                             encoder_layer_outputs=None,
                             never_end=False,
-                            remove_partial_sequences=False):
+                            remove_partial_sequences=False,
+                            sampling_keep_top_k=-1):
     """Sample randomly one token at a time.
 
     The partial_sequences represent partial sequences to be continued.  The
@@ -680,6 +681,8 @@ class Unitransformer(object):
       never_end: a boolean - if set, then avoid generating stop_at_token
       remove_partial_sequences: a boolean - whether to remove the partial
         sequences from the output
+      sampling_keep_top_k: an integer - if not -1, only sample from the top k
+        logits.
 
     Returns:
       a Tensor with shape [<batch_dims>, length_dim]
@@ -778,6 +781,16 @@ class Unitransformer(object):
               mtf.constant(logits.mesh, stop_at_token, dtype=tf.int32),
               self.output_vocab_dim, on_value=-1e9, off_value=0.0,
               dtype=logits.dtype)
+
+      # TBD whether this should be before or after never_end:
+      if sampling_keep_top_k != -1:
+        if sampling_keep_top_k <= 0:
+          raise ValueError("sampling_keep_top_k must either be -1 or positive.")
+        k_largest = mtf.nth_smallest_element(
+            logits, n=sampling_keep_top_k, reverse=True)
+        logits = mtf.where(mtf.less_equal(logits, k_largest),
+                           mtf.ones_like(logits)*-1e6, logits)
+
       ids_this_step = mtf.sample_with_temperature(
           logits, self.output_vocab_dim, temperature)
       new_position = position + 1
