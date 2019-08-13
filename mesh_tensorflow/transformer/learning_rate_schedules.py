@@ -51,7 +51,8 @@ def learning_rate_schedule_noam(step,
                                 total_train_steps,
                                 warmup_steps=10000,
                                 linear_decay_fraction=0.1,
-                                multiplier=1.0):
+                                multiplier=1.0,
+                                offset=0):
   """Noam's favorite learning-rate schedule.
 
   (rsqrt(max(step_num, warmup_steps))
@@ -64,12 +65,15 @@ def learning_rate_schedule_noam(step,
     warmup_steps: a number
     linear_decay_fraction: a number
     multiplier: a number
+    offset: a number used for finetuning. Starts the learning-rate decay
+      schedule from this step forwards. Prior to this step, the learning rate is
+      the same as if it were a warmup step.
 
   Returns:
     a tf.Scalar, the learning rate for the step.
   """
   train_steps = float(total_train_steps)
-  step_num = tf.cast(step, tf.float32)
+  step_num = tf.cast(step, tf.float32) - offset
   learning_rate = tf.math.rsqrt(tf.maximum(step_num, warmup_steps))
   learning_rate *= multiplier
   if linear_decay_fraction > 0:
