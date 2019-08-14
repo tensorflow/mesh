@@ -37,6 +37,7 @@ import tensorflow_datasets as tfds
 
 from tensorflow.contrib.tpu.python.tpu import tpu_config
 from tensorflow.contrib.tpu.python.tpu import tpu_estimator
+from tensorflow.python.ops import resources  # pylint: disable=g-direct-tensorflow-import
 
 tf.flags.DEFINE_multi_string("gin_file", None,
                              "List of paths to the config files.")
@@ -385,12 +386,24 @@ def tpu_estimator_model_fn(model_type,
       # master variables need to be copied to their slave slice variables.
       # Estimator uses a Scaffold's "local_init_op" for this purpose, so we
       # augment the default "local_init_op" here.
+      #
+      # The "ready_op" is also constructed here to ensure the variables
+      # initialized by "local_init_op" are the same ones checked by "ready_op".
+      #
+      # WARNING: Any variables created outside of this model_fn()
+      # (e.g. tpu_estimator/iterations_per_loop) will NOT be initialized nor
+      # checked by these ops.
       def scaffold_fn():
         return tf.train.Scaffold(
             local_init_op=tf.group(
                 tf.train.Scaffold.default_local_init_op(),
                 lowering.copy_masters_to_slices(),
-                name="mtf_local_init_op"))
+                name="mtf_local_init_op"),
+            ready_op=tf.concat(
+                [tf.report_uninitialized_variables(),
+                 resources.report_uninitialized_resources()],
+                axis=0,
+                name="mtf_ready_op"))
 
       return tpu_estimator.TPUEstimatorSpec(
           mode=tf.estimator.ModeKeys.PREDICT,
