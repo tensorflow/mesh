@@ -485,10 +485,6 @@ class OperationSplittabilityTest(tf.test.TestCase):
 class NthSmallestTest(tf.test.TestCase):
 
   def testNthSmallest(self):
-    batch = 2
-    channels = 3
-    inputs = tf.random_normal([batch, channels])
-
     graph = mtf.Graph()
     mesh = mtf.Mesh(graph, "my_mesh")
     a_dim = mtf.Dimension("a", 6)
@@ -515,6 +511,32 @@ class NthSmallestTest(tf.test.TestCase):
     self.assertAllEqual(self.evaluate(actual_outputs),
                         self.evaluate(expected_outputs))
 
+  def testNthSmallestReduceSecondDim(self):
+    graph = mtf.Graph()
+    mesh = mtf.Mesh(graph, "my_mesh")
+    a_dim = mtf.Dimension("a", 6)
+    b_dim = mtf.Dimension("b", 2)
+    inputs = tf.constant([[1, 10],
+                          [2, 9],
+                          [3, 8],
+                          [4, 7],
+                          [5, 6],
+                          [6, 5]])
+    reverse = False
+    n = 0  # find smallest element (n is zero-indexed)
+    reduced_dim = b_dim
+    expected_outputs = tf.constant([1, 2, 3, 4, 5, 5])
+
+    mtf_inputs = mtf.import_tf_tensor(
+        mesh, inputs, shape=mtf.Shape([a_dim, b_dim]))
+    mtf_outputs = mtf.nth_smallest_element(
+        mtf_inputs, n, reduced_dim, reverse, "test_nth_smallest")
+    mesh_impl = mtf.placement_mesh_impl.PlacementMeshImpl(
+        shape="all:2", layout={"a:all"}, devices=["", ""])
+    lowering = mtf.Lowering(graph, {mesh: mesh_impl})
+    actual_outputs = lowering.export_to_tf_tensor(mtf_outputs)
+    self.assertAllEqual(self.evaluate(actual_outputs),
+                        self.evaluate(expected_outputs))
 
 if __name__ == "__main__":
   tf.test.main()
