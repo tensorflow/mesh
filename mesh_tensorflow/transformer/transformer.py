@@ -668,7 +668,7 @@ class Unitransformer(object):
     Args:
       partial_sequences: an int32 Tensor with shape [<batch_dims>, length_dim]
       stop_at_token: an optional integer eos id.  Stop when we produce it.
-      max_steps: an optional integer
+      max_steps: an optional integer, the max number of steps to decode.
       temperature: an optional floating point value between 0.0 and 1.0 0.0
         means argmax, 1.0 means sample according to predicted distribution.
       variable_dtype: a mtf.VariableDType
@@ -687,7 +687,6 @@ class Unitransformer(object):
     Returns:
       a Tensor with shape [<batch_dims>, length_dim]
     """
-    del max_steps  # TODO(noam): implement
     if not self.autoregressive:
       raise ValueError("must be autoregressive")
 
@@ -743,6 +742,10 @@ class Unitransformer(object):
     def cond_fn(position, ids, *unused_states):
       """Should we run another loop iteration."""
       past_end = mtf.greater_equal(position, length_dim.size)
+      if max_steps:
+        past_end = mtf.logical_or(
+            past_end, mtf.greater_equal(position - initial_position, max_steps))
+
       is_done = past_end
       if stop_at_token is not None:
         eos_count = mtf.reduce_sum(
