@@ -786,6 +786,10 @@ class Unitransformer(object):
               dtype=logits.dtype)
 
       # TBD whether this should be before or after never_end:
+      # Note for adding top_p sampling in the future, in other code bases, the
+      # option to apply temperature is done before the top-k truncation. This
+      # implementation does this in the opposite order. For top-k this doesn't
+      # matter, but for top_p it will.
       if sampling_keep_top_k != -1:
         if sampling_keep_top_k <= 0:
           raise ValueError("sampling_keep_top_k must either be -1 or positive.")
