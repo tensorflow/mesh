@@ -5244,7 +5244,7 @@ class MtfCheckpointSaverListener(tf.estimator.CheckpointSaverListener):
     tf.logging.info("Done with the session.")
 
 
-class MtfRestoreHook(tf.train.SessionRunHook):
+class MtfRestoreHook(tf.estimator.SessionRunHook):
   """Copy masters to slices after restoring."""
 
   def __init__(self, lowering):
