@@ -4703,7 +4703,7 @@ def mtf_slice(x, begin, size, slice_dim_name, name=None):
     slice_dim_name: string, dimension name of slicing axis.
     name: an optional string
   Returns:
-    a Tensor with shape extended by output_shape for the last axis.
+    a Tensor
   """
   return SliceOperation(
       x, begin, size, slice_dim_name, name=name).outputs[0]
@@ -4718,7 +4718,7 @@ def pad(x, paddings, dim_name, name=None):
     dim_name: string, name for the padding dim
     name: an optional string
   Returns:
-    a Tensor with shape extended by output_shape for the last axis.
+    a Tensor
   """
   return PadOperation(
       x, paddings, dim_name, name=name).outputs[0]

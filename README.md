@@ -312,6 +312,33 @@ the number of cores.  The differences between cores are as follows:
   this by requiring that all imported/exported tensors be fully-replicated.  In
   the future, we should handle this correctly.
 
+# Experimental features
+
+The input pipeline of Mesh Tensorflow models might become a bottleneck, when
+training with large input (e.g., high resolution images). We provide new APIs
+and a new input pipeline for you to run Mesh Tensorflow models. You can find
+them under the [`experimental/`](https://github.com/tensorflow/mesh/blob/master/mesh_tensorflow/experimental/)
+folder. We suggest that you give them a try when your input is so large that
+running Mesh Tensorflow models with the default APIs is almost infeasible.
+To be more specific:
+
+* The BROADCAST mode in TPUEstimator does not scale up to large inputs (images
+  of tens of millions of pixels). We provide a new input pipeline:
+  [`experimental/mtf_input_reader.py`](https://github.com/tensorflow/mesh/blob/master/mesh_tensorflow/experimental/mtf_input_reader.py).
+  See [`experimental/mtf_model_executor.py`](https://github.com/tensorflow/mesh/blob/master/mesh_tensorflow/experimental/mtf_model_executor.py)
+  on how to use it.
+* If your model takes images as input and has convolution layers. You cannot
+  directly map image height and width dimensions to mesh dimensions, due to the
+  sliding-window nature of convolution. Instead, you should use spatial
+  partitioning. We provide examples in
+  [`experimental/mtf_unet3d.py`](https://github.com/tensorflow/mesh/blob/master/mesh_tensorflow/experimental/mtf_unet3d.py).
+* If you want more control on the training and evaluation loop, instead of using
+  the default API (TPUEstimator) to run your model, you can use low level APIs
+  in [`experimental/model_executor.py`](https://github.com/tensorflow/mesh/blob/master/mesh_tensorflow/experimental/mtf_model_executor.py).
+
+Note that we did not test the experimental code on GPUs. We ran them on TPUs.
+We believe that some debugging would be required for it to work on GPUs.
+
 # Instructions for running on cloud-tpu
 
 Note: It requires `tensorflow>=1.11.0`.
