@@ -19,13 +19,11 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import collections
 import contextlib
 import heapq
-import six
 
 import tensorflow as tf
-from tensorflow.python.framework import ops
+from tensorflow.python.framework import ops  # pylint: disable=g-direct-tensorflow-import
 
 
 @contextlib.contextmanager
@@ -72,6 +70,9 @@ class BalancedVariablePlacer(object):
     return device
 
 
+SCALAR_SUMMARIES_COLLECTION_KEY = 'mtf_scalar_summaries'
+
+
 def create_host_call(model_dir):
   """Construct a host_call writing scalar summaries.
 
@@ -86,59 +87,53 @@ def create_host_call(model_dir):
     (fn, args) Pair to be called by TPUEstimator as the host_call.
   """
   graph = tf.get_default_graph()
-  summaries = graph.get_collection(tf.GraphKeys.SUMMARIES)
-  gs_t = tf.reshape(tf.to_int32(tf.train.get_global_step()), [1])
-  summary_kwargs = collections.OrderedDict()
-  for t in summaries:
-    # TODO(aidangomez): enable ImageSummary support when we have a faster method
-    # see @shibow's comment in cl/202344570
-    if t.op.type not in ['ScalarSummary']:
-      tf.logging.warn('Ignoring unsupported tf.Summary type %s' % t.op.type)
-      continue
+  # a list of (name, lowered tensor) tuples
+  summaries = graph.get_collection(SCALAR_SUMMARIES_COLLECTION_KEY)
 
-    name = t.op.name
-    tensor = t.op.inputs[1]
-    if t.op.type == 'ScalarSummary':
-      assert tensor.shape.is_compatible_with([])
-      if tensor.dtype == tf.int64:
-        tensor = tf.to_int32(tensor)
-      summary_kwargs['ScalarSummary' + name] = tf.reshape(tensor, [1])
+  def maybe_cast(tensor):
+    assert tensor.shape.is_compatible_with([]), tensor.name
+    if tensor.dtype == tf.int64:
+      return tf.to_int32(tensor)
+    if tensor.dtype == tf.bfloat16:
+      return tf.cast(tensor, tf.float32)
+    return tensor
+
+  reshaped_tensors = [tf.reshape(maybe_cast(t), [1]) for _, t in summaries]
+
   # When no supported summaries are found, don't create host_call. Otherwise,
   # TPU outfeed queue would enqueue global_step while host_call doesn't dequeue
   # it, eventually causing hang.
-  if not summary_kwargs:
+  if not reshaped_tensors:
     return None
-  summary_kwargs['global_step'] = gs_t
-  tf.logging.info('summary_kwargs %s' % str(summary_kwargs))
 
-  def host_call_fn(**kwargs):
-    """Training host call. Creates summaries for training metrics.
-
-    Args:
-      **kwargs: Dict of {str: Tensor} , with `Tensor` of shape `[batch]`. Must
-        contain key 'global_step' with value of current global_step Tensor.
-
-    Returns:
-      List of summary ops to run on the CPU host.
-    """
-    gs = tf.to_int64(kwargs.pop('global_step')[0])
+  def host_call_fn(global_step, *args):
+    """Training host call. Creates scalar summaries for training metrics."""
+    # This function is executed on the CPU and should not directly reference
+    # any Tensors in the rest of the `model_fn`. To pass Tensors from the
+    # model to the `model_fn`, provide as part of the `host_call`.
+    global_step = tf.cast(global_step[0], tf.int64)
     with tf.contrib.summary.create_file_writer(model_dir).as_default():
       with tf.contrib.summary.always_record_summaries():
-        # We need to use tf.contrib.summary in order to feed the `step`.
-        for name, value in sorted(six.iteritems(kwargs)):
-          if name.startswith('ScalarSummary'):
-            name = name[len('ScalarSummary'):]
-            tf.contrib.summary.scalar(
-                name, tf.reduce_mean(tf.to_float(value)), step=gs)
+        # We cannot directly use any tensor from summaries, because each
+        # tensor here must be a concat of multiple tensors from all shards.
+        # Therefore, we rely on the assumption that args wil have the same
+        # length as summaries, and all tensors in args will have the same
+        # order of self._tup_summaries.
+        assert len(args) == len(summaries)
+        for i, tensor in enumerate(args):
+          name = summaries[i][0]
+          tf.contrib.summary.scalar(
+              name, tf.reduce_mean(tensor), step=global_step)
         return tf.contrib.summary.all_summary_ops()
 
-  return (host_call_fn, summary_kwargs)
+  global_step_t = tf.reshape(tf.to_int32(tf.train.get_global_step()), [1])
+  return host_call_fn, [global_step_t] + reshaped_tensors
 
 
 def remove_summaries():
   """Remove summaries from the default graph."""
   g = tf.get_default_graph()
-  key = tf.GraphKeys.SUMMARIES
+  key = 'mtf_scalar_summaries'
   tf.logging.debug('Remove summaries %s' % str(g.get_collection(key)))
   del g.get_collection_ref(key)[:]
   assert not g.get_collection(key)

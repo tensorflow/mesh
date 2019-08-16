@@ -4038,7 +4038,8 @@ class ScalarSummaryOperation(Operation):
 
   def lower(self, lowering):
     lowered_input = lowering.tensors[self.inputs[0]].to_laid_out_tensor()
-    tf.summary.scalar(self.name, lowered_input.tensor_list[0])
+    tf.add_to_collection(utils.SCALAR_SUMMARIES_COLLECTION_KEY,
+                         (self.name, lowered_input.tensor_list[0]))
     lowering.set_tensor_lowering(
         self.outputs[0], lowered_input)
 

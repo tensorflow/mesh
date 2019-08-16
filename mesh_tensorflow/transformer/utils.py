@@ -480,6 +480,9 @@ def tpu_estimator_model_fn(model_type,
 
       loss = loss_dict["loss"]
 
+      if tpu_summaries:
+        mtf.scalar_summary("loss", loss)
+
       if callable(learning_rate_schedule):
         # the following happens on CPU since TPU can't handle summaries.
         with mtf.utils.outside_all_rewrites():
@@ -515,6 +518,14 @@ def tpu_estimator_model_fn(model_type,
       if hasattr(transformer_model, "initialize"):
         with mtf.utils.outside_all_rewrites():
           transformer_model.initialize()
+
+      if tpu_summaries:
+        # has to be outside of
+        # with mtf.utils.outside_all_rewrites()
+        host_call = mtf.utils.create_host_call(model_dir)
+        mtf.utils.remove_summaries()
+      else:
+        host_call = None
 
       with mtf.utils.outside_all_rewrites():
 
@@ -552,12 +563,6 @@ def tpu_estimator_model_fn(model_type,
             model_dir, summarize_config=True)
 
         if use_tpu:
-          if tpu_summaries:
-            tf.summary.scalar("loss", tf_loss)
-            host_call = mtf.utils.create_host_call(model_dir)
-            mtf.utils.remove_summaries()
-          else:
-            host_call = None
           return tpu_estimator.TPUEstimatorSpec(
               mode=tf.estimator.ModeKeys.TRAIN,
               loss=tf_loss,
