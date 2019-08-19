@@ -38,9 +38,10 @@ tf.flags.DEFINE_integer('ct_resolution', 128,
                         'Resolution of CT images along depth, height and '
                         'width dimensions.')
 
-tf.flags.DEFINE_integer('batch_size', 32, 'Training batch size.')
-tf.flags.DEFINE_integer('image_nx_block', 16, 'The number of x blocks.')
-tf.flags.DEFINE_integer('image_ny_block', 16, 'The number of y blocks.')
+tf.flags.DEFINE_integer('batch_size_train', 32, 'Training batch size.')
+tf.flags.DEFINE_integer('batch_size_eval', 32, 'Evaluation batch size.')
+tf.flags.DEFINE_integer('image_nx_block', 8, 'The number of x blocks.')
+tf.flags.DEFINE_integer('image_ny_block', 8, 'The number of y blocks.')
 tf.flags.DEFINE_integer('image_c', 1, 'The number of input image channels.')
 tf.flags.DEFINE_integer('label_c', 3, 'The number of output classes.')
 
@@ -51,10 +52,15 @@ tf.flags.DEFINE_string('loss_fn', 'cross_entropy', 'cross_entropy or dice.')
 tf.flags.DEFINE_float('dice_epsilon', 1e-1,
                       'A small value that prevents 0 dividing.')
 
-tf.flags.DEFINE_float('image_rotate_angle_std', 0.0,
-                      'How much you want to rotate the image and label for, '
+tf.flags.DEFINE_float('image_translate_ratio', 0.1,
+                      'How much you want to translate the image and label, '
                       'for data augmentation.')
-tf.flags.DEFINE_float('image_noise_ratio', 0.08,
+tf.flags.DEFINE_float('image_transform_ratio', 0.1,
+                      'How much you want to sheer the image and label, '
+                      'for data augmentation.')
+tf.flags.DEFINE_float('image_noise_probability', 0.80,
+                      'Probability of adding noise during data augmentation.')
+tf.flags.DEFINE_float('image_noise_ratio', 0.02,
                       'How much random noise you want to add to CT images.')
 
 tf.flags.DEFINE_string('mtf_dtype', 'bfloat16', 'dtype for MeshTensorflow.')
@@ -75,6 +81,103 @@ def get_layout():
   return mtf.convert_to_layout_rules(FLAGS.layout)
 
 
+def _transform_3d(image_cube, proj_matrix, static_axis, interpolation):
+  """Apply rotation."""
+  assert static_axis in [0, 1, 2]
+  if static_axis == 2:
+    image_cube = tf.contrib.image.transform(
+        image_cube, proj_matrix, interpolation)
+  elif static_axis == 1:
+    image_cube = tf.transpose(image_cube, [0, 2, 1])
+    image_cube = tf.contrib.image.transform(
+        image_cube, proj_matrix, interpolation)
+    image_cube = tf.transpose(image_cube, [0, 2, 1])
+  else:
+    image_cube = tf.transpose(image_cube, [2, 1, 0])
+    image_cube = tf.contrib.image.transform(
+        image_cube, proj_matrix, interpolation)
+    image_cube = tf.transpose(image_cube, [2, 1, 0])
+  return image_cube
+
+
+def _maybe_add_noise(image_cube, scales,
+                     image_noise_probability, image_noise_ratio):
+  """Add noise at multiple scales."""
+  noise_list = []
+  for scale in scales:
+    rand_image_noise_ratio = tf.random.uniform(
+        shape=[], minval=0.0, maxval=image_noise_ratio)
+    # Eliminate the background intensity with 60 percentile.
+    noise_dev = rand_image_noise_ratio * (
+        tf.contrib.distributions.percentile(image_cube, q=95) - \
+        tf.contrib.distributions.percentile(image_cube, q=60))
+    noise = tf.random.normal(
+        shape=tf.shape(image_cube), mean=0.0, stddev=noise_dev)
+    noise = tf.clip_by_value(
+        noise, -2.0 * noise_dev, 2.0 * noise_dev)
+    if scale != 1:
+      noise = tf.image.resize_images(noise, [tf.shape(image_cube)[0]] * 2)
+      noise = tf.transpose(noise, [0, 2, 1])
+      noise = tf.image.resize_images(noise, [tf.shape(image_cube)[0]] * 2)
+    noise_list.append(noise)
+
+  skip_noise = tf.greater(tf.random.uniform([]), image_noise_probability)
+  image_cube = tf.cond(skip_noise,
+                       lambda: image_cube, lambda: image_cube + noise_list[0])
+  image_cube = tf.cond(skip_noise,
+                       lambda: image_cube, lambda: image_cube + noise_list[1])
+  return image_cube
+
+
+def _flip_3d(image_cube, flip_indicator, flip_axis):
+  """Randomly flip the image."""
+  if flip_axis == 1:
+    image_cube = tf.transpose(image_cube, [1, 0, 2])
+  elif flip_axis == 2:
+    image_cube = tf.transpose(image_cube, [2, 1, 0])
+  image_cube = tf.cond(tf.less(flip_indicator, 0.5),
+                       lambda: image_cube,
+                       lambda: tf.image.flip_up_down(image_cube))
+  if flip_axis == 1:
+    image_cube = tf.transpose(image_cube, [1, 0, 2])
+  elif flip_axis == 2:
+    image_cube = tf.transpose(image_cube, [2, 1, 0])
+  return image_cube
+
+
+def _data_augmentation_3d(image, label):
+  """3D image and label augmentation."""
+  for static_axis in [0, 1, 2]:
+    def _truncated_normal(stddev):
+      v = tf.random.normal(shape=[], mean=0.0, stddev=stddev)
+      v = tf.clip_by_value(v, -2 * stddev, 2 * stddev)
+      return v
+
+    a0 = _truncated_normal(FLAGS.image_transform_ratio) + 1.0
+    a1 = _truncated_normal(FLAGS.image_transform_ratio)
+    a2 = _truncated_normal(FLAGS.image_translate_ratio) * FLAGS.ct_resolution
+    b0 = _truncated_normal(FLAGS.image_transform_ratio)
+    b1 = _truncated_normal(FLAGS.image_transform_ratio) + 1.0
+    b2 = _truncated_normal(FLAGS.image_translate_ratio) * FLAGS.ct_resolution
+    c0 = _truncated_normal(FLAGS.image_transform_ratio)
+    c1 = _truncated_normal(FLAGS.image_transform_ratio)
+    proj_matrix = [a0, a1, a2, b0, b1, b2, c0, c1]
+
+    image = _transform_3d(image, proj_matrix, static_axis, 'BILINEAR')
+    label = _transform_3d(label, proj_matrix, static_axis, 'NEAREST')
+
+  if FLAGS.image_noise_ratio > 1e-6:
+    image = _maybe_add_noise(
+        image, [1, 4], FLAGS.image_noise_probability, FLAGS.image_noise_ratio)
+
+  for flip_axis in [0, 1, 2]:
+    flip_indicator = tf.random.uniform(shape=[])
+    image = _flip_3d(image, flip_indicator, flip_axis)
+    label = _flip_3d(label, flip_indicator, flip_axis)
+
+  return image, label
+
+
 def get_dataset_creator(dataset_str):
   """Returns a function that creates an unbatched dataset."""
   if dataset_str == 'train':
@@ -92,57 +195,6 @@ def get_dataset_creator(dataset_str):
   def _dataset_creator():
     """Returns an unbatch dataset."""
 
-    def _data_augmentation(image, label):
-      """On-the-fly data augmentation."""
-
-      # Get a random rotation angle.
-      rand_angle = tf.random.normal(
-          shape=[], mean=0.0,
-          stddev=FLAGS.image_rotate_angle_std)
-      image_rotate_rad_max = 2.0 * FLAGS.image_rotate_angle_std * 3.14 / 180
-      rand_angle = tf.clip_by_value(
-          rand_angle * 3.14 / 180,
-          -image_rotate_rad_max, image_rotate_rad_max)
-
-      # Get a random noises at multiple scales.
-      noise_list = []
-      for scale in [1, 4]:
-        noise_shape = [FLAGS.ct_resolution // scale] * 3 + [FLAGS.image_c]
-        rand_image_noise_ratio = tf.random.uniform(
-            shape=[], minval=0.0, maxval=FLAGS.image_noise_ratio)
-        noise_dev = rand_image_noise_ratio * (
-            tf.contrib.distributions.percentile(image, q=90) - \
-            tf.contrib.distributions.percentile(image, q=10))
-        noise = tf.random.normal(
-            shape=noise_shape, mean=0.0, stddev=noise_dev)
-        noise = tf.clip_by_value(
-            noise, -2.0 * noise_dev, 2.0 * noise_dev)
-        if noise_shape != 1:
-          noise = tf.image.resize_images(noise, [FLAGS.ct_resolution] * 2)
-          noise = tf.transpose(noise, [1, 0, 2, 3])
-          noise = tf.image.resize_images(noise, [FLAGS.ct_resolution] * 2)
-        noise_list.append(noise)
-
-      if FLAGS.image_rotate_angle_std > 1e-6:
-        # Apply rotation.
-        skip_rotation = tf.less(rand_angle, 2 * 3.14 / 180)
-        # pylint: disable=g-long-lambda
-        image = tf.cond(skip_rotation,
-                        lambda: image,
-                        lambda: tf.contrib.image.rotate(
-                            image, rand_angle, 'BILINEAR'))
-        label = tf.cond(skip_rotation,
-                        lambda: label,
-                        lambda: tf.contrib.image.rotate(
-                            label, rand_angle, 'NEAREST'))
-        # pylint: enable=g-long-lambda
-
-      # Apply noise.
-      for noise in noise_list:
-        image = image + noise
-
-      return image, label
-
     def _parser_fn(serialized_example):
       """Parses a single tf.Example into image and label tensors."""
       features = {}
@@ -155,10 +207,11 @@ def get_dataset_creator(dataset_str):
       image = tf.decode_raw(parsed['image/ct_image'], tf.float32)
       label = tf.decode_raw(parsed['image/label'], tf.float32)
 
-      image = tf.reshape(image, spatial_dims + [FLAGS.image_c])
-      label = tf.reshape(label, spatial_dims + [1])
+      image = tf.reshape(image, spatial_dims)
+      label = tf.reshape(label, spatial_dims)
 
-      image, label = _data_augmentation(image, label)
+      if dataset_str == 'train':
+        image, label = _data_augmentation_3d(image, label)
 
       spatial_dims_w_blocks = [FLAGS.image_nx_block,
                                FLAGS.ct_resolution // FLAGS.image_nx_block,
@@ -192,7 +245,11 @@ def get_dataset_creator(dataset_str):
               cycle_length=32,
               sloppy=True))
     else:
-      dataset = dataset.map(lambda file_name: dataset_fn(file_name).prefetch(1))
+      dataset = dataset.apply(
+          tf.data.experimental.parallel_interleave(
+              lambda file_name: dataset_fn(file_name).prefetch(1),
+              cycle_length=1,
+              sloppy=False))
 
     if shuffle:
       dataset = dataset.shuffle(64).map(_parser_fn, num_parallel_calls=64)
@@ -204,9 +261,13 @@ def get_dataset_creator(dataset_str):
   return _dataset_creator
 
 
-def get_input_mtf_shapes():
+def get_input_mtf_shapes(dataset_str):
   """Returns a list of mtf.Shapes of input tensors."""
-  batch_dim = mtf.Dimension('batch', FLAGS.batch_size)
+  if dataset_str == 'train':
+    batch_dim = mtf.Dimension('batch', FLAGS.batch_size_train)
+  else:
+    assert dataset_str == 'eval'
+    batch_dim = mtf.Dimension('batch', FLAGS.batch_size_eval)
   image_nx_dim = mtf.Dimension('image_nx_block', FLAGS.image_nx_block)
   image_ny_dim = mtf.Dimension('image_ny_block', FLAGS.image_ny_block)
   image_sx_dim = mtf.Dimension('image_sx_block',
@@ -263,12 +324,12 @@ def deconv3d_with_spatial_partition(x, image_nx_dim, image_ny_dim,
   return x
 
 
-def unet3d_with_spatial_partition(mesh, is_training, images, labels):
+def unet3d_with_spatial_partition(mesh, dataset_str, images, labels):
   """Builds the UNet model graph, train op and eval metrics.
 
   Args:
     mesh: a MeshTensorflow.mesh object.
-    is_training: a boolean. This is used for batch_norm.
+    dataset_str: a string of either train or eval. This is used for batch_norm.
     images: input image Tensor. Shape [batch, x, y, z, num_channels].
     labels: input label Tensor. Shape [batch, x, y, z, num_classes].
 
@@ -276,7 +337,12 @@ def unet3d_with_spatial_partition(mesh, is_training, images, labels):
     Prediction and loss.
   """
 
-  batch_dim = mtf.Dimension('batch', FLAGS.batch_size)
+  is_training = (dataset_str == 'train')
+  if dataset_str == 'train':
+    batch_dim = mtf.Dimension('batch', FLAGS.batch_size_train)
+  else:
+    assert dataset_str == 'eval'
+    batch_dim = mtf.Dimension('batch', FLAGS.batch_size_eval)
   image_nx_dim = mtf.Dimension('image_nx_block', FLAGS.image_nx_block)
   image_ny_dim = mtf.Dimension('image_ny_block', FLAGS.image_ny_block)
   image_sx_dim = mtf.Dimension('image_sx_block',
@@ -286,7 +352,7 @@ def unet3d_with_spatial_partition(mesh, is_training, images, labels):
   image_sz_dim = mtf.Dimension('image_sz_block', FLAGS.ct_resolution)
   image_c_dim = mtf.Dimension('image_c', FLAGS.image_c)
   label_c_dim = mtf.Dimension('label_c', FLAGS.label_c)
-  mtf_images_shape, mtf_labels_shape = get_input_mtf_shapes()
+  mtf_images_shape, mtf_labels_shape = get_input_mtf_shapes(dataset_str)
 
   mtf_dtype = tf.as_dtype(FLAGS.mtf_dtype)
   variable_dtype = mtf.VariableDType(mtf_dtype, mtf_dtype, mtf_dtype)

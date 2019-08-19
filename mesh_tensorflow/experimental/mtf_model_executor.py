@@ -126,20 +126,20 @@ def _get_model_fn(train_or_eval, cpu_devices, d_assignment, num_hosts):
   def _model_fn(input_fea, input_lab):
     """Creates a model, add summary, modes (train or eval), and hooks."""
 
-    def _add_summary(train_or_eval, loss, eval_metrics, global_step):
+    def _add_summary(lowering, train_or_eval, loss, scalars, global_step):
       """Add all summaries."""
       tf_loss = tf.to_float(lowering.export_to_tf_tensor(loss))
-      for k in eval_metrics.keys():
-        eval_metrics[k] = tf.to_float(
-            lowering.export_to_tf_tensor(eval_metrics[k]))
+      for k in scalars.keys():
+        scalars[k] = tf.to_float(
+            lowering.export_to_tf_tensor(scalars[k]))
 
-      def _host_loss_summary(global_step, tf_loss, **eval_metrics):
+      def _host_loss_summary(global_step, tf_loss, **scalars):
         """Add summary.scalar in host side."""
         gs = tf.cast(global_step, tf.int64)
         sum_loss = tf.contrib.summary.scalar(
             '{}_loss'.format(train_or_eval), tf_loss, step=gs)
         sum_ops = [sum_loss.op]
-        for description, tf_metric in eval_metrics.iteritems():
+        for description, tf_metric in scalars.iteritems():
           sum_metric = tf.contrib.summary.scalar(
               '{}_{}'.format(train_or_eval, description), tf_metric, step=gs)
           sum_ops.append(sum_metric)
@@ -152,7 +152,7 @@ def _get_model_fn(train_or_eval, cpu_devices, d_assignment, num_hosts):
           _host_loss_summary,
           tf.cast(global_step, tf.int32),
           tf_loss,
-          **eval_metrics)
+          **scalars)
 
       return tf_loss
 
@@ -178,25 +178,30 @@ def _get_model_fn(train_or_eval, cpu_devices, d_assignment, num_hosts):
 
     with mtf.utils.outside_all_rewrites():  # Do not tpu_rewrite this part.
       # Not using the logits output for now.
-      _, loss, eval_metrics, bn_update_ops = (
+      _, loss, scalars, bn_update_ops = (
           mtf_unet3d.unet3d_with_spatial_partition(
-              mesh, train_or_eval == 'train', input_fea, input_lab))
+              mesh, train_or_eval, input_fea, input_lab))
 
-    var_grads = mtf.gradients(
-        [loss], [v.outputs[0] for v in graph.trainable_variables])
-    optimizer = mtf.optimize.AdafactorOptimizer(learning_rate=FLAGS.lr)
-    update_ops = optimizer.apply_grads(var_grads, graph.trainable_variables)
+    if train_or_eval == 'train':
+      var_grads = mtf.gradients(
+          [loss], [v.outputs[0] for v in graph.trainable_variables])
+      optimizer = mtf.optimize.AdafactorOptimizer(learning_rate=FLAGS.lr)
+      update_ops = optimizer.apply_grads(var_grads, graph.trainable_variables)
 
-    # This is where the actual tf graph got built.
-    lowering = mtf.Lowering(graph, {mesh: mesh_impl})
+      # This is where the actual tf graph got built.
+      lowering = mtf.Lowering(graph, {mesh: mesh_impl})
 
-    tf_update_ops = [lowering.lowered_operation(op) for op in update_ops]
-    tf_update_ops.append(tf.assign_add(global_step, 1))
-    tf_update_ops.extend(
-        [lowering.lowered_operation(op) for op in bn_update_ops])
-    tf_update_ops_group = tf.group(tf_update_ops)
+      tf_update_ops = [lowering.lowered_operation(op) for op in update_ops]
+      tf_update_ops.append(tf.assign_add(global_step, 1))
+      tf_update_ops.extend(
+          [lowering.lowered_operation(op) for op in bn_update_ops])
+      tf_update_ops_group = tf.group(tf_update_ops)
 
-    tf_loss = _add_summary(train_or_eval, loss, eval_metrics, global_step)
+    else:  # train_or_eval == 'eval':
+      # This is where the actual tf graph got built.
+      lowering = mtf.Lowering(graph, {mesh: mesh_impl})
+
+    tf_loss = _add_summary(lowering, train_or_eval, loss, scalars, global_step)
 
     with mtf.utils.outside_all_rewrites():
       master_to_slice_hook = mtf.MtfRestoreHook(lowering)
@@ -248,7 +253,7 @@ def _train_phase(mesh_impl, cpu_devices, d_assignment, num_hosts, num_cores):
         tf.contrib.summary.always_record_summaries()):
       # Setup input pipeline.
       ds_creator = mtf_unet3d.get_dataset_creator('train')
-      mtf_shapes = mtf_unet3d.get_input_mtf_shapes()
+      mtf_shapes = mtf_unet3d.get_input_mtf_shapes('train')
       simd_input_reader = mtf_input_reader.SimdMeshImplInputReader(
           mesh_impl, ds_creator, mtf_shapes)
 
@@ -291,7 +296,7 @@ def _eval_phase(mesh_impl, cpu_devices, d_assignment, num_hosts, num_cores):
         tf.contrib.summary.always_record_summaries()):
       # Setup input pipeline.
       ds_creator = mtf_unet3d.get_dataset_creator('eval')
-      mtf_shapes = mtf_unet3d.get_input_mtf_shapes()
+      mtf_shapes = mtf_unet3d.get_input_mtf_shapes('eval')
       simd_input_reader = mtf_input_reader.SimdMeshImplInputReader(
           mesh_impl, ds_creator, mtf_shapes)
 
