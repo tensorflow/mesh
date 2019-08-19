@@ -348,7 +348,7 @@ def tpu_estimator_model_fn(model_type,
       if not use_tpu:
         tf.logging.info("feature %s : %s" % (key, x))
         x = tf.Print(
-            x, [x], "import feature %s" % key, summarize=1000, first_n=1)
+            x, [x], "import feature %s" % key, summarize=1000, first_n=10)
       mtf_features[key] = mtf.import_fully_replicated(
           mesh, x, feature_shape, name=key)
 
@@ -378,9 +378,13 @@ def tpu_estimator_model_fn(model_type,
       else:
         raise ValueError("unrecognized class")
       mtf_samples = mtf.anonymize(mtf_samples)
+      inputs = mtf.anonymize(inputs)
       lowering = mtf.Lowering(graph, {mesh: mesh_impl}, autostack=autostack)
+      inputs = lowering.export_to_tf_tensor(inputs)
       outputs = lowering.export_to_tf_tensor(mtf_samples)
-      predictions = {"outputs": outputs}
+      predictions = {
+          "inputs": inputs,
+          "outputs": outputs}
 
       # When exporting a model, we need to communicate to TF-Serving that
       # master variables need to be copied to their slave slice variables.
@@ -747,10 +751,13 @@ def decode(estimator,
     output_string = targets_vocabulary(vocabulary).decode(
         [int(x) for x in output_ids])
     decodes.append(output_string)
+    input_ids = clean_decodes(list(result["inputs"]), vocab_size)
+    input_string = targets_vocabulary(vocabulary).decode(
+        [int(x) for x in input_ids])
     if i & (i - 1) == 0:
       # LOG every power of 2.
-      tf.logging.info("decoded {}: {}".format(i, output_string))
-
+      tf.logging.info("decoded {}: {}".format(i, input_string))
+      tf.logging.info("            -> {}".format(output_string))
   return decodes
 
 
