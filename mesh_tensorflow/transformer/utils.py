@@ -560,7 +560,7 @@ def tpu_estimator_model_fn(model_type,
             saver=saver,
             listeners=[saver_listener])
         gin_config_saver_hook = gin.tf.GinConfigSaverHook(
-            model_dir, summarize_config=True)
+            model_dir, summarize_config=True, include_step_in_filename=False)
 
         if use_tpu:
           return tpu_estimator.TPUEstimatorSpec(
