@@ -3069,6 +3069,145 @@ def conv3d_backprop_filter(conv_input,
                                           name=name).outputs[0]
 
 
+class Conv2dTransposeOperation(Operation):
+  """like tf.nn.conv2d_transpose.
+
+  Currently we assume that the data format is always "NHWC".
+  # TODO(lehou): support more options such as dilation.
+  Always dilation rate of 1
+  padding: "SAME" or "VALID"
+  """
+
+  def __init__(self, conv_input, conv_filter, strides, padding, name=None):
+    super(Conv2dTransposeOperation, self).__init__(
+        [conv_input, conv_filter], name=name or "conv2d_transpose")
+    self._padding = padding
+    self._batch_dims = conv_input.shape.dims[:-3]
+    self._in_h_dim, self._in_w_dim, self._in_dim = conv_input.shape.dims[-3:]
+    self._fh_dim, self._fw_dim = conv_filter.shape.dims[:2]
+
+    # Filter shape is transposed.
+    self._out_dim, f_in_dim = conv_filter.shape.dims[2:]
+    if f_in_dim != self._in_dim:
+      raise ValueError("Dimensions do not match input=%s filter=%s"
+                       % (conv_input, conv_filter))
+
+    # compute output shape.
+    # now we assume the padding doesn't change the output shape.
+    # TODO(lehou): work out the output shape in general cases.
+    out_h = self._in_h_dim.size
+    out_w = self._in_w_dim.size
+    self._strides = strides
+    if strides is not None:
+      out_h *= strides[1]
+      out_w *= strides[2]
+
+    # name output shape.
+    self._out_h_dim = Dimension(self._in_h_dim.name, out_h)
+    self._out_w_dim = Dimension(self._in_w_dim.name, out_w)
+    output_shape = Shape(self._batch_dims + [
+        self._out_h_dim, self._out_w_dim, self._out_dim])
+    self._outputs = [Tensor(self, output_shape, conv_input.dtype)]
+
+    unsplittable_dims = [self._in_h_dim, self._in_w_dim,
+                         self._fh_dim, self._fw_dim]
+    self._splittable_dims, self._unsplittable_dims = (
+        self._initialize_splittable_and_unsplittable_dims(
+            "splittable", [dim.name for dim in unsplittable_dims]))
+
+  def gradient(self, grad_ys):
+    dy = grad_ys[0]
+    conv_input, conv_filter = self.inputs
+    return [
+        conv2d_transpose_backprop_input(self._inputs[0].shape,
+                                        conv_filter,
+                                        dy,
+                                        self._strides,
+                                        self._padding),
+        conv2d_transpose_backprop_filter(conv_input,
+                                         self._inputs[1].shape,
+                                         dy,
+                                         self._strides,
+                                         self._padding)]
+
+  def lower(self, lowering):
+    mesh_impl = lowering.mesh_impl(self)
+    conv_input, conv_filter = self.inputs
+    if mesh_impl.tensor_dimension_to_mesh_axis(self._in_h_dim) is not None:
+      raise ValueError("can't slice along dimension h")
+    if mesh_impl.tensor_dimension_to_mesh_axis(self._in_w_dim) is not None:
+      raise ValueError("can't slice along dimension w")
+    if mesh_impl.tensor_dimension_to_mesh_axis(self._fh_dim) is not None:
+      raise ValueError("can't slice along dimension fh")
+    if mesh_impl.tensor_dimension_to_mesh_axis(self._fw_dim) is not None:
+      raise ValueError("can't slice along dimension fw")
+
+    # run conv2d_transpose in each slice.
+    def tf_fn(tf_input, tf_filter):
+      """conv2d_transpose in tensorflow."""
+      # Get the output shape.
+      # Here, we compute flattened batch size from tf_input, since there can be
+      # split along batch dimensions.
+      flattened_batch_size = 1
+      for dim in tf_input.shape[:-3]:
+        flattened_batch_size *= dim
+      flattened_output_shape = [
+          flattened_batch_size, self._out_h_dim.size,
+          self._out_w_dim.size, self._out_dim.size]
+
+      output = tf.nn.conv2d_backprop_input(
+          flattened_output_shape, tf_filter,
+          _tf_flatten_batch_dims(tf_input, 3),
+          self._strides, self._padding)
+      return _tf_restore_batch_dims(output, 3, tf_input)
+
+    y = mesh_impl.slicewise(
+        tf_fn, lowering.tensors[conv_input], lowering.tensors[conv_filter])
+
+    # reducing out input channels - may need to allreduce
+    in_mesh_axis = mesh_impl.tensor_dimension_to_mesh_axis(self._in_dim)
+    if in_mesh_axis is not None:
+      def add_counter_fn():
+        lowering.add_counter(
+            "allreduce/%s/conv2d_transpose_op" % [in_mesh_axis],
+            mesh_impl.laid_out_size(self.outputs[0].shape))
+      y = LazyAllreduceSum(mesh_impl, y, [in_mesh_axis], add_counter_fn)
+    lowering.set_tensor_lowering(self.outputs[0], y)
+    computation_shape = _shape_union([conv_filter.shape, self.outputs[0].shape])
+    lowering.add_counter("conv2d_transpose/forward",
+                         mesh_impl.laid_out_size(computation_shape))
+    lowering.add_counter("conv2d_transpose_unique/forward",
+                         computation_shape.size)
+
+
+def conv2d_transpose_backprop_input(input_shape,
+                                    conv_filter,
+                                    dy,
+                                    strides,
+                                    padding, name=None):
+  return Conv2or3dBackpropInputOperation(2, True,
+                                         input_shape,
+                                         conv_filter,
+                                         dy,
+                                         strides,
+                                         padding,
+                                         name=name).outputs[0]
+
+
+def conv2d_transpose_backprop_filter(conv_input,
+                                     filter_shape,
+                                     dy,
+                                     strides,
+                                     padding, name=None):
+  return Conv2or3dBackpropFilterOperation(2, True,
+                                          conv_input,
+                                          filter_shape,
+                                          dy,
+                                          strides,
+                                          padding,
+                                          name=name).outputs[0]
+
+
 class Conv3dTransposeOperation(Operation):
   """like tf.nn.conv3d_transpose.
 

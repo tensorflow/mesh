@@ -98,7 +98,7 @@ def conv2d(x, output_dim, filter_size=(3, 3),
     filter_size: a list or tuple in format [filter_height, filter_width].
     strides: a list or tuple in format [stride_height, stride_width].
     padding: either "SAME" or "VALID".
-    filter_initializer: the initialize for tf.get_variable.
+    filter_initializer: the initializer for tf.get_variable.
     variable_dtype: a mtf.VariableDType
     name: a string used for tf.variable_scope.
 
@@ -146,7 +146,7 @@ def conv2d_with_blocks(
         "Valid" is not currently supported.
     h_blocks_dim: Dimension representing number of height blocks.
     w_blocks_dim: Dimension representing number of witdh blocks.
-    filter_initializer: the initialize for tf.get_variable.
+    filter_initializer: the initializer for tf.get_variable.
     variable_dtype: a mtf.VariableDType
     name: a name for the operation (optional).
 
@@ -182,6 +182,112 @@ def conv2d_with_blocks(
                 variable_dtype, name)
 
 
+def conv2d_transpose(x, output_dim,
+                     filter_size=(2, 2), strides=(2, 2),
+                     padding="SAME", filter_initializer=None,
+                     variable_dtype=None, name=None):
+  """2D Transposed Convolution.
+
+  Args:
+    x: a mtf.Tensor of format NHWC.
+    output_dim: a mtf.Dimension, indicating the output channel dimension.
+    filter_size: a list or tuple in format
+        [filter_height, filter_width]. Only filter_size of (2, 2) is tested.
+    strides: a list or tuple in format
+        [stride_height, stride_width]. Only strides of (2, 2) is tested.
+    padding: either "SAME" or "VALID".
+    filter_initializer: the initializer for tf.get_variable.
+    variable_dtype: a mtf.VariableDType
+    name: a string used for tf.variable_scope.
+
+  Returns:
+    a mtf.Tensor.
+  """
+  fh_dim = mtf.Dimension("fh", filter_size[0])
+  fw_dim = mtf.Dimension("fw", filter_size[1])
+  input_dim = x.shape[-1]
+  with tf.variable_scope(name, default_name="conv2d_transpose"):
+    if variable_dtype is None:
+      variable_dtype = mtf.VariableDType(activation_dtype=x.dtype)
+    conv_filter = mtf.get_variable(
+        x.mesh, "kernel", [fh_dim, fw_dim, output_dim, input_dim],
+        initializer=filter_initializer, dtype=variable_dtype)
+    # Pad stride in batch and channel dimensions.
+    strides = [1] + list(strides) + [1]
+
+    return mtf.Conv2dTransposeOperation(
+        x, conv_filter, strides, padding).outputs[0]
+
+
+def conv2d_transpose_with_blocks(
+    x, output_dim, filter_size=(2, 2),
+    strides=(2, 2), padding="SAME",
+    h_blocks_dim=None, w_blocks_dim=None, filter_initializer=None,
+    variable_dtype=None, name=None):
+  """2D Transposed Convolution with spatial partitioning.
+
+  Spatial partitioning is implemented by decomposing the image into blocks.
+  Block dimensions represented as h_blocks_dim and w_blocks_dim can be split
+  along the mesh axis. If split, then we do a halo exchange where each block
+  receives the part of the image from its left and right neighbors necessary to
+  do the convolution. Exchange can involve complete or partial blocks depending
+  on the filter depth and height.
+
+  Currently, only "SAME" padding with dilation rate of 1 is supported. Only
+  splitting along the depth and height dimensions are supported.
+
+  Args:
+    x: a Tensor of shape
+        [batch, h_blocks_dim, w_blocks_dim, h_dim, w_dim, in_channel_dim]
+    output_dim: a mtf.Dimension, indicating the output channel dimension.
+    filter_size: a list or tuple in format
+        [filter_height, filter_width]. Only filter_size of (2, 2) is tested.
+    strides: a list or tuple in format
+        [stride_height, stride_width]. Only strides of (2, 2) is tested.
+    padding: string, "SAME". The type of padding algorithm to use.
+        "Valid" is not currently supported.
+    h_blocks_dim: Dimension representing number of height blocks.
+    w_blocks_dim: Dimension representing number of width blocks.
+    filter_initializer: the initializer for tf.get_variable.
+    variable_dtype: a mtf.VariableDType
+    name: a name for the operation (optional).
+
+  Returns:
+    A Tensor of shape
+      [batch, h_blocks_dim, w_blocks_dim, h_dim, w_dim, out_channels_dim]
+  """
+  # If h_blocks_dim and w_blocks_dim are not split, directly call conv2d_trans.
+  if h_blocks_dim is None and w_blocks_dim is None:
+    return conv2d_transpose(
+        x, output_dim, filter_size, strides, padding, filter_initializer,
+        variable_dtype, name)
+
+  # Now only supports even-sized filters.
+  assert filter_size[0] % 2 == 0
+  assert filter_size[1] % 2 == 0
+
+  # Padding 'VALID' is not supported yet.
+  if padding != "SAME":
+    raise NotImplementedError(
+        "conv2d_transpose_with_blocks requires padding=SAME")
+
+  # Halo exchange for h_blocks and w_blocks.
+  # TODO(lehou): figure out the halo_size in general cases.
+  h_dim, w_dim = x.shape.dims[-3:-1]
+  for blocks_dim, block_size_dim, halo_size in [
+      (h_blocks_dim, h_dim, filter_size[0] // 2 - 1),
+      (w_blocks_dim, w_dim, filter_size[1] // 2 - 1)]:
+    if halo_size > 0:
+      if blocks_dim is not None:
+        x = mtf.halo_exchange(x, blocks_dim, block_size_dim, halo_size)
+      else:
+        x = mtf.pad(x, [halo_size, halo_size], block_size_dim.name)
+
+  return conv2d_transpose(
+      x, output_dim, filter_size, strides, "VALID", filter_initializer,
+      variable_dtype, name)
+
+
 def conv3d(x, output_dim, filter_size=(3, 3, 3),
            strides=(1, 1, 1), padding="SAME",
            filter_initializer=None,
@@ -196,7 +302,7 @@ def conv3d(x, output_dim, filter_size=(3, 3, 3),
     strides: a list or tuple in format
         [stride_depth, stride_height, stride_width].
     padding: either "SAME" or "VALID".
-    filter_initializer: the initialize for tf.get_variable.
+    filter_initializer: the initializer for tf.get_variable.
     variable_dtype: a mtf.VariableDType
     name: a string used for tf.variable_scope.
 
@@ -248,7 +354,7 @@ def conv3d_with_blocks(
         "Valid" is not currently supported.
     d_blocks_dim: Dimension representing number of depth blocks.
     h_blocks_dim: Dimension representing number of height blocks.
-    filter_initializer: the initialize for tf.get_variable.
+    filter_initializer: the initializer for tf.get_variable.
     variable_dtype: a mtf.VariableDType
     name: a name for the operation (optional).
 
@@ -306,7 +412,7 @@ def conv3d_transpose(x, output_dim,
         [stride_depth, stride_height, stride_width].
         Only strides of (2, 2, 2) is tested.
     padding: either "SAME" or "VALID".
-    filter_initializer: the initialize for tf.get_variable.
+    filter_initializer: the initializer for tf.get_variable.
     variable_dtype: a mtf.VariableDType
     name: a string used for tf.variable_scope.
 
@@ -361,7 +467,7 @@ def conv3d_transpose_with_blocks(
         "Valid" is not currently supported.
     d_blocks_dim: Dimension representing number of depth blocks.
     h_blocks_dim: Dimension representing number of height blocks.
-    filter_initializer: the initialize for tf.get_variable.
+    filter_initializer: the initializer for tf.get_variable.
     variable_dtype: a mtf.VariableDType
     name: a name for the operation (optional).
 
