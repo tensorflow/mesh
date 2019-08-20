@@ -1321,9 +1321,10 @@ def run(tpu_job_name,
     eval_datasets = valid_eval_datasets
 
     if not eval_datasets:
-      raise ValueError(
+      tf.logging.info(
           "All provided EvalDatasets have metric_fns=[]; eval is not possible."
       )
+      return
 
     eval_summary_dir = eval_summary_dir or os.path.join(
         model_dir, "{}_eval".format(dataset_split)
