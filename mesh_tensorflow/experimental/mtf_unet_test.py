@@ -13,13 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for third_party.py.mesh_tensorflow.experimental.mtf_unet3d."""
+"""Tests for third_party.py.mesh_tensorflow.experimental.mtf_unet."""
 
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import mesh_tensorflow.experimental.mtf_unet3d as mtf_unet3d
+import mesh_tensorflow.experimental.mtf_unet as mtf_unet
 import tensorflow as tf
 
 
@@ -36,7 +36,7 @@ class MtfUnetDataAugTest(tf.test.TestCase):
 
       for static_axis in [0, 1, 2]:
         for interpolation in ("BILINEAR", "NEAREST"):
-          image_3d_proj = mtf_unet3d._transform_3d(
+          image_3d_proj = mtf_unet._transform_slices(
               image_3d, [1, 0, 0, 0, 1, 0, 0, 0], static_axis, interpolation)
           image_3d_proj_np = sess.run(image_3d_proj)
           self.assertAllClose(image_3d_proj_np, image_3d_np)
@@ -47,7 +47,7 @@ class MtfUnetDataAugTest(tf.test.TestCase):
       image_3d_np = sess.run(image_3d)
 
       for flip_axis in [0, 1, 2]:
-        image_3d_flip = mtf_unet3d._flip_3d(
+        image_3d_flip = mtf_unet._flip_slices(
             image_3d, tf.constant(0.0), flip_axis)
         image_3d_flip_np = sess.run(image_3d_flip)
         self.assertAllClose(image_3d_flip_np, image_3d_np)
@@ -60,7 +60,7 @@ class MtfUnetDataAugTest(tf.test.TestCase):
           image_3d_np = image_3d_np[:, ::-1, :]
         else:
           image_3d_np = image_3d_np[..., ::-1]
-        image_3d_flip = mtf_unet3d._flip_3d(
+        image_3d_flip = mtf_unet._flip_slices(
             image_3d_flip, tf.constant(1.0), flip_axis)
         image_3d_flip_np = sess.run(image_3d_flip)
         self.assertAllClose(image_3d_flip_np, image_3d_np)
@@ -70,10 +70,21 @@ class MtfUnetDataAugTest(tf.test.TestCase):
       image_3d = self.static_3d_image()
       image_3d_np = sess.run(image_3d)
 
-      image_3d_noisy = mtf_unet3d._maybe_add_noise(
-          image_3d, [1, 4], 1.0, 1e-12)
+      image_3d_noisy = mtf_unet._maybe_add_noise(
+          image_3d, [1, 2], 1.0, 1e-12)
       image_3d_noisy_np = sess.run(image_3d_noisy)
       self.assertAllClose(image_3d_noisy_np, image_3d_np)
+
+  def test_rot90(self):
+    with tf.Session() as sess:
+      image_3d = self.static_3d_image()
+      image_3d_np = sess.run(image_3d)
+
+      for static_axis in [0, 1, 2]:
+        image_3d_rot360 = mtf_unet._rot90_slices(
+            image_3d, 4, static_axis)
+        image_3d_rot360_np = sess.run(image_3d_rot360)
+        self.assertAllClose(image_3d_rot360_np, image_3d_np)
 
 
 if __name__ == "__main__":

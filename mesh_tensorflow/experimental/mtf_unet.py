@@ -13,10 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""MeshTensorflow network of Unet3d with spatial partition.
-
-This is an incomplete ported from a tensorflow implementation:
-third_party/cloud_tpu/models/unet3d/unet_model.py
+"""MeshTensorflow network of Unet with spatial partition.
 """
 
 from __future__ import absolute_import
@@ -34,6 +31,9 @@ from tensorflow.python.platform import flags
 
 FLAGS = flags.FLAGS
 
+tf.flags.DEFINE_boolean('sample_slices', False,
+                        'Whether to build model on 2D CT slices instead of 3D.')
+
 tf.flags.DEFINE_integer('ct_resolution', 128,
                         'Resolution of CT images along depth, height and '
                         'width dimensions.')
@@ -42,13 +42,23 @@ tf.flags.DEFINE_integer('batch_size_train', 32, 'Training batch size.')
 tf.flags.DEFINE_integer('batch_size_eval', 32, 'Evaluation batch size.')
 tf.flags.DEFINE_integer('image_nx_block', 8, 'The number of x blocks.')
 tf.flags.DEFINE_integer('image_ny_block', 8, 'The number of y blocks.')
-tf.flags.DEFINE_integer('image_c', 1, 'The number of input image channels.')
+tf.flags.DEFINE_integer('image_c', 1,
+                        'The number of input image channels. '
+                        'If sample_slices is False, image_c should be 1.')
 tf.flags.DEFINE_integer('label_c', 3, 'The number of output classes.')
 
 tf.flags.DEFINE_integer('n_base_filters', 32, 'The number of filters.')
 tf.flags.DEFINE_integer('network_depth', 4, 'The number of pooling layers.')
 tf.flags.DEFINE_boolean('with_batch_norm', True, 'Whether to use batch norm.')
-tf.flags.DEFINE_string('loss_fn', 'cross_entropy', 'cross_entropy or dice.')
+
+tf.flags.DEFINE_float('xen_liver_weight', 128,
+                      'The weight of liver region pixels, '
+                      'when computing the cross-entropy loss')
+tf.flags.DEFINE_float('xen_lesion_weight', 256,
+                      'The weight of lesion region pixels, '
+                      'when computing the cross-entropy loss')
+tf.flags.DEFINE_float('dice_loss_weight', 0.2,
+                      'The weight of dice loss, ranges from 0 to 1')
 tf.flags.DEFINE_float('dice_epsilon', 1e-1,
                       'A small value that prevents 0 dividing.')
 
@@ -81,26 +91,26 @@ def get_layout():
   return mtf.convert_to_layout_rules(FLAGS.layout)
 
 
-def _transform_3d(image_cube, proj_matrix, static_axis, interpolation):
+def _transform_slices(slices, proj_matrix, static_axis, interpolation):
   """Apply rotation."""
   assert static_axis in [0, 1, 2]
   if static_axis == 2:
-    image_cube = tf.contrib.image.transform(
-        image_cube, proj_matrix, interpolation)
+    slices = tf.contrib.image.transform(
+        slices, proj_matrix, interpolation)
   elif static_axis == 1:
-    image_cube = tf.transpose(image_cube, [0, 2, 1])
-    image_cube = tf.contrib.image.transform(
-        image_cube, proj_matrix, interpolation)
-    image_cube = tf.transpose(image_cube, [0, 2, 1])
+    slices = tf.transpose(slices, [0, 2, 1])
+    slices = tf.contrib.image.transform(
+        slices, proj_matrix, interpolation)
+    slices = tf.transpose(slices, [0, 2, 1])
   else:
-    image_cube = tf.transpose(image_cube, [2, 1, 0])
-    image_cube = tf.contrib.image.transform(
-        image_cube, proj_matrix, interpolation)
-    image_cube = tf.transpose(image_cube, [2, 1, 0])
-  return image_cube
+    slices = tf.transpose(slices, [2, 1, 0])
+    slices = tf.contrib.image.transform(
+        slices, proj_matrix, interpolation)
+    slices = tf.transpose(slices, [2, 1, 0])
+  return slices
 
 
-def _maybe_add_noise(image_cube, scales,
+def _maybe_add_noise(slices, scales,
                      image_noise_probability, image_noise_ratio):
   """Add noise at multiple scales."""
   noise_list = []
@@ -109,50 +119,70 @@ def _maybe_add_noise(image_cube, scales,
         shape=[], minval=0.0, maxval=image_noise_ratio)
     # Eliminate the background intensity with 60 percentile.
     noise_dev = rand_image_noise_ratio * (
-        tf.contrib.distributions.percentile(image_cube, q=95) - \
-        tf.contrib.distributions.percentile(image_cube, q=60))
+        tf.contrib.distributions.percentile(slices, q=95) - \
+        tf.contrib.distributions.percentile(slices, q=60))
+    noise_shape = [x // scale for x in slices.shape]
     noise = tf.random.normal(
-        shape=tf.shape(image_cube), mean=0.0, stddev=noise_dev)
+        shape=noise_shape, mean=0.0, stddev=noise_dev)
     noise = tf.clip_by_value(
         noise, -2.0 * noise_dev, 2.0 * noise_dev)
     if scale != 1:
-      noise = tf.image.resize_images(noise, [tf.shape(image_cube)[0]] * 2)
+      noise = tf.image.resize_images(
+          noise, [slices.shape[0], slices.shape[1]])
       noise = tf.transpose(noise, [0, 2, 1])
-      noise = tf.image.resize_images(noise, [tf.shape(image_cube)[0]] * 2)
+      noise = tf.image.resize_images(
+          noise, [slices.shape[0], slices.shape[2]])
+      noise = tf.transpose(noise, [0, 2, 1])
     noise_list.append(noise)
 
   skip_noise = tf.greater(tf.random.uniform([]), image_noise_probability)
-  image_cube = tf.cond(skip_noise,
-                       lambda: image_cube, lambda: image_cube + noise_list[0])
-  image_cube = tf.cond(skip_noise,
-                       lambda: image_cube, lambda: image_cube + noise_list[1])
-  return image_cube
+  slices = tf.cond(skip_noise,
+                   lambda: slices, lambda: slices + noise_list[0])
+  slices = tf.cond(skip_noise,
+                   lambda: slices, lambda: slices + noise_list[1])
+  return slices
 
 
-def _flip_3d(image_cube, flip_indicator, flip_axis):
+def _flip_slices(slices, flip_indicator, flip_axis):
   """Randomly flip the image."""
   if flip_axis == 1:
-    image_cube = tf.transpose(image_cube, [1, 0, 2])
+    slices = tf.transpose(slices, [1, 0, 2])
   elif flip_axis == 2:
-    image_cube = tf.transpose(image_cube, [2, 1, 0])
-  image_cube = tf.cond(tf.less(flip_indicator, 0.5),
-                       lambda: image_cube,
-                       lambda: tf.image.flip_up_down(image_cube))
+    slices = tf.transpose(slices, [2, 1, 0])
+  slices = tf.cond(tf.less(flip_indicator, 0.5),
+                   lambda: slices,
+                   lambda: tf.image.flip_up_down(slices))
   if flip_axis == 1:
-    image_cube = tf.transpose(image_cube, [1, 0, 2])
+    slices = tf.transpose(slices, [1, 0, 2])
   elif flip_axis == 2:
-    image_cube = tf.transpose(image_cube, [2, 1, 0])
-  return image_cube
+    slices = tf.transpose(slices, [2, 1, 0])
+  return slices
 
 
-def _data_augmentation_3d(image, label):
-  """3D image and label augmentation."""
+def _rot90_slices(slices, rot90_k, static_axis):
+  """Randomly rotate the image 90/180/270 degrees."""
+  if static_axis == 0:
+    slices = tf.transpose(slices, [2, 1, 0])
+  elif static_axis == 1:
+    slices = tf.transpose(slices, [0, 2, 1])
+  slices = tf.image.rot90(slices, k=rot90_k)
+  if static_axis == 0:
+    slices = tf.transpose(slices, [2, 1, 0])
+  elif static_axis == 1:
+    slices = tf.transpose(slices, [0, 2, 1])
+  return slices
+
+
+def _data_augmentation(image, label, sample_slices):
+  """image and label augmentation."""
+  def _truncated_normal(stddev):
+    v = tf.random.normal(shape=[], mean=0.0, stddev=stddev)
+    v = tf.clip_by_value(v, -2 * stddev, 2 * stddev)
+    return v
+
   for static_axis in [0, 1, 2]:
-    def _truncated_normal(stddev):
-      v = tf.random.normal(shape=[], mean=0.0, stddev=stddev)
-      v = tf.clip_by_value(v, -2 * stddev, 2 * stddev)
-      return v
-
+    if sample_slices and static_axis != 2:
+      continue
     a0 = _truncated_normal(FLAGS.image_transform_ratio) + 1.0
     a1 = _truncated_normal(FLAGS.image_transform_ratio)
     a2 = _truncated_normal(FLAGS.image_translate_ratio) * FLAGS.ct_resolution
@@ -163,8 +193,8 @@ def _data_augmentation_3d(image, label):
     c1 = _truncated_normal(FLAGS.image_transform_ratio)
     proj_matrix = [a0, a1, a2, b0, b1, b2, c0, c1]
 
-    image = _transform_3d(image, proj_matrix, static_axis, 'BILINEAR')
-    label = _transform_3d(label, proj_matrix, static_axis, 'NEAREST')
+    image = _transform_slices(image, proj_matrix, static_axis, 'BILINEAR')
+    label = _transform_slices(label, proj_matrix, static_axis, 'NEAREST')
 
   if FLAGS.image_noise_ratio > 1e-6:
     image = _maybe_add_noise(
@@ -172,8 +202,15 @@ def _data_augmentation_3d(image, label):
 
   for flip_axis in [0, 1, 2]:
     flip_indicator = tf.random.uniform(shape=[])
-    image = _flip_3d(image, flip_indicator, flip_axis)
-    label = _flip_3d(label, flip_indicator, flip_axis)
+    image = _flip_slices(image, flip_indicator, flip_axis)
+    label = _flip_slices(label, flip_indicator, flip_axis)
+
+  for static_axis in [0, 1, 2]:
+    if sample_slices and static_axis != 2:
+      continue
+    rot90_k = tf.random_uniform(shape=[], minval=0, maxval=4, dtype=tf.int32)
+    image = _rot90_slices(image, rot90_k, static_axis)
+    label = _rot90_slices(label, rot90_k, static_axis)
 
   return image, label
 
@@ -207,17 +244,37 @@ def get_dataset_creator(dataset_str):
       image = tf.decode_raw(parsed['image/ct_image'], tf.float32)
       label = tf.decode_raw(parsed['image/label'], tf.float32)
 
+      # Preprocess color, as suggested by https://arxiv.org/pdf/1707.07734.pdf
+      image = tf.clip_by_value(image / 255.0, -2, 2)
+
       image = tf.reshape(image, spatial_dims)
       label = tf.reshape(label, spatial_dims)
 
-      if dataset_str == 'train':
-        image, label = _data_augmentation_3d(image, label)
+      if FLAGS.sample_slices:
+        # Take random slices of images and label
+        begin_idx = tf.random_uniform(
+            shape=[], minval=0,
+            maxval=FLAGS.ct_resolution - FLAGS.image_c + 1, dtype=tf.int32)
+        slice_begin = tf.stack([0, 0, begin_idx])
+        slice_size = [FLAGS.ct_resolution, FLAGS.ct_resolution, FLAGS.image_c]
+
+        image = tf.slice(image, slice_begin, slice_size)
+        label = tf.slice(label, slice_begin, slice_size)
+
+        if dataset_str == 'train':
+          image, label = _data_augmentation(image, label, sample_slices=True)
+
+        # Only get the center slice of label.
+        label = tf.slice(label, [0, 0, FLAGS.image_c // 2], slice_size)
+      elif dataset_str == 'train':
+        image, label = _data_augmentation(image, label, sample_slices=False)
 
       spatial_dims_w_blocks = [FLAGS.image_nx_block,
                                FLAGS.ct_resolution // FLAGS.image_nx_block,
                                FLAGS.image_ny_block,
-                               FLAGS.ct_resolution // FLAGS.image_ny_block,
-                               FLAGS.ct_resolution]
+                               FLAGS.ct_resolution // FLAGS.image_ny_block]
+      if not FLAGS.sample_slices:
+        spatial_dims_w_blocks += [FLAGS.ct_resolution]
 
       image = tf.reshape(image, spatial_dims_w_blocks + [FLAGS.image_c])
       label = tf.reshape(label, spatial_dims_w_blocks)
@@ -274,12 +331,13 @@ def get_input_mtf_shapes(dataset_str):
                                FLAGS.ct_resolution // FLAGS.image_nx_block)
   image_sy_dim = mtf.Dimension('image_sy_block',
                                FLAGS.ct_resolution // FLAGS.image_ny_block)
-  image_sz_dim = mtf.Dimension('image_sz_block', FLAGS.ct_resolution)
 
   batch_spatial_dims = [batch_dim,
                         image_nx_dim, image_sx_dim,
-                        image_ny_dim, image_sy_dim,
-                        image_sz_dim]
+                        image_ny_dim, image_sy_dim]
+  if not FLAGS.sample_slices:
+    image_sz_dim = mtf.Dimension('image_sz_block', FLAGS.ct_resolution)
+    batch_spatial_dims += [image_sz_dim]
 
   image_c_dim = mtf.Dimension('image_c', FLAGS.image_c)
   mtf_image_shape = mtf.Shape(batch_spatial_dims + [image_c_dim])
@@ -290,17 +348,26 @@ def get_input_mtf_shapes(dataset_str):
   return [mtf_image_shape, mtf_label_shape]
 
 
-def conv3d_with_spatial_partition(x, image_nx_dim, image_ny_dim,
-                                  n_filters, with_batch_norm, is_training,
-                                  odim_name, variable_dtype, name):
-  """Conv3d with spatial partition, batch_noram and relu."""
-  x = mtf.layers.conv3d_with_blocks(
-      x, mtf.Dimension(odim_name, n_filters),
-      filter_size=(3, 3, 3), strides=(1, 1, 1), padding='SAME',
-      d_blocks_dim=image_nx_dim, h_blocks_dim=image_ny_dim,
-      variable_dtype=variable_dtype,
-      name=name,
-  )
+def conv_with_spatial_partition(x, sample_slices, image_nx_dim, image_ny_dim,
+                                n_filters, with_batch_norm, is_training,
+                                odim_name, variable_dtype, name):
+  """Conv with spatial partition, batch_noram and activation."""
+  if sample_slices:
+    x = mtf.layers.conv2d_with_blocks(
+        x, mtf.Dimension(odim_name, n_filters),
+        filter_size=(3, 3), strides=(1, 1), padding='SAME',
+        h_blocks_dim=image_nx_dim, w_blocks_dim=image_ny_dim,
+        variable_dtype=variable_dtype,
+        name=name,
+    )
+  else:
+    x = mtf.layers.conv3d_with_blocks(
+        x, mtf.Dimension(odim_name, n_filters),
+        filter_size=(3, 3, 3), strides=(1, 1, 1), padding='SAME',
+        d_blocks_dim=image_nx_dim, h_blocks_dim=image_ny_dim,
+        variable_dtype=variable_dtype,
+        name=name,
+    )
 
   if with_batch_norm:
     x, bn_update_ops = mtf.layers.batch_norm(
@@ -309,29 +376,41 @@ def conv3d_with_spatial_partition(x, image_nx_dim, image_ny_dim,
   else:
     bn_update_ops = []
 
-  return mtf.relu(x), bn_update_ops
+  return mtf.leaky_relu(x, 0.1), bn_update_ops
 
 
-def deconv3d_with_spatial_partition(x, image_nx_dim, image_ny_dim,
-                                    n_filters, odim_name, variable_dtype, name):
-  x = mtf.layers.conv3d_transpose_with_blocks(
-      x, mtf.Dimension(odim_name, n_filters),
-      filter_size=(2, 2, 2), strides=(2, 2, 2), padding='SAME',
-      d_blocks_dim=image_nx_dim, h_blocks_dim=image_ny_dim,
-      variable_dtype=variable_dtype,
-      name=name,
-  )
+def deconv_with_spatial_partition(x, sample_slices, image_nx_dim, image_ny_dim,
+                                  n_filters, odim_name, variable_dtype, name):
+  """Deconvolution with spatial partition."""
+  if sample_slices:
+    x = mtf.layers.conv2d_transpose_with_blocks(
+        x, mtf.Dimension(odim_name, n_filters),
+        filter_size=(2, 2), strides=(2, 2), padding='SAME',
+        h_blocks_dim=image_nx_dim, w_blocks_dim=image_ny_dim,
+        variable_dtype=variable_dtype,
+        name=name,
+    )
+  else:
+    x = mtf.layers.conv3d_transpose_with_blocks(
+        x, mtf.Dimension(odim_name, n_filters),
+        filter_size=(2, 2, 2), strides=(2, 2, 2), padding='SAME',
+        d_blocks_dim=image_nx_dim, h_blocks_dim=image_ny_dim,
+        variable_dtype=variable_dtype,
+        name=name,
+    )
   return x
 
 
-def unet3d_with_spatial_partition(mesh, dataset_str, images, labels):
+def unet_with_spatial_partition(mesh, dataset_str, images, labels):
   """Builds the UNet model graph, train op and eval metrics.
 
   Args:
     mesh: a MeshTensorflow.mesh object.
     dataset_str: a string of either train or eval. This is used for batch_norm.
-    images: input image Tensor. Shape [batch, x, y, z, num_channels].
-    labels: input label Tensor. Shape [batch, x, y, z, num_classes].
+    images: input image Tensor. Shape [batch, x, y, num_channels]
+      or [batch, x, y, z, num_channels].
+    labels: input label Tensor. Shape [batch, x, y, num_classes]
+      or [batch, x, y, z, num_classes].
 
   Returns:
     Prediction and loss.
@@ -372,31 +451,42 @@ def unet3d_with_spatial_partition(mesh, dataset_str, images, labels):
   t = mtf.cast(t, mtf_dtype)
 
   # Transpose the blocks.
-  x = mtf.transpose(x, [batch_dim,
-                        image_nx_dim, image_ny_dim,
-                        image_sx_dim, image_sy_dim,
-                        image_sz_dim, image_c_dim])
+  if FLAGS.sample_slices:
+    x = mtf.transpose(x, [batch_dim,
+                          image_nx_dim, image_ny_dim,
+                          image_sx_dim, image_sy_dim,
+                          image_c_dim])
 
-  t = mtf.transpose(t, [batch_dim,
-                        image_nx_dim, image_ny_dim,
-                        image_sx_dim, image_sy_dim,
-                        image_sz_dim, label_c_dim])
+    t = mtf.transpose(t, [batch_dim,
+                          image_nx_dim, image_ny_dim,
+                          image_sx_dim, image_sy_dim,
+                          label_c_dim])
+  else:
+    x = mtf.transpose(x, [batch_dim,
+                          image_nx_dim, image_ny_dim,
+                          image_sx_dim, image_sy_dim,
+                          image_sz_dim, image_c_dim])
+
+    t = mtf.transpose(t, [batch_dim,
+                          image_nx_dim, image_ny_dim,
+                          image_sx_dim, image_sy_dim,
+                          image_sz_dim, label_c_dim])
 
   # Network.
   levels = []
   all_bn_update_ops = []
   # add levels with convolution or down-sampling
   for depth in range(FLAGS.network_depth):
-    x, bn_update_ops = conv3d_with_spatial_partition(
-        x, image_nx_dim, image_ny_dim,
+    x, bn_update_ops = conv_with_spatial_partition(
+        x, FLAGS.sample_slices, image_nx_dim, image_ny_dim,
         FLAGS.n_base_filters * (2**depth),
         FLAGS.with_batch_norm, is_training,
         'conv_{}_0'.format(depth),
         variable_dtype, 'conv_down_{}_0'.format(depth))
     all_bn_update_ops.extend(bn_update_ops)
 
-    x, bn_update_ops = conv3d_with_spatial_partition(
-        x, image_nx_dim, image_ny_dim,
+    x, bn_update_ops = conv_with_spatial_partition(
+        x, FLAGS.sample_slices, image_nx_dim, image_ny_dim,
         FLAGS.n_base_filters * (2**depth),
         FLAGS.with_batch_norm, is_training,
         'conv_{}_1'.format(depth),
@@ -405,46 +495,58 @@ def unet3d_with_spatial_partition(mesh, dataset_str, images, labels):
     all_bn_update_ops.extend(bn_update_ops)
 
     if depth < FLAGS.network_depth - 1:
-      x = mtf.layers.max_pool3d(x, ksize=(2, 2, 2))
+      if FLAGS.sample_slices:
+        x = mtf.layers.max_pool2d(x, ksize=(2, 2))
+      else:
+        x = mtf.layers.max_pool3d(x, ksize=(2, 2, 2))
 
   # add levels with up-convolution or up-sampling
   for depth in range(FLAGS.network_depth - 1)[::-1]:
-    x = deconv3d_with_spatial_partition(
-        x, image_nx_dim, image_ny_dim,
+    x = deconv_with_spatial_partition(
+        x, FLAGS.sample_slices, image_nx_dim, image_ny_dim,
         FLAGS.n_base_filters * (2**depth),
         'conv_{}_1'.format(depth),
         variable_dtype, 'deconv_{}_0'.format(depth))
     x = mtf.concat([x, levels[depth]],
                    concat_dim_name='conv_{}_1'.format(depth))
 
-    x, bn_update_ops = conv3d_with_spatial_partition(
-        x, image_nx_dim, image_ny_dim,
+    x, bn_update_ops = conv_with_spatial_partition(
+        x, FLAGS.sample_slices, image_nx_dim, image_ny_dim,
         FLAGS.n_base_filters * (2**depth),
         FLAGS.with_batch_norm, is_training,
         'conv_{}_0'.format(depth),
         variable_dtype, 'conv_up_{}_0'.format(depth))
     all_bn_update_ops.extend(bn_update_ops)
 
-    x, bn_update_ops = conv3d_with_spatial_partition(
-        x, image_nx_dim, image_ny_dim,
+    x, bn_update_ops = conv_with_spatial_partition(
+        x, FLAGS.sample_slices, image_nx_dim, image_ny_dim,
         FLAGS.n_base_filters * (2**depth),
         FLAGS.with_batch_norm, is_training,
         'conv_{}_1'.format(depth),
         variable_dtype, 'conv_up_{}_1'.format(depth))
     all_bn_update_ops.extend(bn_update_ops)
 
-  y = mtf.layers.conv3d_with_blocks(
-      x, mtf.Dimension('label_c', FLAGS.label_c),
-      filter_size=(1, 1, 1), strides=(1, 1, 1), padding='SAME',
-      d_blocks_dim=image_nx_dim, h_blocks_dim=image_ny_dim,
-      variable_dtype=variable_dtype,
-      name='final_conv_{}'.format(FLAGS.label_c),
-  )
+  if FLAGS.sample_slices:
+    y = mtf.layers.conv2d_with_blocks(
+        x, mtf.Dimension('label_c', FLAGS.label_c),
+        filter_size=(1, 1), strides=(1, 1), padding='SAME',
+        h_blocks_dim=image_nx_dim, w_blocks_dim=image_ny_dim,
+        variable_dtype=variable_dtype,
+        name='final_conv_{}'.format(FLAGS.label_c),
+    )
+  else:
+    y = mtf.layers.conv3d_with_blocks(
+        x, mtf.Dimension('label_c', FLAGS.label_c),
+        filter_size=(1, 1, 1), strides=(1, 1, 1), padding='SAME',
+        d_blocks_dim=image_nx_dim, h_blocks_dim=image_ny_dim,
+        variable_dtype=variable_dtype,
+        name='final_conv_{}'.format(FLAGS.label_c),
+    )
 
   argmax_t = mtf.argmax(t, label_c_dim)
   # Record liver region.
   liver_t = mtf.cast(mtf.equal(argmax_t, 1), mtf_dtype)
-  # Keep the lession (tumor) and background classes. Remove the liver class.
+  # Keep the lesion (tumor) and background classes. Remove the liver class.
   lesion_idx = mtf.cast(mtf.equal(argmax_t, 2), tf.int32)
   t = mtf.one_hot(lesion_idx * 2, label_c_dim, dtype=mtf_dtype)
 
@@ -461,25 +563,29 @@ def unet3d_with_spatial_partition(mesh, dataset_str, images, labels):
   accuracy = mtf.reduce_mean(
       mtf.cast(
           mtf.equal(mtf.argmax(y, label_c_dim), mtf.argmax(t, label_c_dim)),
-          tf.float32
+          mtf_dtype
       )
   )
 
-  assert FLAGS.loss_fn in ['cross_entropy', 'dice']
-  if FLAGS.loss_fn == 'cross_entropy':
-    # Up-weight the liver region.
-    pixel_loss = mtf.layers.softmax_cross_entropy_with_logits(y, t, label_c_dim)
-    pixel_weight = 1 + liver_t * 128 + lesion_t * 128
-    loss = mtf.reduce_mean(pixel_loss * pixel_weight)
-  else:  # dice loss
-    lesion_prob = mtf.reduce_sum(mtf.slice(y, 2, 1, 'label_c'),
-                                 reduced_dim=mtf.Dimension('label_c', 1))
-    prob_intersect = mtf.reduce_sum(lesion_prob * lesion_t,
-                                    output_shape=mtf.Shape([batch_dim]))
-    prob_area_sum = mtf.reduce_sum(lesion_y + lesion_t,
-                                   output_shape=mtf.Shape([batch_dim]))
-    loss = mtf.reduce_mean(
-        2 * prob_intersect / (prob_area_sum + FLAGS.dice_epsilon))
+  # Cross-entropy loss. Up-weight the liver region.
+  pixel_loss = mtf.layers.softmax_cross_entropy_with_logits(y, t, label_c_dim)
+  pixel_weight = 1 + liver_t * (FLAGS.xen_liver_weight - 1) + lesion_t * (
+      FLAGS.xen_lesion_weight - FLAGS.xen_liver_weight - 1)
+  loss_xen = mtf.reduce_mean(pixel_loss * pixel_weight)
+
+  # Dice loss
+  y_prob = mtf.softmax(y, reduced_dim=label_c_dim)
+  lesion_prob = mtf.reduce_sum(mtf.slice(y_prob, 2, 1, 'label_c'),
+                               reduced_dim=mtf.Dimension('label_c', 1))
+  prob_intersect = mtf.reduce_sum(lesion_prob * lesion_t,
+                                  output_shape=mtf.Shape([batch_dim]))
+  prob_area_sum = mtf.reduce_sum(lesion_prob + lesion_t,
+                                 output_shape=mtf.Shape([batch_dim]))
+  loss_dice = mtf.reduce_mean(
+      -2 * prob_intersect / (prob_area_sum + FLAGS.dice_epsilon))
+
+  loss = FLAGS.dice_loss_weight * loss_dice + (
+      1 - FLAGS.dice_loss_weight) * loss_xen
 
   intersect = mtf.reduce_sum(lesion_y * lesion_t,
                              output_shape=mtf.Shape([batch_dim]))
@@ -489,16 +595,24 @@ def unet3d_with_spatial_partition(mesh, dataset_str, images, labels):
   dice = mtf.reduce_mean(2 * intersect / (area_sum + 1e-6))
 
   # Transpose it back to the its input shape.
-  y = mtf.transpose(y, [batch_dim,
-                        image_nx_dim, image_sx_dim,
-                        image_ny_dim, image_sy_dim,
-                        image_sz_dim, label_c_dim])
+  if FLAGS.sample_slices:
+    y = mtf.transpose(y, [batch_dim,
+                          image_nx_dim, image_sx_dim,
+                          image_ny_dim, image_sy_dim,
+                          label_c_dim])
+  else:
+    y = mtf.transpose(y, [batch_dim,
+                          image_nx_dim, image_sx_dim,
+                          image_ny_dim, image_sy_dim,
+                          image_sz_dim, label_c_dim])
 
   eval_metrics = {
       'lesion_pred_ratio': lesion_pred_ratio,
       'lesion_label_ratio': lesion_label_ratio,
       'accuracy_of_all_classes': accuracy,
       'dice_of_lesion_region': dice,
+      'loss_xen': loss_xen,
+      'loss_dice': loss_dice,
   }
 
   return y, loss, eval_metrics, all_bn_update_ops

@@ -331,7 +331,7 @@ To be more specific:
   directly map image height and width dimensions to mesh dimensions, due to the
   sliding-window nature of convolution. Instead, you should use spatial
   partitioning. We provide examples in
-  [`experimental/mtf_unet3d.py`](https://github.com/tensorflow/mesh/blob/master/mesh_tensorflow/experimental/mtf_unet3d.py).
+  [`experimental/mtf_unet.py`](https://github.com/tensorflow/mesh/blob/master/mesh_tensorflow/experimental/mtf_unet.py).
 * If you want more control on the training and evaluation loop, instead of using
   the default API (TPUEstimator) to run your model, you can use low level APIs
   in [`experimental/model_executor.py`](https://github.com/tensorflow/mesh/blob/master/mesh_tensorflow/experimental/mtf_model_executor.py).

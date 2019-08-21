@@ -30,7 +30,7 @@ import tensorflow as tf
 # pylint: disable=g-direct-tensorflow-import
 # pylint: disable=g-direct-third-party-import
 from mesh_tensorflow.experimental import mtf_input_reader
-from mesh_tensorflow.experimental import mtf_unet3d
+from mesh_tensorflow.experimental import mtf_unet
 from tensorflow.contrib import tpu
 from tensorflow.contrib.tpu.python.tpu import device_assignment
 from tensorflow.python.ops import control_flow_ops
@@ -40,8 +40,10 @@ from tensorflow.python.platform import flags
 FLAGS = flags.FLAGS
 
 tf.flags.DEFINE_float('lr', 3e-3, 'Learning rate.')
-tf.flags.DEFINE_integer('num_iterations_per_loop', 200,
+tf.flags.DEFINE_integer('num_train_iterations_per_loop', 200,
                         'Number of training iterations per loop.')
+tf.flags.DEFINE_integer('num_eval_iterations_per_loop', 2,
+                        'Number of eval iterations per loop.')
 tf.flags.DEFINE_integer('num_training_loops', 1000,
                         'Number of training loops.')
 
@@ -172,14 +174,14 @@ def _get_model_fn(train_or_eval, cpu_devices, d_assignment, num_hosts):
     mesh = mtf.Mesh(graph, 'my_mesh', var_placer)
 
     mesh_shape = mtf.convert_to_shape(FLAGS.mesh_shape)
-    layout_rules = mtf_unet3d.get_layout()
+    layout_rules = mtf_unet.get_layout()
     mesh_impl = mtf.simd_mesh_impl.SimdMeshImpl(
         mesh_shape, layout_rules, None, d_assignment)
 
     with mtf.utils.outside_all_rewrites():  # Do not tpu_rewrite this part.
       # Not using the logits output for now.
       _, loss, scalars, bn_update_ops = (
-          mtf_unet3d.unet3d_with_spatial_partition(
+          mtf_unet.unet_with_spatial_partition(
               mesh, train_or_eval, input_fea, input_lab))
 
     if train_or_eval == 'train':
@@ -236,13 +238,14 @@ def _get_scaffold(additional_initializers):
 
 
 def _print_variable_values(sess):
+  """May give `Protocol buffer too large` error."""
   np.set_printoptions(precision=4, linewidth=1000)
   tf.logging.info('Printing variables.')
   tf.logging.info('===================')
   values = sess.run(tf.trainable_variables())
   for variable, value in zip(tf.trainable_variables(), values):
     tf.logging.info('{}, {}'.format(variable.name, value.shape))
-    tf.logging.info('{}'.format(np.array(value).flatten()[:4]))
+    tf.logging.info('{}'.format(np.array(value).flatten()))
 
 
 def _train_phase(mesh_impl, cpu_devices, d_assignment, num_hosts, num_cores):
@@ -252,8 +255,8 @@ def _train_phase(mesh_impl, cpu_devices, d_assignment, num_hosts, num_cores):
     with summary_writer.as_default(), (
         tf.contrib.summary.always_record_summaries()):
       # Setup input pipeline.
-      ds_creator = mtf_unet3d.get_dataset_creator('train')
-      mtf_shapes = mtf_unet3d.get_input_mtf_shapes('train')
+      ds_creator = mtf_unet.get_dataset_creator('train')
+      mtf_shapes = mtf_unet.get_input_mtf_shapes('train')
       simd_input_reader = mtf_input_reader.SimdMeshImplInputReader(
           mesh_impl, ds_creator, mtf_shapes)
 
@@ -279,13 +282,11 @@ def _train_phase(mesh_impl, cpu_devices, d_assignment, num_hosts, num_cores):
 
         tf.contrib.summary.initialize(session=sess)
         simd_input_reader.start_infeed_thread(
-            sess, FLAGS.num_iterations_per_loop)
+            sess, FLAGS.num_train_iterations_per_loop)
 
-        for step in range(FLAGS.num_iterations_per_loop):
+        for step in range(FLAGS.num_train_iterations_per_loop):
           sess.run([tpu_train_computation, flush_summary])
           tf.logging.info('train steps: {}'.format(step))
-
-        _print_variable_values(sess)
 
 
 def _eval_phase(mesh_impl, cpu_devices, d_assignment, num_hosts, num_cores):
@@ -295,8 +296,8 @@ def _eval_phase(mesh_impl, cpu_devices, d_assignment, num_hosts, num_cores):
     with summary_writer.as_default(), (
         tf.contrib.summary.always_record_summaries()):
       # Setup input pipeline.
-      ds_creator = mtf_unet3d.get_dataset_creator('eval')
-      mtf_shapes = mtf_unet3d.get_input_mtf_shapes('eval')
+      ds_creator = mtf_unet.get_dataset_creator('eval')
+      mtf_shapes = mtf_unet.get_input_mtf_shapes('eval')
       simd_input_reader = mtf_input_reader.SimdMeshImplInputReader(
           mesh_impl, ds_creator, mtf_shapes)
 
@@ -320,8 +321,11 @@ def _eval_phase(mesh_impl, cpu_devices, d_assignment, num_hosts, num_cores):
               config=tf.ConfigProto(allow_soft_placement=True)),
           hooks=[ckpt_loader_hook, master_to_slice_hook]) as sess:
 
-        simd_input_reader.start_infeed_thread(sess, 1)
-        sess.run([tpu_eval_computation, flush_summary])
+        simd_input_reader.start_infeed_thread(
+            sess, FLAGS.num_eval_iterations_per_loop)
+        for step in range(FLAGS.num_eval_iterations_per_loop):
+          sess.run([tpu_eval_computation, flush_summary])
+          tf.logging.info('eval steps: {}'.format(step))
 
 
 def _shutdown():
@@ -355,7 +359,7 @@ def train_and_eval():
 
   # Get mesh_impl.
   mesh_shape = mtf.convert_to_shape(FLAGS.mesh_shape)
-  layout_rules = mtf_unet3d.get_layout()
+  layout_rules = mtf_unet.get_layout()
   mesh_impl = mtf.simd_mesh_impl.SimdMeshImpl(
       mesh_shape, layout_rules, None, d_assignment)
 

@@ -1732,6 +1732,17 @@ def relu(x, name="relu"):
   return cwise(tf.nn.relu, [x], name=name, grad_function=_relu_grad)
 
 
+def leaky_relu(x, alpha=0.2, name="leaky_relu"):
+  def forward_function(x):
+    return tf.nn.leaky_relu(x, alpha)
+
+  def grad_function(op, dy):
+    return [dy * cast(greater(op.inputs[0], 0), op.inputs[0].dtype) + \
+            dy * cast(less_equal(op.inputs[0], 0), op.inputs[0].dtype) * alpha]
+
+  return cwise(forward_function, [x], name=name, grad_function=grad_function)
+
+
 def sign(x, name="sign"):
   ret = cwise(tf.sign, [x], name=name, grad_function=0)
   return ret
