@@ -95,6 +95,39 @@ class SgdOptimizer(Optimizer):
 
 
 @gin.configurable
+class MomentumOptimizer(Optimizer):
+  """SGD with momentum."""
+
+  def __init__(self, learning_rate, momentum):
+    self._lr = learning_rate
+    self._momentum = momentum
+
+  @property
+  def lr(self):
+    return self._lr
+
+  @property
+  def momentum(self):
+    return self._momentum
+
+  def apply_grad(self, grad, var):
+    if grad is None:
+      tf.logging.warning("Gradient is None for variable %s" % var.name)
+      return []
+
+    updates = []
+    v = mtf.get_variable(
+        var.mesh, var.name + "_momentum_v", var.shape,
+        dtype=var.dtype, initializer=tf.zeros_initializer(), trainable=False)
+
+    with tf.variable_scope(var.name + "/sgd_momentum"):
+      updates.append(mtf.assign(v, grad * self.lr + v * self.momentum))
+      updates.append(mtf.assign_sub(var, v))
+
+    return updates
+
+
+@gin.configurable
 class AdamWeightDecayOptimizer(Optimizer):
   """A basic Adam optimizer that includes "correct" L2 weight decay."""
 
