@@ -543,17 +543,22 @@ def unet_with_spatial_partition(mesh, dataset_str, images, labels):
         name='final_conv_{}'.format(FLAGS.label_c),
     )
 
+  # use mtf.constant to make sure there is no CPU-side constants.
+  def scalar(v, dtype):
+    return mtf.constant(mesh, v, shape=[], dtype=dtype)
+
   argmax_t = mtf.argmax(t, label_c_dim)
   # Record liver region.
-  liver_t = mtf.cast(mtf.equal(argmax_t, 1), mtf_dtype)
+  liver_t = mtf.cast(mtf.equal(argmax_t, scalar(1, tf.int32)), mtf_dtype)
   # Keep the lesion (tumor) and background classes. Remove the liver class.
-  lesion_idx = mtf.cast(mtf.equal(argmax_t, 2), tf.int32)
-  t = mtf.one_hot(lesion_idx * 2, label_c_dim, dtype=mtf_dtype)
+  lesion_idx = mtf.cast(mtf.equal(argmax_t, scalar(2, tf.int32)), tf.int32)
+  t = mtf.one_hot(lesion_idx * scalar(2, tf.int32),
+                  label_c_dim, dtype=mtf_dtype)
 
   argmax_y = mtf.argmax(y, label_c_dim)
   argmax_t = mtf.argmax(t, label_c_dim)
-  lesion_y = mtf.cast(mtf.equal(argmax_y, 2), mtf_dtype)
-  lesion_t = mtf.cast(mtf.equal(argmax_t, 2), mtf_dtype)
+  lesion_y = mtf.cast(mtf.equal(argmax_y, scalar(2, tf.int32)), mtf_dtype)
+  lesion_t = mtf.cast(mtf.equal(argmax_t, scalar(2, tf.int32)), mtf_dtype)
 
   # summary of class ratios.
   lesion_pred_ratio = mtf.reduce_mean(lesion_y)
@@ -569,8 +574,10 @@ def unet_with_spatial_partition(mesh, dataset_str, images, labels):
 
   # Cross-entropy loss. Up-weight the liver region.
   pixel_loss = mtf.layers.softmax_cross_entropy_with_logits(y, t, label_c_dim)
-  pixel_weight = 1 + liver_t * (FLAGS.xen_liver_weight - 1) + lesion_t * (
-      FLAGS.xen_lesion_weight - FLAGS.xen_liver_weight - 1)
+  pixel_weight = scalar(1, mtf_dtype) + \
+      liver_t * scalar(FLAGS.xen_liver_weight - 1, mtf_dtype) + \
+      lesion_t * scalar(FLAGS.xen_lesion_weight - FLAGS.xen_liver_weight - 1,
+                        mtf_dtype)
   loss_xen = mtf.reduce_mean(pixel_loss * pixel_weight)
 
   # Dice loss
@@ -584,15 +591,16 @@ def unet_with_spatial_partition(mesh, dataset_str, images, labels):
   loss_dice = mtf.reduce_mean(
       -2 * prob_intersect / (prob_area_sum + FLAGS.dice_epsilon))
 
-  loss = FLAGS.dice_loss_weight * loss_dice + (
-      1 - FLAGS.dice_loss_weight) * loss_xen
+  loss = scalar(FLAGS.dice_loss_weight, mtf_dtype) * loss_dice + scalar(
+      1 - FLAGS.dice_loss_weight, mtf_dtype) * loss_xen
 
   intersect = mtf.reduce_sum(lesion_y * lesion_t,
                              output_shape=mtf.Shape([batch_dim]))
   area_sum = mtf.reduce_sum(lesion_y + lesion_t,
                             output_shape=mtf.Shape([batch_dim]))
   # summary of dice.
-  dice = mtf.reduce_mean(2 * intersect / (area_sum + 1e-6))
+  dice = mtf.reduce_mean(scalar(2, mtf_dtype) * intersect / (
+      area_sum + scalar(1e-6, mtf_dtype)))
 
   # Transpose it back to the its input shape.
   if FLAGS.sample_slices:

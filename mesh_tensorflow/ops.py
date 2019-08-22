@@ -5194,6 +5194,32 @@ def softmax(x, reduced_dim, extra_logit=None, name=None):
     return exp(log_softmax(x, reduced_dim, extra_logit=extra_logit))
 
 
+class RangeOperation(Operation):
+  """tf.range."""
+
+  def __init__(self, mesh, dim, dtype, name=None):
+    super(RangeOperation, self).__init__([], mesh, name=name or "range")
+    dim = convert_to_dimension(dim)
+    self._mesh = mesh
+    self._dim = dim
+    self._dtype = dtype
+
+    self._outputs = [Tensor(self, Shape([dim]), dtype)]
+
+  def lower(self, lowering):
+    mesh_impl = lowering.mesh_impl(self)
+    with tf.variable_scope(self.name, default_name="range"):
+      if self._dtype == tf.bfloat16:
+        # tf.range(dtype=bfloat16) gives the wrong shape.
+        # TODO(noam): report the bug.
+        tf_range = tf.cast(tf.range(self._dim.size), tf.bfloat16)
+      else:
+        tf_range = tf.range(self._dim.size, dtype=self._dtype)
+      lowering.set_tensor_lowering(
+          self.outputs[0],
+          mesh_impl.import_tf_tensor(self.outputs[0], tf_range))
+
+
 def mtf_range(mesh, dim, dtype, name=None):
   """Create a 1d mesh tensor with a range from [0, dim.size).
 
@@ -5208,15 +5234,7 @@ def mtf_range(mesh, dim, dtype, name=None):
   Returns:
     a Tensor
   """
-  dim = convert_to_dimension(dim)
-  with tf.variable_scope(name, default_name="range"):
-    if dtype == tf.bfloat16:
-      # tf.range(dtype=bfloat16) gives the wrong shape.
-      # TODO(noam): report the bug.
-      tf_range = tf.cast(tf.range(dim.size), tf.bfloat16)
-    else:
-      tf_range = tf.range(dim.size, dtype=dtype)
-    return import_tf_tensor(mesh, tf_range, shape=Shape([dim]))
+  return RangeOperation(mesh, dim, dtype, name).outputs[0]
 
 
 def pretty_print_counters(counters):
