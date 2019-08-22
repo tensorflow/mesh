@@ -791,10 +791,10 @@ def get_step_from_checkpoint_path(checkpoint_path):
     ValueError if checkpoint_path does not correspond to a model checkpoint file
     which contains the global_step in its filename.
   """
-  match = re.compile(r".*model\.ckpt\-(\d+).*").match(checkpoint_path)
+  match = re.match(r".*model\.ckpt\-(\d+).*", checkpoint_path)
   if match is None:
     raise ValueError("Invalid checkpoint path {}".format(checkpoint_path))
-  return match.group(1)
+  return int(match.group(1))
 
 
 @gin.configurable
@@ -1064,8 +1064,10 @@ def get_checkpoint_iterator(checkpoint_step, model_dir):
     checkpoint_step: If checkpoint_step is an int, find the checkpoint with the
       closest global step and return a singleton list. If checkpoint_step is a
       list of ints, replace each int with the path to the checkpoint with the
-      closest global step. If checkpoint_step is None, return
-      `tf.contrib.training.checkpoints_iterator` for `model_dir`.
+      closest global step. If checkpoint_step == "all", return the path of every
+      checkpoint in model_dir, starting from the earliest checkpoint. If
+      checkpoint_step is None, return `tf.contrib.training.checkpoints_iterator`
+      for `model_dir`.
     model_dir: str, directory to look for checkpoints in.
 
   Returns:
@@ -1097,7 +1099,12 @@ def get_checkpoint_iterator(checkpoint_step, model_dir):
   def _get_checkpoint_path(step):
     return os.path.join(model_dir, "model.ckpt-{}".format(step))
 
-  if checkpoint_step is None:
+  if checkpoint_step == "all":
+    ckpt_paths = tf.gfile.Glob(os.path.join(model_dir, "model.ckpt*"))
+    # Use set for deduplication; glob will find multiple files for each ckpt
+    ckpt_steps = {get_step_from_checkpoint_path(p) for p in ckpt_paths}
+    return [_get_checkpoint_path(s) for s in sorted(list(ckpt_steps))]
+  elif checkpoint_step is None:
     return tf.contrib.training.checkpoints_iterator(model_dir)
   elif isinstance(checkpoint_step, int):
     return [_get_checkpoint_path(_get_closest_checkpoint(checkpoint_step))]
@@ -1120,8 +1127,8 @@ def run(tpu_job_name,
         export_path="",
         mode="train",
         iterations_per_loop=100,
-        save_checkpoints_steps=1000,
-        keep_checkpoint_max=10,
+        save_checkpoints_steps=5000,
+        keep_checkpoint_max=None,
         eval_summary_dir=None,
         batch_size=("tokens_per_replica", 2048),
         train_steps=auto_train_steps,
@@ -1407,12 +1414,12 @@ def run(tpu_job_name,
             summary_writer.add_summary(summary, global_step)
         summary_writer.flush()
 
-    # Only padding should remain.
-    expected_pad = -sum(len(t) for t in cached_targets.values()) % batch_size
-    if len(decodes) != expected_pad:
-      raise ValueError(
-          "{} padded decodes, {} expected.".format(len(decodes), expected_pad)
-      )
+      # Only padding should remain.
+      expected_pad = -sum(len(t) for t in cached_targets.values()) % batch_size
+      if len(decodes) != expected_pad:
+        raise ValueError(
+            "{} padded decodes, {} expected.".format(len(decodes), expected_pad)
+        )
 
   elif mode == "infer":
     checkpoint_paths = get_checkpoint_iterator(eval_checkpoint_step, model_dir)
