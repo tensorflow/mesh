@@ -39,7 +39,11 @@ from tensorflow.python.platform import flags
 
 FLAGS = flags.FLAGS
 
-tf.flags.DEFINE_float('lr', 3e-3, 'Learning rate.')
+tf.flags.DEFINE_float('lr', 0.003, 'Learning rate.')
+tf.flags.DEFINE_float('lr_drop_steps', 20000,
+                      'Learning rate drops for every `lr_drop_steps` steps.')
+tf.flags.DEFINE_float('lr_drop_rate', 0.3,
+                      'Learning rate drops by this amount.')
 tf.flags.DEFINE_integer('num_train_iterations_per_loop', 200,
                         'Number of training iterations per loop.')
 tf.flags.DEFINE_integer('num_eval_iterations_per_loop', 2,
@@ -130,10 +134,11 @@ def _get_model_fn(train_or_eval, cpu_devices, d_assignment, num_hosts):
 
     def _add_summary(lowering, train_or_eval, loss, scalars, global_step):
       """Add all summaries."""
-      tf_loss = tf.to_float(lowering.export_to_tf_tensor(loss))
+      tf_loss = tf.cast(lowering.export_to_tf_tensor(loss), tf.float32)
       for k in scalars.keys():
-        scalars[k] = tf.to_float(
-            lowering.export_to_tf_tensor(scalars[k]))
+        if not isinstance(scalars[k], tf.Tensor):
+          scalars[k] = tf.cast(
+              lowering.export_to_tf_tensor(scalars[k]), tf.float32)
 
       def _host_loss_summary(global_step, tf_loss, **scalars):
         """Add summary.scalar in host side."""
@@ -179,15 +184,20 @@ def _get_model_fn(train_or_eval, cpu_devices, d_assignment, num_hosts):
         mesh_shape, layout_rules, None, d_assignment)
 
     with mtf.utils.outside_all_rewrites():  # Do not tpu_rewrite this part.
-      # Not using the logits output for now.
-      _, loss, scalars, bn_update_ops = (
+      preds, loss, scalars, bn_update_ops = (
           mtf_unet.unet_with_spatial_partition(
               mesh, train_or_eval, input_fea, input_lab))
 
     if train_or_eval == 'train':
       var_grads = mtf.gradients(
           [loss], [v.outputs[0] for v in graph.trainable_variables])
-      optimizer = mtf.optimize.AdafactorOptimizer(learning_rate=FLAGS.lr)
+
+      lr = FLAGS.lr * tf.pow(
+          FLAGS.lr_drop_rate,
+          tf.floor(tf.cast(global_step, tf.float32) / FLAGS.lr_drop_steps))
+      scalars['learning_rate'] = lr
+
+      optimizer = mtf.optimize.AdafactorOptimizer(learning_rate=lr)
       update_ops = optimizer.apply_grads(var_grads, graph.trainable_variables)
 
       # This is where the actual tf graph got built.
@@ -200,8 +210,13 @@ def _get_model_fn(train_or_eval, cpu_devices, d_assignment, num_hosts):
       tf_update_ops_group = tf.group(tf_update_ops)
 
     else:  # train_or_eval == 'eval':
+      preds = [mtf.anonymize(pred) for pred in preds]
+
       # This is where the actual tf graph got built.
       lowering = mtf.Lowering(graph, {mesh: mesh_impl})
+
+      tf_preds = [tf.cast(
+          lowering.export_to_tf_tensor(pred), tf.float32) for pred in preds]
 
     tf_loss = _add_summary(lowering, train_or_eval, loss, scalars, global_step)
 
@@ -221,7 +236,7 @@ def _get_model_fn(train_or_eval, cpu_devices, d_assignment, num_hosts):
 
       else:  # train_or_eval == 'eval':
         captured_hooks.capture([master_to_slice_hook, None])
-        return tf_loss
+        return [tf_loss] + tf_preds
 
   return _model_fn, captured_hooks
 
@@ -323,9 +338,14 @@ def _eval_phase(mesh_impl, cpu_devices, d_assignment, num_hosts, num_cores):
 
         simd_input_reader.start_infeed_thread(
             sess, FLAGS.num_eval_iterations_per_loop)
+
+        results = []
         for step in range(FLAGS.num_eval_iterations_per_loop):
-          sess.run([tpu_eval_computation, flush_summary])
+          # Only get results from the 0-th core.
+          results.append(sess.run(tpu_eval_computation)[0])
+          sess.run(flush_summary)
           tf.logging.info('eval steps: {}'.format(step))
+        mtf_unet.postprocess(results)
 
 
 def _shutdown():

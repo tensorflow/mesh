@@ -22,7 +22,9 @@ from __future__ import google_type_annotations
 from __future__ import print_function
 
 import functools
+
 import mesh_tensorflow as mtf
+import numpy as np
 import tensorflow as tf
 
 # pylint: disable=g-direct-tensorflow-import
@@ -50,27 +52,28 @@ tf.flags.DEFINE_integer('label_c', 3, 'The number of output classes.')
 tf.flags.DEFINE_integer('n_base_filters', 32, 'The number of filters.')
 tf.flags.DEFINE_integer('network_depth', 4, 'The number of pooling layers.')
 tf.flags.DEFINE_boolean('with_batch_norm', True, 'Whether to use batch norm.')
+tf.flags.DEFINE_float('dropout_keep_p', 0.5, 'Probability to keep activations.')
 
-tf.flags.DEFINE_float('xen_liver_weight', 128,
+tf.flags.DEFINE_float('xen_liver_weight', 2,
                       'The weight of liver region pixels, '
                       'when computing the cross-entropy loss')
-tf.flags.DEFINE_float('xen_lesion_weight', 256,
+tf.flags.DEFINE_float('xen_lesion_weight', 4,
                       'The weight of lesion region pixels, '
                       'when computing the cross-entropy loss')
 tf.flags.DEFINE_float('dice_loss_weight', 0.2,
                       'The weight of dice loss, ranges from 0 to 1')
-tf.flags.DEFINE_float('dice_epsilon', 1e-1,
+tf.flags.DEFINE_float('dice_epsilon', 0.1,
                       'A small value that prevents 0 dividing.')
 
-tf.flags.DEFINE_float('image_translate_ratio', 0.1,
+tf.flags.DEFINE_float('image_translate_ratio', 0.05,
                       'How much you want to translate the image and label, '
                       'for data augmentation.')
-tf.flags.DEFINE_float('image_transform_ratio', 0.1,
+tf.flags.DEFINE_float('image_transform_ratio', 0.0003,
                       'How much you want to sheer the image and label, '
                       'for data augmentation.')
 tf.flags.DEFINE_float('image_noise_probability', 0.80,
                       'Probability of adding noise during data augmentation.')
-tf.flags.DEFINE_float('image_noise_ratio', 0.02,
+tf.flags.DEFINE_float('image_noise_ratio', 0.005,
                       'How much random noise you want to add to CT images.')
 
 tf.flags.DEFINE_string('mtf_dtype', 'bfloat16', 'dtype for MeshTensorflow.')
@@ -196,7 +199,7 @@ def _data_augmentation(image, label, sample_slices):
     image = _transform_slices(image, proj_matrix, static_axis, 'BILINEAR')
     label = _transform_slices(label, proj_matrix, static_axis, 'NEAREST')
 
-  if FLAGS.image_noise_ratio > 1e-6:
+  if FLAGS.image_noise_ratio > 0.000001:
     image = _maybe_add_noise(
         image, [1, 4], FLAGS.image_noise_probability, FLAGS.image_noise_ratio)
 
@@ -205,12 +208,10 @@ def _data_augmentation(image, label, sample_slices):
     image = _flip_slices(image, flip_indicator, flip_axis)
     label = _flip_slices(label, flip_indicator, flip_axis)
 
-  for static_axis in [0, 1, 2]:
-    if sample_slices and static_axis != 2:
-      continue
-    rot90_k = tf.random_uniform(shape=[], minval=0, maxval=4, dtype=tf.int32)
-    image = _rot90_slices(image, rot90_k, static_axis)
-    label = _rot90_slices(label, rot90_k, static_axis)
+  # Only rotate 0 or 180 degress
+  rot90_k = 2 * tf.random_uniform(shape=[], minval=0, maxval=2, dtype=tf.int32)
+  image = _rot90_slices(image, rot90_k, static_axis=2)
+  label = _rot90_slices(label, rot90_k, static_axis=2)
 
   return image, label
 
@@ -220,13 +221,11 @@ def get_dataset_creator(dataset_str):
   if dataset_str == 'train':
     data_file_pattern = FLAGS.train_file_pattern.format(FLAGS.ct_resolution)
     shuffle = True
-    repeat = True
     interleave = True
   else:
     assert dataset_str == 'eval'
     data_file_pattern = FLAGS.eval_file_pattern.format(FLAGS.ct_resolution)
     shuffle = False
-    repeat = False
     interleave = False
 
   def _dataset_creator():
@@ -244,8 +243,8 @@ def get_dataset_creator(dataset_str):
       image = tf.decode_raw(parsed['image/ct_image'], tf.float32)
       label = tf.decode_raw(parsed['image/label'], tf.float32)
 
-      # Preprocess color, as suggested by https://arxiv.org/pdf/1707.07734.pdf
-      image = tf.clip_by_value(image / 255.0, -2, 2)
+      # Preprocess color, clip to 0 ~ 1.
+      image = tf.clip_by_value(image / 1024.0 + 0.5, 0, 1)
 
       image = tf.reshape(image, spatial_dims)
       label = tf.reshape(label, spatial_dims)
@@ -263,9 +262,10 @@ def get_dataset_creator(dataset_str):
 
         if dataset_str == 'train':
           image, label = _data_augmentation(image, label, sample_slices=True)
-
         # Only get the center slice of label.
-        label = tf.slice(label, [0, 0, FLAGS.image_c // 2], slice_size)
+        label = tf.slice(label, [0, 0, FLAGS.image_c // 2],
+                         [FLAGS.ct_resolution, FLAGS.ct_resolution, 1])
+
       elif dataset_str == 'train':
         image, label = _data_augmentation(image, label, sample_slices=False)
 
@@ -289,11 +289,8 @@ def get_dataset_creator(dataset_str):
 
     dataset_fn = functools.partial(tf.data.TFRecordDataset,
                                    compression_type='GZIP')
-    if repeat:
-      dataset = tf.data.Dataset.list_files(data_file_pattern,
-                                           shuffle=shuffle).repeat()
-    else:
-      dataset = tf.data.Dataset.list_files(data_file_pattern, shuffle=shuffle)
+    dataset = tf.data.Dataset.list_files(data_file_pattern,
+                                         shuffle=shuffle).repeat()
 
     if interleave:
       dataset = dataset.apply(
@@ -348,8 +345,19 @@ def get_input_mtf_shapes(dataset_str):
   return [mtf_image_shape, mtf_label_shape]
 
 
+def postprocess(results):
+  """Do whatever to the results returned by unet_with_spatial_partition."""
+  area_intersect = np.concatenate([result[1] for result in results])
+  area_sum = np.concatenate([result[2] for result in results])
+  dice_per_case = (
+      2.0 * area_intersect[area_sum > 0] / area_sum[area_sum > 0]).mean()
+  dice_global = (2.0 * area_intersect.sum() / area_sum.sum())
+  tf.logging.info('final dice_per_case: {}, dice_global: {}'.format(
+      dice_per_case, dice_global))
+
+
 def conv_with_spatial_partition(x, sample_slices, image_nx_dim, image_ny_dim,
-                                n_filters, with_batch_norm, is_training,
+                                n_filters, with_batch_norm, keep_p, is_training,
                                 odim_name, variable_dtype, name):
   """Conv with spatial partition, batch_noram and activation."""
   if sample_slices:
@@ -369,9 +377,11 @@ def conv_with_spatial_partition(x, sample_slices, image_nx_dim, image_ny_dim,
         name=name,
     )
 
+  x = mtf.dropout(x, keep_p)
+
   if with_batch_norm:
     x, bn_update_ops = mtf.layers.batch_norm(
-        x, is_training, momentum=0.90, epsilon=1e-6,
+        x, is_training, momentum=0.90, epsilon=0.000001,
         dims_idx_start=0, dims_idx_end=-1, name=name)
   else:
     bn_update_ops = []
@@ -380,7 +390,8 @@ def conv_with_spatial_partition(x, sample_slices, image_nx_dim, image_ny_dim,
 
 
 def deconv_with_spatial_partition(x, sample_slices, image_nx_dim, image_ny_dim,
-                                  n_filters, odim_name, variable_dtype, name):
+                                  n_filters, keep_p, odim_name, variable_dtype,
+                                  name):
   """Deconvolution with spatial partition."""
   if sample_slices:
     x = mtf.layers.conv2d_transpose_with_blocks(
@@ -398,6 +409,9 @@ def deconv_with_spatial_partition(x, sample_slices, image_nx_dim, image_ny_dim,
         variable_dtype=variable_dtype,
         name=name,
     )
+
+  x = mtf.dropout(x, keep_p)
+
   return x
 
 
@@ -480,7 +494,9 @@ def unet_with_spatial_partition(mesh, dataset_str, images, labels):
     x, bn_update_ops = conv_with_spatial_partition(
         x, FLAGS.sample_slices, image_nx_dim, image_ny_dim,
         FLAGS.n_base_filters * (2**depth),
-        FLAGS.with_batch_norm, is_training,
+        1.0 if depth == 0 else FLAGS.dropout_keep_p,  # no dropout in 1st layer.
+        FLAGS.with_batch_norm,
+        is_training,
         'conv_{}_0'.format(depth),
         variable_dtype, 'conv_down_{}_0'.format(depth))
     all_bn_update_ops.extend(bn_update_ops)
@@ -488,7 +504,7 @@ def unet_with_spatial_partition(mesh, dataset_str, images, labels):
     x, bn_update_ops = conv_with_spatial_partition(
         x, FLAGS.sample_slices, image_nx_dim, image_ny_dim,
         FLAGS.n_base_filters * (2**depth),
-        FLAGS.with_batch_norm, is_training,
+        FLAGS.dropout_keep_p, FLAGS.with_batch_norm, is_training,
         'conv_{}_1'.format(depth),
         variable_dtype, 'conv_down_{}_1'.format(depth))
     levels.append(x)
@@ -505,6 +521,7 @@ def unet_with_spatial_partition(mesh, dataset_str, images, labels):
     x = deconv_with_spatial_partition(
         x, FLAGS.sample_slices, image_nx_dim, image_ny_dim,
         FLAGS.n_base_filters * (2**depth),
+        FLAGS.dropout_keep_p,
         'conv_{}_1'.format(depth),
         variable_dtype, 'deconv_{}_0'.format(depth))
     x = mtf.concat([x, levels[depth]],
@@ -513,7 +530,7 @@ def unet_with_spatial_partition(mesh, dataset_str, images, labels):
     x, bn_update_ops = conv_with_spatial_partition(
         x, FLAGS.sample_slices, image_nx_dim, image_ny_dim,
         FLAGS.n_base_filters * (2**depth),
-        FLAGS.with_batch_norm, is_training,
+        FLAGS.dropout_keep_p, FLAGS.with_batch_norm, is_training,
         'conv_{}_0'.format(depth),
         variable_dtype, 'conv_up_{}_0'.format(depth))
     all_bn_update_ops.extend(bn_update_ops)
@@ -521,11 +538,12 @@ def unet_with_spatial_partition(mesh, dataset_str, images, labels):
     x, bn_update_ops = conv_with_spatial_partition(
         x, FLAGS.sample_slices, image_nx_dim, image_ny_dim,
         FLAGS.n_base_filters * (2**depth),
-        FLAGS.with_batch_norm, is_training,
+        FLAGS.dropout_keep_p, FLAGS.with_batch_norm, is_training,
         'conv_{}_1'.format(depth),
         variable_dtype, 'conv_up_{}_1'.format(depth))
     all_bn_update_ops.extend(bn_update_ops)
 
+  # no dropout in the final layer.
   if FLAGS.sample_slices:
     y = mtf.layers.conv2d_with_blocks(
         x, mtf.Dimension('label_c', FLAGS.label_c),
@@ -548,35 +566,24 @@ def unet_with_spatial_partition(mesh, dataset_str, images, labels):
     return mtf.constant(mesh, v, shape=[], dtype=dtype)
 
   argmax_t = mtf.argmax(t, label_c_dim)
-  # Record liver region.
   liver_t = mtf.cast(mtf.equal(argmax_t, scalar(1, tf.int32)), mtf_dtype)
-  # Keep the lesion (tumor) and background classes. Remove the liver class.
-  lesion_idx = mtf.cast(mtf.equal(argmax_t, scalar(2, tf.int32)), tf.int32)
-  t = mtf.one_hot(lesion_idx * scalar(2, tf.int32),
-                  label_c_dim, dtype=mtf_dtype)
+  lesion_t = mtf.cast(mtf.equal(argmax_t, scalar(2, tf.int32)), mtf_dtype)
 
   argmax_y = mtf.argmax(y, label_c_dim)
-  argmax_t = mtf.argmax(t, label_c_dim)
   lesion_y = mtf.cast(mtf.equal(argmax_y, scalar(2, tf.int32)), mtf_dtype)
-  lesion_t = mtf.cast(mtf.equal(argmax_t, scalar(2, tf.int32)), mtf_dtype)
 
   # summary of class ratios.
   lesion_pred_ratio = mtf.reduce_mean(lesion_y)
   lesion_label_ratio = mtf.reduce_mean(lesion_t)
 
   # summary of accuracy.
-  accuracy = mtf.reduce_mean(
-      mtf.cast(
-          mtf.equal(mtf.argmax(y, label_c_dim), mtf.argmax(t, label_c_dim)),
-          mtf_dtype
-      )
-  )
+  accuracy = mtf.reduce_mean(mtf.cast(mtf.equal(argmax_y, argmax_t), mtf_dtype))
 
   # Cross-entropy loss. Up-weight the liver region.
   pixel_loss = mtf.layers.softmax_cross_entropy_with_logits(y, t, label_c_dim)
   pixel_weight = scalar(1, mtf_dtype) + \
       liver_t * scalar(FLAGS.xen_liver_weight - 1, mtf_dtype) + \
-      lesion_t * scalar(FLAGS.xen_lesion_weight - FLAGS.xen_liver_weight - 1,
+      lesion_t * scalar(FLAGS.xen_lesion_weight - FLAGS.xen_liver_weight,
                         mtf_dtype)
   loss_xen = mtf.reduce_mean(pixel_loss * pixel_weight)
 
@@ -588,8 +595,13 @@ def unet_with_spatial_partition(mesh, dataset_str, images, labels):
                                   output_shape=mtf.Shape([batch_dim]))
   prob_area_sum = mtf.reduce_sum(lesion_prob + lesion_t,
                                  output_shape=mtf.Shape([batch_dim]))
-  loss_dice = mtf.reduce_mean(
-      -2 * prob_intersect / (prob_area_sum + FLAGS.dice_epsilon))
+  loss_dice_per_case = mtf.reduce_mean(
+      scalar(-2, mtf_dtype) * prob_intersect / (
+          prob_area_sum + scalar(FLAGS.dice_epsilon, mtf_dtype)))
+  loss_dice_global = scalar(-2, mtf_dtype) * mtf.reduce_sum(prob_intersect) / (
+      mtf.reduce_sum(prob_area_sum) + scalar(FLAGS.dice_epsilon, mtf_dtype))
+
+  loss_dice = (loss_dice_per_case + loss_dice_global) * scalar(0.5, mtf_dtype)
 
   loss = scalar(FLAGS.dice_loss_weight, mtf_dtype) * loss_dice + scalar(
       1 - FLAGS.dice_loss_weight, mtf_dtype) * loss_xen
@@ -599,28 +611,21 @@ def unet_with_spatial_partition(mesh, dataset_str, images, labels):
   area_sum = mtf.reduce_sum(lesion_y + lesion_t,
                             output_shape=mtf.Shape([batch_dim]))
   # summary of dice.
-  dice = mtf.reduce_mean(scalar(2, mtf_dtype) * intersect / (
-      area_sum + scalar(1e-6, mtf_dtype)))
-
-  # Transpose it back to the its input shape.
-  if FLAGS.sample_slices:
-    y = mtf.transpose(y, [batch_dim,
-                          image_nx_dim, image_sx_dim,
-                          image_ny_dim, image_sy_dim,
-                          label_c_dim])
-  else:
-    y = mtf.transpose(y, [batch_dim,
-                          image_nx_dim, image_sx_dim,
-                          image_ny_dim, image_sy_dim,
-                          image_sz_dim, label_c_dim])
+  dice_per_case = mtf.reduce_mean(scalar(2, mtf_dtype) * intersect / (
+      area_sum + scalar(0.000001, mtf_dtype)))
+  dice_global = scalar(2, mtf_dtype) * mtf.reduce_sum(intersect) / (
+      mtf.reduce_sum(area_sum) + scalar(0.000001, mtf_dtype))
 
   eval_metrics = {
       'lesion_pred_ratio': lesion_pred_ratio,
       'lesion_label_ratio': lesion_label_ratio,
       'accuracy_of_all_classes': accuracy,
-      'dice_of_lesion_region': dice,
+      'lesion_dice_per_case': dice_per_case,
+      'lesion_dice_global': dice_global,
       'loss_xen': loss_xen,
       'loss_dice': loss_dice,
+      'loss_dice_per_case': loss_dice_per_case,
+      'loss_dice_global': loss_dice_global,
   }
 
-  return y, loss, eval_metrics, all_bn_update_ops
+  return [intersect, area_sum], loss, eval_metrics, all_bn_update_ops
