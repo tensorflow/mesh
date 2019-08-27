@@ -268,7 +268,7 @@ def tpu_estimator_model_fn(model_type,
     mesh_shape: a mtf.Shape
     layout_rules: a mtf.LayoutRules
     batch_size: an integer
-    sequence_length: an integer
+    sequence_length: a dict from feature-key to int
     autostack: a boolean
     keep_checkpoint_max: an integer
     save_checkpoints_steps: an integer
@@ -334,16 +334,23 @@ def tpu_estimator_model_fn(model_type,
     graph = mtf.Graph()
     mesh = mtf.Mesh(graph, "my_mesh", var_placer)
 
-    outer_batch_dim = mtf.Dimension("outer_batch", outer_batch_size)
-    batch_dim = mtf.Dimension("batch", batch_size // outer_batch_size)
-    length_dim = mtf.Dimension("length", sequence_length)
-    feature_shape = mtf.Shape([outer_batch_dim, batch_dim, length_dim])
-
     mtf_features = {}
     for key, x in features.items():
+      outer_batch_dim = mtf.Dimension("outer_batch", outer_batch_size)
+      batch_dim = mtf.Dimension("batch", batch_size // outer_batch_size)
+      # Some auxiliary features may have been generated in packing.
+      # The names of these new features are of the form
+      #   "<original_feature_name>_<suffix>", e.g. "inputs_segmentation".
+      #   We look up the lengths based on the original feature name, without
+      #   the "_<suffix>".
+      feature_length = sequence_length[key.split("_")[0]]
+      length_dim = mtf.Dimension("length", feature_length)
+      feature_shape = mtf.Shape([outer_batch_dim, batch_dim, length_dim])
+
       x = tf.to_int32(features[key])
       x = tf.reshape(
-          x, [outer_batch_size, batch_size // outer_batch_size, sequence_length]
+          x, [outer_batch_size,
+              batch_size // outer_batch_size, length_dim.size]
       )
       if not use_tpu:
         tf.logging.info("feature %s : %s" % (key, x))
@@ -353,12 +360,13 @@ def tpu_estimator_model_fn(model_type,
           mesh, x, feature_shape, name=key)
 
     if mode == tf.estimator.ModeKeys.PREDICT:
-      feature_shape = mtf.Shape([
-          mtf.Dimension("batch", batch_size),
-          mtf.Dimension("length", sequence_length)
-      ])
+      def _feature_shape(key):
+        return mtf.Shape([
+            mtf.Dimension("batch", batch_size),
+            mtf.Dimension("length", sequence_length[key])
+        ])
       mtf_features = {
-          k: mtf.reshape(v, feature_shape)
+          k: mtf.reshape(v, _feature_shape(k))
           for k, v in six.iteritems(mtf_features)
       }
       inputs = mtf_features["inputs"]
@@ -616,15 +624,17 @@ def _dynamic_text2self(mtf_features):
   targets_segmentation = mtf_features["targets_segmentation"]
   inputs_position = mtf_features["inputs_position"]
   targets_position = mtf_features["targets_position"]
-  length_dim = targets.shape.dims[-1]
+  inputs_length_dim = inputs.shape.dims[-1]
+  targets_length_dim = targets.shape.dims[-1]
   # compute lengths of inputs and targets portions of each segment
-  segments_dim = mtf.Dimension("segments", length_dim.size)
+  # segments_dim must be larger than the maximum number of segments.
+  segments_dim = mtf.Dimension("segments", targets_length_dim.size)
   inputs_segment_length = mtf.reduce_sum(
       mtf.one_hot(inputs_segmentation, segments_dim, dtype=tf.int32),
-      reduced_dim=length_dim)
+      reduced_dim=inputs_length_dim)
   targets_segment_length = mtf.reduce_sum(
       mtf.one_hot(targets_segmentation, segments_dim, dtype=tf.int32),
-      reduced_dim=length_dim)
+      reduced_dim=targets_length_dim)
   # segment 0 means padding.  Zero out the segment lengths for segment 0.
   segments_range = mtf.range(targets.mesh, segments_dim, dtype=tf.int32)
   nonzero_segment = mtf.to_int32(mtf.not_equal(segments_range, 0))
@@ -634,8 +644,9 @@ def _dynamic_text2self(mtf_features):
   # for targets, position in sequence increases by inputs_segment_length
   targets_position += mtf.gather(
       inputs_segment_length, targets_segmentation, segments_dim)
-  # this is the new (2x longer) length dimension
-  new_length_dim = mtf.Dimension("new_length", length_dim.size * 2)
+  # this is the new length dimension
+  new_length_dim = mtf.Dimension(
+      "new_length", inputs_length_dim.size + targets_length_dim.size)
   new_length_range = mtf.range(
       targets.mesh, new_length_dim, dtype=tf.int32)
   # compute permutation tensors mapping from the old length dimension to the
@@ -814,7 +825,7 @@ def decode_from_file(estimator,
     vocabulary: a mtf.transformer.vocabulary.Vocabulary
     model_type: a string
     batch_size: an integer
-    sequence_length: an integer (maximum decode length)
+    sequence_length: a dict from feature-key to int
     checkpoint_path: an optional string
     input_filename: a string
     output_filename: a string
@@ -823,7 +834,7 @@ def decode_from_file(estimator,
   inputs = get_inputs_from_file(input_filename)
 
   all_input_ids = encode_inputs(inputs, vocabulary, model_type, batch_size,
-                                sequence_length, eos_id=eos_id)
+                                sequence_length["inputs"], eos_id=eos_id)
   def input_fn(params):
     del params
     dataset = tf.data.Dataset.from_tensor_slices({"inputs": all_input_ids})
@@ -872,7 +883,7 @@ def export_model(estimator, export_path, vocabulary, sequence_length):
       model_fn.
     export_path: str, path to export the model.
     vocabulary: sentencepiece vocab, vocabulary instance to use for encoding.
-    sequence_length: int, sequence length used for training the model.
+    sequence_length: dict from feature-key to int
   Returns:
     None
   """
@@ -957,13 +968,14 @@ def compute_batch_size(sequence_length,
   data-parallelism
 
   Args:
-    sequence_length: an integer
+    sequence_length: a dict from feature-key to int
     mesh_shape: an input to mtf.convert_to_shape()
     layout_rules: an input to mtf.convert_to_layout_rules()
     method_and_value: a pair
   Returns:
     an integer - the number of sequences per batch
   """
+  sequence_length = max(sequence_length.values())
   def checkdiv(a, b):
     if a % b:
       raise ValueError("%d is not divisible by %d" % (a, b))
@@ -1049,12 +1061,12 @@ def auto_train_steps(batch_size,
 
   Args:
     batch_size: an integer
-    sequence_length: an integer
+    sequence_length: a dict from feature-key to int
     train_tokens: an integer (train_steps * batch_size * sequence_length)
   Returns:
     an integer
   """
-  return train_tokens // (batch_size * sequence_length)
+  return train_tokens // (batch_size * max(sequence_length.values()))
 
 
 def get_checkpoint_iterator(checkpoint_step, model_dir):
@@ -1153,12 +1165,12 @@ def run(tpu_job_name,
       targets_vocabulary) tuple.
     train_dataset_fn: A function returning a tf.data.Dataset. Must be provided
       for mode="train". Should accept the following arguments:
-        - sequence_length: int, length of each packed or padded sequence.
+        - sequence_length: dict from feature-key to int
         - vocabulary: Vocabulary instance to use for encoding.
         - dataset_split: str, which dataset split to load.
     eval_dataset_fn: A function returning a list of dataset.EvalDataset tuples.
       Must be provided for mode="eval". Should accept the following arguments:
-        - sequence_length: int, length of each packed or padded sequence.
+        - sequence_length: dict from feature-key to int
         - vocabulary: Vocabulary instance to use for encoding.
         - dataset_split: str, which dataset split to load.
       dataset.EvalDataset tuples are namedtuples with the following fields:
@@ -1192,7 +1204,8 @@ def run(tpu_job_name,
       per-shard batch size.
     train_steps: An integer or a function with the same signature as
       auto_train_steps().  Total number of training steps.
-    sequence_length: an integer
+    sequence_length: an integer or a dict from feature-key to integer
+      the (packed) sequence length.  e.g. {"inputs": 512, "targets": 128}
     mesh_shape: an input to mtf.convert_to_shape()
     layout_rules: an input to mtf.convert_to_layout_rules()
     learning_rate_schedule: an optional function taking the scalar name argument
@@ -1211,6 +1224,10 @@ def run(tpu_job_name,
       this string appears in its name. If None (default), train all trainable
       variables.
   """
+  if isinstance(sequence_length, int):
+    sequence_length = {"inputs": sequence_length,
+                       "targets": sequence_length}
+
   if not isinstance(batch_size, int):
     batch_size = compute_batch_size(
         sequence_length, mesh_shape, layout_rules, batch_size)

@@ -431,7 +431,10 @@ class Unitransformer(object):
       if autoregressive:
         raise ValueError("autoregressive Transformer needs output vocabulary")
     self.autoregressive = autoregressive
-    self.max_length_dim = mtf.Dimension("max_length", max_length)
+    if positional_embedding:
+      self.max_length_dim = mtf.Dimension("max_length", max_length)
+    else:
+      self.max_length_dim = None
     self.shared_embedding_and_softmax_weights = (
         shared_embedding_and_softmax_weights)
     self.label_smoothing = label_smoothing
@@ -512,6 +515,20 @@ class Unitransformer(object):
         pos_emb_var = mtf.layers.embedding_weights(
             mesh, self.max_length_dim, self.model_dim, context.variable_dtype,
             "positional_embedding")
+      if (context.length_dim is not None and
+          context.length_dim.size > self.max_length_dim.size):
+        message = (
+            "Length dimenison exceeds size of positional embedding table. "
+            "length_dim.size > max_length_dim.size %s vs %s."
+            % (context.length_dim, self.max_length_dim))
+        if context.position_is_default:
+          # Definitely getting overflow in this case.
+          raise ValueError(message)
+        else:
+          tf.logging.warning(
+              message +
+              " This may be OK if there are several shorter sequences packed "
+              "together.  Otherwise, the later positions will get zeros.")
       if context.position_is_default:
         pos_emb = mtf.rename_dimension(
             mtf.slice(pos_emb_var, 0, context.length_dim.size,
@@ -970,11 +987,8 @@ class Bitransformer(object):
     shared_params = {}
     if self.shared_embedding:
       with tf.variable_scope("shared"):
-        compatible = (
-            self.encoder.model_dim == self.decoder.model_dim and
-            self.encoder.input_vocab_dim == self.decoder.input_vocab_dim and
-            self.encoder.max_length_dim == self.decoder.max_length_dim)
-        if not compatible:
+        if not (self.encoder.model_dim == self.decoder.model_dim and
+                self.encoder.input_vocab_dim == self.decoder.input_vocab_dim):
           raise ValueError(
               "shared_embedding requires encoder and decoder to have identical"
               " d_model and vocabulary sizes")
@@ -985,7 +999,8 @@ class Bitransformer(object):
             variable_dtype,
             name="embedding")
         if (self.encoder.positional_embedding
-            and self.decoder.positional_embedding):
+            and self.decoder.positional_embedding
+            and self.encoder.max_length_dim == self.decoder.max_length_dim):
           shared_params["positional_embedding"] = mtf.layers.embedding_weights(
               mesh, self.encoder.max_length_dim, self.encoder.model_dim,
               variable_dtype, "positional_embedding")

@@ -46,11 +46,14 @@ LayerStack.dropout_rate = %dropout_rate
 # No label smoothing by default
 decoder/Unitransformer.label_smoothing = 0.0
 
-sequence_length = 512
 # the sequence length for this run
-utils.run.sequence_length = %sequence_length
-# the maximum sequence length (changing breaks checkpoint compatibility)
-Unitransformer.max_length = %sequence_length
+utils.run.sequence_length = {"inputs": 512, "targets": 512}
+
+# The size of the positional embedding tables.
+# This is relevant only if positional embeddings are used.
+# The value must be at least as large as the actual sequence length.
+# Changing this value breaks checkpoint compatibility.
+Unitransformer.max_length = 512
 
 # Optimization
 utils.run.optimizer = @optimize.AdafactorOptimizer

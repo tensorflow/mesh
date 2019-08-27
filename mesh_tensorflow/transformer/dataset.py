@@ -106,7 +106,7 @@ def pack_or_pad(
 
   Args:
     dataset: a tf.data.Dataset
-    length: an integer
+    length: an integer or a dict from feature-key to integer
     pack: a boolean, whether to pack (True) or pad (False).
     feature_keys: (optional) list of strings, the feature names to limit
       packing or padding to. Packing will filter out other features whereas
@@ -503,7 +503,7 @@ def pack_dataset(dataset, length, keys=None, use_custom_ops=False):
 
   Args:
     dataset: a tf.data.Dataset
-    length: an integer
+    length: an integer, or a dict from feature-key to integer
     keys: a list of strings (e.g. ["inputs", "targets"])
     use_custom_ops: a boolean - custom ops are faster but require a custom-built
       binary, which is not currently possible on cloud-tpu.
@@ -520,13 +520,20 @@ def pack_dataset(dataset, length, keys=None, use_custom_ops=False):
                        % (k, shapes.keys()))
     if not shapes[k].is_compatible_with(tf.TensorShape([None])):
       raise ValueError("Tensors to be packed must be one-dimensional.")
+  # make sure that the length dictionary contains all keys as well as the
+  # keys suffixed by "_segmentation" and "_position"
+  length_dict = {}
+  for k in keys:
+    for suffix in ["", "_segmentation", "_position"]:
+      length_dict[k + suffix] = length if isinstance(length, int) else length[k]
+  length = length_dict
 
   # trim to length
-  dataset = dataset.map(lambda x: {k: x[k][:length] for k in keys},
+  dataset = dataset.map(lambda x: {k: x[k][:length[k]] for k in keys},
                         num_parallel_calls=tf.data.experimental.AUTOTUNE)
   # Setting batch_size=length ensures that the concatenated sequences (if they
   # have length >=1) are sufficient to fill at least one packed example.
-  batch_size = length
+  batch_size = max(length.values())
   dataset = dataset.padded_batch(
       batch_size, padded_shapes={k: [-1] for k in keys})
   if use_custom_ops and len(keys) <= 2:
@@ -535,8 +542,9 @@ def pack_dataset(dataset, length, keys=None, use_custom_ops=False):
     dataset = _pack_with_tf_ops(dataset, keys, length)
 
   # Set the Tensor shapes correctly since they get lost in the process.
-  return dataset.map(
-      lambda x: {k: tf.reshape(v, [length]) for k, v in x.items()})
+  def my_fn(x):
+    return {k: tf.reshape(v, [length[k]]) for k, v in x.items()}
+  return dataset.map(my_fn)
 
 
 def _pack_with_tf_ops(dataset, keys, length):
@@ -549,7 +557,7 @@ def _pack_with_tf_ops(dataset, keys, length):
   Args:
     dataset: a dataset containing padded batches of examples.
     keys: a list of strings
-    length: an integer
+    length: an dict from feature-key to integer
 
   Returns:
     a dataset.
@@ -566,7 +574,8 @@ def _pack_with_tf_ops(dataset, keys, length):
     for k in keys_etc:
       new_outputs[k] = outputs[k].write(
           outputs[k].size(),
-          tf.pad(partial[k], [[0, length - tf.size(partial[k])]]))
+          tf.pad(partial[k],
+                 [[0, length[k] - tf.size(partial[k])]]))
     return new_partial, new_outputs
 
   def map_fn(x):
@@ -586,9 +595,9 @@ def _pack_with_tf_ops(dataset, keys, length):
     outputs = {}
     for k in keys:
       outputs[k] = tf.TensorArray(
-          tf.int32, size=0, dynamic_size=True, element_shape=[length])
+          tf.int32, size=0, dynamic_size=True, element_shape=[length[k]])
       outputs[k + "_position"] = tf.TensorArray(
-          tf.int32, size=0, dynamic_size=True, element_shape=[length])
+          tf.int32, size=0, dynamic_size=True, element_shape=[length[k]])
     def cond_fn(i, partial, outputs):
       del partial, outputs
       return i < dynamic_batch_size
@@ -612,7 +621,7 @@ def _pack_with_tf_ops(dataset, keys, length):
         can_append = tf.logical_and(
             can_append,
             tf.less_equal(
-                tf.size(partial[k]) + tf.size(one_example[k]), length))
+                tf.size(partial[k]) + tf.size(one_example[k]), length[k]))
       def false_fn():
         return write_packed_example(partial, outputs)
       def true_fn():
@@ -620,7 +629,7 @@ def _pack_with_tf_ops(dataset, keys, length):
       partial, outputs = tf.cond(can_append, true_fn, false_fn)
       new_partial = {}
       for k in keys:
-        new_seq = one_example[k][:length]
+        new_seq = one_example[k][:length[k]]
         new_seq_len = tf.size(new_seq)
         new_partial[k] = tf.concat([partial[k], new_seq], 0)
         new_partial[k + "_position"] = tf.concat(
@@ -661,7 +670,7 @@ def _pack_with_custom_ops(dataset, keys, length):
   Args:
     dataset: a dataset containing padded batches of examples.
     keys: a list of strings (must have length 1 or 2)
-    length: an integer
+    length: a dictionary from key to integer
 
   Returns:
     a dataset.
@@ -679,7 +688,8 @@ def _pack_with_custom_ops(dataset, keys, length):
     """Map-function."""
     (k1_packed, k1_segmengation, k1_position,
      k2_packed, k2_segmentation, k2_position) = (
-         pack_sequences_ops.pack_sequences2(x[k1], x[k2], length))
+         pack_sequences_ops.pack_sequences2(
+             x[k1], x[k2], length[k1], length[k2]))
     packed = {
         k1: k1_packed,
         k1 + "_segmentation": k1_segmengation,
@@ -703,7 +713,7 @@ def trim_and_pad_dataset(dataset, length, feature_keys=None):
 
   Args:
     dataset: tf.data.Dataset, the dataset to trimp/pad examples in.
-    length: int, the length to trim/pad to.
+    length: int, or a dict from feature-key to int
     feature_keys: (optional) list of strings, the feature names to limit
       trimming/padding to. Defaults to all features.
   Returns:
@@ -713,10 +723,11 @@ def trim_and_pad_dataset(dataset, length, feature_keys=None):
     """Trim/pad to the first axis of `t` to be of size `length`."""
     if feature_keys and k not in feature_keys:
       return t
-    t = t[:length]
-    pad_amt = length - tf.shape(t)[0]
+    length_k = length if isinstance(length, int) else length[k]
+    t = t[:length_k]
+    pad_amt = length_k - tf.shape(t)[0]
     padded_t = tf.pad(t, [(0, pad_amt)] + [(0, 0)] * (len(t.shape) - 1))
-    padded_t.set_shape([length] + t.shape[1:])
+    padded_t.set_shape([length_k] + t.shape[1:])
     return padded_t
 
   return dataset.map(
