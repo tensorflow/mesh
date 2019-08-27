@@ -22,10 +22,11 @@ from __future__ import google_type_annotations
 from __future__ import print_function
 
 import functools
+import os
 
 import mesh_tensorflow as mtf
 import numpy as np
-import tensorflow as tf
+import tensorflow as tf  # tf
 
 # pylint: disable=g-direct-tensorflow-import
 from tensorflow.python.platform import flags
@@ -33,61 +34,72 @@ from tensorflow.python.platform import flags
 
 FLAGS = flags.FLAGS
 
-tf.flags.DEFINE_boolean('sample_slices', False,
-                        'Whether to build model on 2D CT slices instead of 3D.')
+flags.DEFINE_boolean('sample_slices', False,
+                     'Whether to build model on 2D CT slices instead of 3D.')
 
-tf.flags.DEFINE_integer('ct_resolution', 128,
-                        'Resolution of CT images along depth, height and '
-                        'width dimensions.')
+flags.DEFINE_integer('ct_resolution', 128,
+                     'Resolution of CT images along depth, height and '
+                     'width dimensions.')
 
-tf.flags.DEFINE_integer('batch_size_train', 32, 'Training batch size.')
-tf.flags.DEFINE_integer('batch_size_eval', 32, 'Evaluation batch size.')
-tf.flags.DEFINE_integer('image_nx_block', 8, 'The number of x blocks.')
-tf.flags.DEFINE_integer('image_ny_block', 8, 'The number of y blocks.')
-tf.flags.DEFINE_integer('image_c', 1,
-                        'The number of input image channels. '
-                        'If sample_slices is False, image_c should be 1.')
-tf.flags.DEFINE_integer('label_c', 3, 'The number of output classes.')
+flags.DEFINE_integer('batch_size_train', 32, 'Training batch size.')
+flags.DEFINE_integer('batch_size_eval', 32, 'Evaluation batch size.')
+flags.DEFINE_integer('image_nx_block', 8, 'The number of x blocks.')
+flags.DEFINE_integer('image_ny_block', 8, 'The number of y blocks.')
+flags.DEFINE_integer('image_c', 1,
+                     'The number of input image channels. '
+                     'If sample_slices is False, image_c should be 1.')
+flags.DEFINE_integer('label_c', 3, 'The number of output classes.')
 
-tf.flags.DEFINE_integer('n_base_filters', 32, 'The number of filters.')
-tf.flags.DEFINE_integer('network_depth', 4, 'The number of pooling layers.')
-tf.flags.DEFINE_boolean('with_batch_norm', True, 'Whether to use batch norm.')
-tf.flags.DEFINE_float('dropout_keep_p', 0.5, 'Probability to keep activations.')
+flags.DEFINE_integer('n_base_filters', 32, 'The number of filters.')
+flags.DEFINE_integer('network_depth', 4, 'The number of pooling layers.')
+flags.DEFINE_boolean('with_batch_norm', True, 'Whether to use batch norm.')
+flags.DEFINE_float('dropout_keep_p', 0.5, 'Probability to keep activations.')
 
-tf.flags.DEFINE_float('xen_liver_weight', 2,
-                      'The weight of liver region pixels, '
-                      'when computing the cross-entropy loss')
-tf.flags.DEFINE_float('xen_lesion_weight', 4,
-                      'The weight of lesion region pixels, '
-                      'when computing the cross-entropy loss')
-tf.flags.DEFINE_float('dice_loss_weight', 0.2,
-                      'The weight of dice loss, ranges from 0 to 1')
-tf.flags.DEFINE_float('dice_epsilon', 0.1,
-                      'A small value that prevents 0 dividing.')
+flags.DEFINE_float('xen_liver_weight', 8,
+                   'The weight of liver region pixels, '
+                   'when computing the cross-entropy loss')
+flags.DEFINE_float('xen_lesion_weight', 16,
+                   'The weight of lesion region pixels, '
+                   'when computing the cross-entropy loss')
+flags.DEFINE_float('dice_loss_weight', 0.2,
+                   'The weight of dice loss, ranges from 0 to 1')
+flags.DEFINE_float('dice_epsilon', 0.1,
+                   'A small value that prevents 0 dividing.')
 
-tf.flags.DEFINE_float('image_translate_ratio', 0.05,
-                      'How much you want to translate the image and label, '
-                      'for data augmentation.')
-tf.flags.DEFINE_float('image_transform_ratio', 0.0003,
-                      'How much you want to sheer the image and label, '
-                      'for data augmentation.')
-tf.flags.DEFINE_float('image_noise_probability', 0.80,
-                      'Probability of adding noise during data augmentation.')
-tf.flags.DEFINE_float('image_noise_ratio', 0.005,
-                      'How much random noise you want to add to CT images.')
+flags.DEFINE_float('image_translate_ratio', 0.0,
+                   'How much you want to translate the image and label, '
+                   'for data augmentation.')
+flags.DEFINE_float('image_transform_ratio', 0.0,
+                   'How much you want to sheer the image and label, '
+                   'for data augmentation.')
+flags.DEFINE_float('image_noise_probability', 0.0,
+                   'Probability of adding noise during data augmentation.')
+flags.DEFINE_float('image_noise_ratio', 0.0,
+                   'How much random noise you want to add to CT images.')
+flags.DEFINE_float('image_corrupt_ratio_mean', 0.0,
+                   'How much non-liver area you want to block-out in average.')
+flags.DEFINE_float('image_corrupt_ratio_stddev', 0.0,
+                   'Std-dev of how much non-liver area you want to block-out.')
+flags.DEFINE_float('per_class_color_scale', 0.0,
+                   'How much to scale intensities of lesion/non-lesion areas.')
+flags.DEFINE_float('per_class_color_shift', 0.0,
+                   'How much to shift intensities of lesion/non-lesion areas.')
+flags.DEFINE_float('gen_fake_probability', 0.50,
+                   'How much to scale intensities of lesion/non-lesion areas.')
+flags.DEFINE_float('min_fake_lesion_ratio', 0.05,
+                   'Minimum amount of synthetic lession in liver.')
 
-tf.flags.DEFINE_string('mtf_dtype', 'bfloat16', 'dtype for MeshTensorflow.')
+flags.DEFINE_string('mtf_dtype', 'bfloat16', 'dtype for MeshTensorflow.')
 
-tf.flags.DEFINE_string(
-    'layout',
-    'batch:rows, image_nx_block:columns, image_ny_block:cores',
-    'layout rules')
+flags.DEFINE_string('layout',
+                    'batch:rows, image_nx_block:columns, image_ny_block:cores',
+                    'layout rules')
 
-tf.flags.DEFINE_string('train_file_pattern', '',
-                       'Path to CT scan training data.')
+flags.DEFINE_string('train_file_pattern', '',
+                    'Path to CT scan training data.')
 
-tf.flags.DEFINE_string('eval_file_pattern', '',
-                       'Path to CT scan evalutation data.')
+flags.DEFINE_string('eval_file_pattern', '',
+                    'Path to CT scan evalutation data.')
 
 
 def get_layout():
@@ -113,36 +125,44 @@ def _transform_slices(slices, proj_matrix, static_axis, interpolation):
   return slices
 
 
-def _maybe_add_noise(slices, scales,
+def _rand_noise(noise_mean, noise_dev, scale, shape):
+  """Generate random noise given a particular scale and shape."""
+  noise_shape = [x // scale for x in shape]
+  noise_shape = [1 if x == 0 else x for x in noise_shape]
+  noise = tf.random.normal(
+      shape=noise_shape, mean=noise_mean, stddev=noise_dev)
+  noise = tf.clip_by_value(
+      noise, noise_mean - 2.0 * noise_dev, noise_mean + 2.0 * noise_dev)
+
+  if scale != 1:
+    noise = tf.image.resize_images(
+        noise, [shape[0], shape[1]])
+    noise = tf.transpose(noise, [0, 2, 1])
+    noise = tf.image.resize_images(
+        noise, [shape[0], shape[2]])
+    noise = tf.transpose(noise, [0, 2, 1])
+  return noise
+
+
+def _maybe_add_noise(slices, scale0, scale1,
                      image_noise_probability, image_noise_ratio):
-  """Add noise at multiple scales."""
+  """Add noise at two scales."""
   noise_list = []
-  for scale in scales:
+  for scale in [scale0, scale1]:
     rand_image_noise_ratio = tf.random.uniform(
         shape=[], minval=0.0, maxval=image_noise_ratio)
     # Eliminate the background intensity with 60 percentile.
     noise_dev = rand_image_noise_ratio * (
         tf.contrib.distributions.percentile(slices, q=95) - \
         tf.contrib.distributions.percentile(slices, q=60))
-    noise_shape = [x // scale for x in slices.shape]
-    noise = tf.random.normal(
-        shape=noise_shape, mean=0.0, stddev=noise_dev)
-    noise = tf.clip_by_value(
-        noise, -2.0 * noise_dev, 2.0 * noise_dev)
-    if scale != 1:
-      noise = tf.image.resize_images(
-          noise, [slices.shape[0], slices.shape[1]])
-      noise = tf.transpose(noise, [0, 2, 1])
-      noise = tf.image.resize_images(
-          noise, [slices.shape[0], slices.shape[2]])
-      noise = tf.transpose(noise, [0, 2, 1])
-    noise_list.append(noise)
+    noise_list.append(_rand_noise(0.0, noise_dev, scale, slices.shape))
 
   skip_noise = tf.greater(tf.random.uniform([]), image_noise_probability)
   slices = tf.cond(skip_noise,
                    lambda: slices, lambda: slices + noise_list[0])
   slices = tf.cond(skip_noise,
                    lambda: slices, lambda: slices + noise_list[1])
+
   return slices
 
 
@@ -176,24 +196,128 @@ def _rot90_slices(slices, rot90_k, static_axis):
   return slices
 
 
+def _gen_rand_mask(ratio_mean, ratio_stddev, scale, shape, smoothness=0):
+  """Generate a binary mask."""
+  scale = max(scale, 1)
+
+  ratio = tf.random.normal(
+      shape=[], mean=ratio_mean, stddev=ratio_stddev)
+  low_bound = tf.maximum(0.0, ratio_mean - 2 * ratio_stddev)
+  up_bound = tf.minimum(1.0, ratio_mean + 2 * ratio_stddev)
+  percentil_q = tf.cast(
+      100.0 * tf.clip_by_value(ratio, low_bound, up_bound),
+      tf.int32)
+
+  pattern = _rand_noise(0.0, 1.0, scale, shape)
+  if smoothness > 0:
+    smoothness = int(smoothness) // 2 * 2 + 1
+    pattern = tf.expand_dims(tf.expand_dims(pattern, 0), -1)
+    pattern = tf.nn.conv3d(
+        pattern, filter=tf.ones([smoothness, smoothness, smoothness, 1, 1]),
+        strides=[1, 1, 1, 1, 1], padding='SAME', dilations=[1, 1, 1, 1, 1])
+    pattern = tf.reduce_sum(pattern, 0)
+    pattern = tf.reduce_sum(pattern, -1)
+
+  thres = tf.contrib.distributions.percentile(pattern, q=percentil_q)
+  rand_mask = tf.less(pattern, thres)
+
+  return rand_mask
+
+
+def _dilation_3d(boolean_mask, width):
+  width = width // 2 * 2 + 1
+  kernel = tf.zeros((width, width, 1))
+  mask_4d = tf.cast(tf.expand_dims(boolean_mask, -1), tf.float32)
+  dilated_4d = tf.nn.dilation2d(
+      mask_4d, filter=kernel,
+      strides=[1, 1, 1, 1], rates=[1, 1, 1, 1], padding='SAME')
+  return tf.greater(tf.reduce_mean(dilated_4d, axis=-1), 0.5)
+
+
+def _maybe_gen_fake_data_based_on_real_data(
+    image, label, reso, min_fake_lesion_ratio,
+    gen_prob_indicator, gen_probability):
+  """Remove real lesion and synthesize lesion."""
+  # TODO(lehou): Replace magic numbers with flag variables.
+  background_mask = tf.less(label, 0.5)
+  lesion_mask = tf.greater(label, 1.5)
+  liver_mask = tf.logical_not(tf.logical_or(background_mask, lesion_mask))
+
+  background_dilate = _dilation_3d(background_mask, reso // 32)
+  lesion_dilate = _dilation_3d(lesion_mask, reso // 32)
+  liver_shrink = tf.logical_not(tf.logical_or(background_dilate, lesion_dilate))
+  liver_intensity = tf.boolean_mask(image, liver_shrink)
+
+  lesion_shrink = tf.logical_not(_dilation_3d(tf.less(label, 1.5), reso // 32))
+  lesion_intensity = tf.boolean_mask(image, lesion_shrink)
+
+  intensity_diff = tf.reduce_mean(liver_intensity) - (
+      tf.reduce_mean(lesion_intensity))
+  intensity_diff = tf.cond(tf.is_nan(intensity_diff),
+                           lambda: 0.0, lambda: intensity_diff)
+
+  lesion_area = tf.reduce_sum(tf.cast(lesion_mask, tf.float32))
+  liver_area = tf.reduce_sum(tf.cast(liver_mask, tf.float32))
+  lesion_liver_ratio = tf.cond(tf.greater(liver_area, 0.0),
+                               lambda: lesion_area / liver_area, lambda: 0.0)
+  lesion_liver_ratio += min_fake_lesion_ratio
+
+  fake_lesion_mask = tf.logical_and(
+      _gen_rand_mask(ratio_mean=lesion_liver_ratio, ratio_stddev=0.0,
+                     scale=reso // 8, shape=label.shape,
+                     smoothness=reso // 16),
+      liver_mask)
+  liver_mask = tf.logical_not(tf.logical_or(background_mask, fake_lesion_mask))
+
+  # Remove real lesion and add fake lesion.
+  # If the intensitify is too small (maybe no liver or lesion region labeled),
+  # do not generate fake data.
+  gen_prob_indicator = tf.cond(
+      tf.greater(intensity_diff, 0.0001),
+      lambda: gen_prob_indicator, lambda: 0.0)
+  # pylint: disable=g-long-lambda
+  image = tf.cond(
+      tf.greater(gen_prob_indicator, 1 - gen_probability),
+      lambda: image + intensity_diff * tf.cast(lesion_mask, tf.float32) \
+                    - intensity_diff * tf.cast(fake_lesion_mask, tf.float32),
+      lambda: image)
+  label = tf.cond(
+      tf.greater(gen_prob_indicator, 1 - gen_probability),
+      lambda: tf.cast(background_mask, tf.float32) * 0 + \
+          tf.cast(liver_mask, tf.float32) * 1 + \
+          tf.cast(fake_lesion_mask, tf.float32) * 2,
+      lambda: label)
+  # pylint: enable=g-long-lambda
+
+  return image, label
+
+
 def _data_augmentation(image, label, sample_slices):
   """image and label augmentation."""
-  def _truncated_normal(stddev):
-    v = tf.random.normal(shape=[], mean=0.0, stddev=stddev)
-    v = tf.clip_by_value(v, -2 * stddev, 2 * stddev)
+  gen_prob_indicator = tf.random_uniform(
+      shape=[], minval=0.0, maxval=1.0, dtype=tf.float32)
+  image, label = _maybe_gen_fake_data_based_on_real_data(
+      image, label, FLAGS.ct_resolution, FLAGS.min_fake_lesion_ratio,
+      gen_prob_indicator, FLAGS.gen_fake_probability)
+
+  def _truncated_normal(mean, stddev):
+    v = tf.random.normal(shape=[], mean=mean, stddev=stddev)
+    v = tf.clip_by_value(v, -2 * stddev + mean, 2 * stddev + mean)
     return v
 
   for static_axis in [0, 1, 2]:
     if sample_slices and static_axis != 2:
       continue
-    a0 = _truncated_normal(FLAGS.image_transform_ratio) + 1.0
-    a1 = _truncated_normal(FLAGS.image_transform_ratio)
-    a2 = _truncated_normal(FLAGS.image_translate_ratio) * FLAGS.ct_resolution
-    b0 = _truncated_normal(FLAGS.image_transform_ratio)
-    b1 = _truncated_normal(FLAGS.image_transform_ratio) + 1.0
-    b2 = _truncated_normal(FLAGS.image_translate_ratio) * FLAGS.ct_resolution
-    c0 = _truncated_normal(FLAGS.image_transform_ratio)
-    c1 = _truncated_normal(FLAGS.image_transform_ratio)
+    a0 = _truncated_normal(1.0, FLAGS.image_transform_ratio)
+    a1 = _truncated_normal(0.0, FLAGS.image_transform_ratio)
+    a2 = _truncated_normal(
+        0.0, FLAGS.image_translate_ratio * FLAGS.ct_resolution)
+    b0 = _truncated_normal(0.0, FLAGS.image_transform_ratio)
+    b1 = _truncated_normal(1.0, FLAGS.image_transform_ratio)
+    b2 = _truncated_normal(
+        0.0, FLAGS.image_translate_ratio * FLAGS.ct_resolution)
+    c0 = _truncated_normal(0.0, FLAGS.image_transform_ratio)
+    c1 = _truncated_normal(0.0, FLAGS.image_transform_ratio)
     proj_matrix = [a0, a1, a2, b0, b1, b2, c0, c1]
 
     image = _transform_slices(image, proj_matrix, static_axis, 'BILINEAR')
@@ -201,7 +325,7 @@ def _data_augmentation(image, label, sample_slices):
 
   if FLAGS.image_noise_ratio > 0.000001:
     image = _maybe_add_noise(
-        image, [1, 4], FLAGS.image_noise_probability, FLAGS.image_noise_ratio)
+        image, 1, 4, FLAGS.image_noise_probability, FLAGS.image_noise_ratio)
 
   for flip_axis in [0, 1, 2]:
     flip_indicator = tf.random.uniform(shape=[])
@@ -212,6 +336,31 @@ def _data_augmentation(image, label, sample_slices):
   rot90_k = 2 * tf.random_uniform(shape=[], minval=0, maxval=2, dtype=tf.int32)
   image = _rot90_slices(image, rot90_k, static_axis=2)
   label = _rot90_slices(label, rot90_k, static_axis=2)
+
+  if FLAGS.per_class_color_scale > 0.000001 and (
+      FLAGS.per_class_color_shift > 0.000001):
+    # Randomly change (mostly increase) intensity of non-lesion region.
+    per_class_noise = _truncated_normal(
+        FLAGS.per_class_color_shift, FLAGS.per_class_color_scale)
+    image = image + per_class_noise * (
+        image * tf.cast(tf.greater(label, 1.5), tf.float32))
+
+    # Randomly change (mostly decrease) intensity of lesion region.
+    per_class_noise = _truncated_normal(
+        -FLAGS.per_class_color_shift, FLAGS.per_class_color_scale)
+    image = image + per_class_noise * (
+        image * tf.cast(tf.less(label, 1.5), tf.float32))
+
+  if FLAGS.image_corrupt_ratio_mean > 0.000001 and (
+      FLAGS.image_corrupt_ratio_stddev > 0.000001):
+    # Corrupt non-lesion region according to keep_mask.
+    keep_mask = _gen_rand_mask(
+        1 - FLAGS.image_corrupt_ratio_mean,
+        FLAGS.image_corrupt_ratio_stddev,
+        FLAGS.ct_resolution // 3, image.shape)
+
+    keep_mask = tf.logical_or(tf.greater(label, 1.5), keep_mask)
+    image *= tf.cast(keep_mask, tf.float32)
 
   return image, label
 
@@ -345,15 +494,30 @@ def get_input_mtf_shapes(dataset_str):
   return [mtf_image_shape, mtf_label_shape]
 
 
-def postprocess(results):
+def postprocess(results, pred_output_dir):
   """Do whatever to the results returned by unet_with_spatial_partition."""
-  area_intersect = np.concatenate([result[1] for result in results])
-  area_sum = np.concatenate([result[2] for result in results])
+  argmax_y = np.concatenate([result[0] for result in results], axis=0)
+  argmax_t = np.concatenate([result[1] for result in results], axis=0)
+  area_int = np.concatenate([result[2] for result in results])
+  area_sum = np.concatenate([result[3] for result in results])
+  global_step = results[-1][-1]
+
   dice_per_case = (
-      2.0 * area_intersect[area_sum > 0] / area_sum[area_sum > 0]).mean()
-  dice_global = (2.0 * area_intersect.sum() / area_sum.sum())
-  tf.logging.info('final dice_per_case: {}, dice_global: {}'.format(
-      dice_per_case, dice_global))
+      2.0 * area_int[area_sum > 0] / area_sum[area_sum > 0]).mean()
+  dice_global = (2.0 * area_int.sum() / area_sum.sum())
+  tf.logging.info('final dice_per_case: %f, dice_global: %f',
+                  dice_per_case, dice_global)
+
+  if not tf.gfile.IsDirectory(pred_output_dir):
+    tf.gfile.MakeDirs(pred_output_dir)
+
+  with tf.gfile.Open(os.path.join(
+      pred_output_dir, 'argmax_y_{}.npy'.format(global_step)), 'wb') as f:
+    np.save(f, argmax_y)
+
+  with tf.gfile.Open(os.path.join(
+      pred_output_dir, 'argmax_t_{}.npy'.format(global_step)), 'wb') as f:
+    np.save(f, argmax_t)
 
 
 def conv_with_spatial_partition(x, sample_slices, image_nx_dim, image_ny_dim,
@@ -377,8 +541,6 @@ def conv_with_spatial_partition(x, sample_slices, image_nx_dim, image_ny_dim,
         name=name,
     )
 
-  x = mtf.dropout(x, keep_p)
-
   if with_batch_norm:
     x, bn_update_ops = mtf.layers.batch_norm(
         x, is_training, momentum=0.90, epsilon=0.000001,
@@ -386,7 +548,12 @@ def conv_with_spatial_partition(x, sample_slices, image_nx_dim, image_ny_dim,
   else:
     bn_update_ops = []
 
-  return mtf.leaky_relu(x, 0.1), bn_update_ops
+  x = mtf.leaky_relu(x, 0.1)
+
+  if is_training:
+    x = mtf.dropout(x, keep_p)
+
+  return x, bn_update_ops
 
 
 def deconv_with_spatial_partition(x, sample_slices, image_nx_dim, image_ny_dim,
@@ -628,4 +795,19 @@ def unet_with_spatial_partition(mesh, dataset_str, images, labels):
       'loss_dice_global': loss_dice_global,
   }
 
-  return [intersect, area_sum], loss, eval_metrics, all_bn_update_ops
+  if FLAGS.sample_slices:
+    preds = [mtf.cast(argmax_y, mtf_dtype), mtf.cast(argmax_t, mtf_dtype),
+             intersect, area_sum]
+  else:
+    preds = [
+        mtf.reduce_sum(
+            mtf.slice(mtf.cast(argmax_y, mtf_dtype),
+                      FLAGS.ct_resolution // 2, 1, 'image_sz_block'),
+            reduced_dim=mtf.Dimension('image_sz_block', 1)),
+        mtf.reduce_sum(
+            mtf.slice(mtf.cast(argmax_t, mtf_dtype),
+                      FLAGS.ct_resolution // 2, 1, 'image_sz_block'),
+            reduced_dim=mtf.Dimension('image_sz_block', 1)),
+        intersect, area_sum]
+
+  return preds, loss, eval_metrics, all_bn_update_ops

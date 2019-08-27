@@ -15,7 +15,7 @@
 
 """A toy model using Mesh TensorFlow.
 
-Using mtf_input_reader to handle the input pipeline.
+Using input_reader to handle the input pipeline.
 """
 
 from __future__ import absolute_import
@@ -29,8 +29,8 @@ import tensorflow as tf
 
 # pylint: disable=g-direct-tensorflow-import
 # pylint: disable=g-direct-third-party-import
-from mesh_tensorflow.experimental import mtf_input_reader
-from mesh_tensorflow.experimental import mtf_unet
+from mesh_tensorflow.experimental import input_reader
+from mesh_tensorflow.experimental import unet
 from tensorflow.contrib import tpu
 from tensorflow.contrib.tpu.python.tpu import device_assignment
 from tensorflow.python.ops import control_flow_ops
@@ -39,27 +39,28 @@ from tensorflow.python.platform import flags
 
 FLAGS = flags.FLAGS
 
-tf.flags.DEFINE_float('lr', 0.003, 'Learning rate.')
-tf.flags.DEFINE_float('lr_drop_steps', 20000,
-                      'Learning rate drops for every `lr_drop_steps` steps.')
-tf.flags.DEFINE_float('lr_drop_rate', 0.3,
-                      'Learning rate drops by this amount.')
-tf.flags.DEFINE_integer('num_train_iterations_per_loop', 200,
-                        'Number of training iterations per loop.')
-tf.flags.DEFINE_integer('num_eval_iterations_per_loop', 2,
-                        'Number of eval iterations per loop.')
-tf.flags.DEFINE_integer('num_training_loops', 1000,
-                        'Number of training loops.')
+flags.DEFINE_float('lr', 0.003, 'Learning rate.')
+flags.DEFINE_float('lr_drop_steps', 20000,
+                   'Learning rate drops for every `lr_drop_steps` steps.')
+flags.DEFINE_float('lr_drop_rate', 0.3,
+                   'Learning rate drops by this amount.')
+flags.DEFINE_integer('num_train_iterations_per_loop', 500,
+                     'Number of training iterations per loop.')
+flags.DEFINE_integer('num_eval_iterations_per_loop', 2,
+                     'Number of eval iterations per loop.')
+flags.DEFINE_integer('num_training_loops', 1000,
+                     'Number of training loops.')
 
-tf.flags.DEFINE_string('mesh_shape', 'rows:4, columns:4, cores:2',
-                       'mesh shape')
-tf.flags.DEFINE_string('master', '', 'Can be a headless master.')
+flags.DEFINE_string('mesh_shape', 'rows:4, columns:4, cores:2',
+                    'mesh shape')
+flags.DEFINE_string('master', '', 'Can be a headless master.')
 
-tf.flags.DEFINE_string('checkpoint_dir', '', 'Path to saved models.')
-tf.flags.DEFINE_integer('save_checkpoints_steps', 100,
-                        'Frequency for saving models.')
+flags.DEFINE_string('checkpoint_dir', '', 'Path to saved models.')
+flags.DEFINE_integer('save_checkpoints_steps', 500,
+                     'Frequency for saving models.')
 
-tf.flags.DEFINE_string('summary_dir', '', 'Path to saved summaries.')
+flags.DEFINE_string('summary_dir', '', 'Path to saved summaries.')
+flags.DEFINE_string('pred_output_dir', '', 'Path to saved pred results.')
 
 
 class _CapturedObject(object):
@@ -179,13 +180,13 @@ def _get_model_fn(train_or_eval, cpu_devices, d_assignment, num_hosts):
     mesh = mtf.Mesh(graph, 'my_mesh', var_placer)
 
     mesh_shape = mtf.convert_to_shape(FLAGS.mesh_shape)
-    layout_rules = mtf_unet.get_layout()
+    layout_rules = unet.get_layout()
     mesh_impl = mtf.simd_mesh_impl.SimdMeshImpl(
         mesh_shape, layout_rules, None, d_assignment)
 
     with mtf.utils.outside_all_rewrites():  # Do not tpu_rewrite this part.
       preds, loss, scalars, bn_update_ops = (
-          mtf_unet.unet_with_spatial_partition(
+          unet.unet_with_spatial_partition(
               mesh, train_or_eval, input_fea, input_lab))
 
     if train_or_eval == 'train':
@@ -236,7 +237,7 @@ def _get_model_fn(train_or_eval, cpu_devices, d_assignment, num_hosts):
 
       else:  # train_or_eval == 'eval':
         captured_hooks.capture([master_to_slice_hook, None])
-        return [tf_loss] + tf_preds
+        return tf_preds + [tf_loss, global_step]
 
   return _model_fn, captured_hooks
 
@@ -270,9 +271,9 @@ def _train_phase(mesh_impl, cpu_devices, d_assignment, num_hosts, num_cores):
     with summary_writer.as_default(), (
         tf.contrib.summary.always_record_summaries()):
       # Setup input pipeline.
-      ds_creator = mtf_unet.get_dataset_creator('train')
-      mtf_shapes = mtf_unet.get_input_mtf_shapes('train')
-      simd_input_reader = mtf_input_reader.SimdMeshImplInputReader(
+      ds_creator = unet.get_dataset_creator('train')
+      mtf_shapes = unet.get_input_mtf_shapes('train')
+      simd_input_reader = input_reader.SimdMeshImplInputReader(
           mesh_impl, ds_creator, mtf_shapes)
 
       model_train_fn, train_hooks = _get_model_fn(
@@ -311,9 +312,9 @@ def _eval_phase(mesh_impl, cpu_devices, d_assignment, num_hosts, num_cores):
     with summary_writer.as_default(), (
         tf.contrib.summary.always_record_summaries()):
       # Setup input pipeline.
-      ds_creator = mtf_unet.get_dataset_creator('eval')
-      mtf_shapes = mtf_unet.get_input_mtf_shapes('eval')
-      simd_input_reader = mtf_input_reader.SimdMeshImplInputReader(
+      ds_creator = unet.get_dataset_creator('eval')
+      mtf_shapes = unet.get_input_mtf_shapes('eval')
+      simd_input_reader = input_reader.SimdMeshImplInputReader(
           mesh_impl, ds_creator, mtf_shapes)
 
       model_eval_fn, eval_hooks = _get_model_fn(
@@ -345,7 +346,7 @@ def _eval_phase(mesh_impl, cpu_devices, d_assignment, num_hosts, num_cores):
           results.append(sess.run(tpu_eval_computation)[0])
           sess.run(flush_summary)
           tf.logging.info('eval steps: {}'.format(step))
-        mtf_unet.postprocess(results)
+        unet.postprocess(results, FLAGS.pred_output_dir)
 
 
 def _shutdown():
@@ -379,7 +380,7 @@ def train_and_eval():
 
   # Get mesh_impl.
   mesh_shape = mtf.convert_to_shape(FLAGS.mesh_shape)
-  layout_rules = mtf_unet.get_layout()
+  layout_rules = unet.get_layout()
   mesh_impl = mtf.simd_mesh_impl.SimdMeshImpl(
       mesh_shape, layout_rules, None, d_assignment)
 

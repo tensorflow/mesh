@@ -324,17 +324,17 @@ To be more specific:
 
 * The BROADCAST mode in TPUEstimator does not scale up to large inputs (images
   of tens of millions of pixels). We provide a new input pipeline:
-  [`experimental/mtf_input_reader.py`](https://github.com/tensorflow/mesh/blob/master/mesh_tensorflow/experimental/mtf_input_reader.py).
-  See [`experimental/mtf_model_executor.py`](https://github.com/tensorflow/mesh/blob/master/mesh_tensorflow/experimental/mtf_model_executor.py)
+  [`experimental/input_reader.py`](https://github.com/tensorflow/mesh/blob/master/mesh_tensorflow/experimental/input_reader.py).
+  See [`experimental/model_executor.py`](https://github.com/tensorflow/mesh/blob/master/mesh_tensorflow/experimental/model_executor.py)
   on how to use it.
 * If your model takes images as input and has convolution layers. You cannot
   directly map image height and width dimensions to mesh dimensions, due to the
   sliding-window nature of convolution. Instead, you should use spatial
   partitioning. We provide examples in
-  [`experimental/mtf_unet.py`](https://github.com/tensorflow/mesh/blob/master/mesh_tensorflow/experimental/mtf_unet.py).
+  [`experimental/unet.py`](https://github.com/tensorflow/mesh/blob/master/mesh_tensorflow/experimental/unet.py).
 * If you want more control on the training and evaluation loop, instead of using
   the default API (TPUEstimator) to run your model, you can use low level APIs
-  in [`experimental/model_executor.py`](https://github.com/tensorflow/mesh/blob/master/mesh_tensorflow/experimental/mtf_model_executor.py).
+  in [`experimental/model_executor.py`](https://github.com/tensorflow/mesh/blob/master/mesh_tensorflow/experimental/model_executor.py).
 
 Note that we did not test the experimental code on GPUs. We ran them on TPUs.
 We believe that some debugging would be required for it to work on GPUs.

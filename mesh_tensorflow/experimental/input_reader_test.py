@@ -13,14 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for third_party.py.mesh_tensorflow.experimental.mtf_input_reader."""
+"""Tests for third_party.py.mesh_tensorflow.experimental.input_reader."""
 
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
 import mesh_tensorflow as mtf
-import mesh_tensorflow.experimental.mtf_input_reader as mtf_input_reader
+import mesh_tensorflow.experimental.input_reader as input_reader
 import numpy as np
 import tensorflow as tf
 
@@ -75,7 +75,7 @@ class MtfInputReaderTest(tf.test.TestCase):
       mesh_impl = mtf.simd_mesh_impl.SimdMeshImpl(
           mesh_shape, layout_rules, None, d_assignment)
 
-      simd_input_reader = mtf_input_reader.SimdMeshImplInputReader(
+      simd_input_reader = input_reader.SimdMeshImplInputReader(
           mesh_impl, stateful_ds_creator, mtf_input_shapes,
           external_worker=False)
 
