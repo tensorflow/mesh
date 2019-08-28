@@ -28,7 +28,8 @@ import mesh_tensorflow as mtf
 import numpy as np
 import tensorflow as tf  # tf
 
-# pylint: disable=g-direct-tensorflow-import
+# pylint: disable=g-direct-tensorflow-import,g-direct-third-party-import
+from mesh_tensorflow.experimental import data_aug_lib
 from tensorflow.python.platform import flags
 
 
@@ -106,265 +107,6 @@ def get_layout():
   return mtf.convert_to_layout_rules(FLAGS.layout)
 
 
-def _transform_slices(slices, proj_matrix, static_axis, interpolation):
-  """Apply rotation."""
-  assert static_axis in [0, 1, 2]
-  if static_axis == 2:
-    slices = tf.contrib.image.transform(
-        slices, proj_matrix, interpolation)
-  elif static_axis == 1:
-    slices = tf.transpose(slices, [0, 2, 1])
-    slices = tf.contrib.image.transform(
-        slices, proj_matrix, interpolation)
-    slices = tf.transpose(slices, [0, 2, 1])
-  else:
-    slices = tf.transpose(slices, [2, 1, 0])
-    slices = tf.contrib.image.transform(
-        slices, proj_matrix, interpolation)
-    slices = tf.transpose(slices, [2, 1, 0])
-  return slices
-
-
-def _rand_noise(noise_mean, noise_dev, scale, shape):
-  """Generate random noise given a particular scale and shape."""
-  noise_shape = [x // scale for x in shape]
-  noise_shape = [1 if x == 0 else x for x in noise_shape]
-  noise = tf.random.normal(
-      shape=noise_shape, mean=noise_mean, stddev=noise_dev)
-  noise = tf.clip_by_value(
-      noise, noise_mean - 2.0 * noise_dev, noise_mean + 2.0 * noise_dev)
-
-  if scale != 1:
-    noise = tf.image.resize_images(
-        noise, [shape[0], shape[1]])
-    noise = tf.transpose(noise, [0, 2, 1])
-    noise = tf.image.resize_images(
-        noise, [shape[0], shape[2]])
-    noise = tf.transpose(noise, [0, 2, 1])
-  return noise
-
-
-def _maybe_add_noise(slices, scale0, scale1,
-                     image_noise_probability, image_noise_ratio):
-  """Add noise at two scales."""
-  noise_list = []
-  for scale in [scale0, scale1]:
-    rand_image_noise_ratio = tf.random.uniform(
-        shape=[], minval=0.0, maxval=image_noise_ratio)
-    # Eliminate the background intensity with 60 percentile.
-    noise_dev = rand_image_noise_ratio * (
-        tf.contrib.distributions.percentile(slices, q=95) - \
-        tf.contrib.distributions.percentile(slices, q=60))
-    noise_list.append(_rand_noise(0.0, noise_dev, scale, slices.shape))
-
-  skip_noise = tf.greater(tf.random.uniform([]), image_noise_probability)
-  slices = tf.cond(skip_noise,
-                   lambda: slices, lambda: slices + noise_list[0])
-  slices = tf.cond(skip_noise,
-                   lambda: slices, lambda: slices + noise_list[1])
-
-  return slices
-
-
-def _flip_slices(slices, flip_indicator, flip_axis):
-  """Randomly flip the image."""
-  if flip_axis == 1:
-    slices = tf.transpose(slices, [1, 0, 2])
-  elif flip_axis == 2:
-    slices = tf.transpose(slices, [2, 1, 0])
-  slices = tf.cond(tf.less(flip_indicator, 0.5),
-                   lambda: slices,
-                   lambda: tf.image.flip_up_down(slices))
-  if flip_axis == 1:
-    slices = tf.transpose(slices, [1, 0, 2])
-  elif flip_axis == 2:
-    slices = tf.transpose(slices, [2, 1, 0])
-  return slices
-
-
-def _rot90_slices(slices, rot90_k, static_axis):
-  """Randomly rotate the image 90/180/270 degrees."""
-  if static_axis == 0:
-    slices = tf.transpose(slices, [2, 1, 0])
-  elif static_axis == 1:
-    slices = tf.transpose(slices, [0, 2, 1])
-  slices = tf.image.rot90(slices, k=rot90_k)
-  if static_axis == 0:
-    slices = tf.transpose(slices, [2, 1, 0])
-  elif static_axis == 1:
-    slices = tf.transpose(slices, [0, 2, 1])
-  return slices
-
-
-def _gen_rand_mask(ratio_mean, ratio_stddev, scale, shape, smoothness=0):
-  """Generate a binary mask."""
-  scale = max(scale, 1)
-
-  ratio = tf.random.normal(
-      shape=[], mean=ratio_mean, stddev=ratio_stddev)
-  low_bound = tf.maximum(0.0, ratio_mean - 2 * ratio_stddev)
-  up_bound = tf.minimum(1.0, ratio_mean + 2 * ratio_stddev)
-  percentil_q = tf.cast(
-      100.0 * tf.clip_by_value(ratio, low_bound, up_bound),
-      tf.int32)
-
-  pattern = _rand_noise(0.0, 1.0, scale, shape)
-  if smoothness > 0:
-    smoothness = int(smoothness) // 2 * 2 + 1
-    pattern = tf.expand_dims(tf.expand_dims(pattern, 0), -1)
-    pattern = tf.nn.conv3d(
-        pattern, filter=tf.ones([smoothness, smoothness, smoothness, 1, 1]),
-        strides=[1, 1, 1, 1, 1], padding='SAME', dilations=[1, 1, 1, 1, 1])
-    pattern = tf.reduce_sum(pattern, 0)
-    pattern = tf.reduce_sum(pattern, -1)
-
-  thres = tf.contrib.distributions.percentile(pattern, q=percentil_q)
-  rand_mask = tf.less(pattern, thres)
-
-  return rand_mask
-
-
-def _dilation_3d(boolean_mask, width):
-  width = width // 2 * 2 + 1
-  kernel = tf.zeros((width, width, 1))
-  mask_4d = tf.cast(tf.expand_dims(boolean_mask, -1), tf.float32)
-  dilated_4d = tf.nn.dilation2d(
-      mask_4d, filter=kernel,
-      strides=[1, 1, 1, 1], rates=[1, 1, 1, 1], padding='SAME')
-  return tf.greater(tf.reduce_mean(dilated_4d, axis=-1), 0.5)
-
-
-def _maybe_gen_fake_data_based_on_real_data(
-    image, label, reso, min_fake_lesion_ratio,
-    gen_prob_indicator, gen_probability):
-  """Remove real lesion and synthesize lesion."""
-  # TODO(lehou): Replace magic numbers with flag variables.
-  background_mask = tf.less(label, 0.5)
-  lesion_mask = tf.greater(label, 1.5)
-  liver_mask = tf.logical_not(tf.logical_or(background_mask, lesion_mask))
-
-  background_dilate = _dilation_3d(background_mask, reso // 32)
-  lesion_dilate = _dilation_3d(lesion_mask, reso // 32)
-  liver_shrink = tf.logical_not(tf.logical_or(background_dilate, lesion_dilate))
-  liver_intensity = tf.boolean_mask(image, liver_shrink)
-
-  lesion_shrink = tf.logical_not(_dilation_3d(tf.less(label, 1.5), reso // 32))
-  lesion_intensity = tf.boolean_mask(image, lesion_shrink)
-
-  intensity_diff = tf.reduce_mean(liver_intensity) - (
-      tf.reduce_mean(lesion_intensity))
-  intensity_diff = tf.cond(tf.is_nan(intensity_diff),
-                           lambda: 0.0, lambda: intensity_diff)
-
-  lesion_area = tf.reduce_sum(tf.cast(lesion_mask, tf.float32))
-  liver_area = tf.reduce_sum(tf.cast(liver_mask, tf.float32))
-  lesion_liver_ratio = tf.cond(tf.greater(liver_area, 0.0),
-                               lambda: lesion_area / liver_area, lambda: 0.0)
-  lesion_liver_ratio += min_fake_lesion_ratio
-
-  fake_lesion_mask = tf.logical_and(
-      _gen_rand_mask(ratio_mean=lesion_liver_ratio, ratio_stddev=0.0,
-                     scale=reso // 8, shape=label.shape,
-                     smoothness=reso // 16),
-      liver_mask)
-  liver_mask = tf.logical_not(tf.logical_or(background_mask, fake_lesion_mask))
-
-  # Remove real lesion and add fake lesion.
-  # If the intensitify is too small (maybe no liver or lesion region labeled),
-  # do not generate fake data.
-  gen_prob_indicator = tf.cond(
-      tf.greater(intensity_diff, 0.0001),
-      lambda: gen_prob_indicator, lambda: 0.0)
-  # pylint: disable=g-long-lambda
-  image = tf.cond(
-      tf.greater(gen_prob_indicator, 1 - gen_probability),
-      lambda: image + intensity_diff * tf.cast(lesion_mask, tf.float32) \
-                    - intensity_diff * tf.cast(fake_lesion_mask, tf.float32),
-      lambda: image)
-  label = tf.cond(
-      tf.greater(gen_prob_indicator, 1 - gen_probability),
-      lambda: tf.cast(background_mask, tf.float32) * 0 + \
-          tf.cast(liver_mask, tf.float32) * 1 + \
-          tf.cast(fake_lesion_mask, tf.float32) * 2,
-      lambda: label)
-  # pylint: enable=g-long-lambda
-
-  return image, label
-
-
-def _data_augmentation(image, label, sample_slices):
-  """image and label augmentation."""
-  gen_prob_indicator = tf.random_uniform(
-      shape=[], minval=0.0, maxval=1.0, dtype=tf.float32)
-  image, label = _maybe_gen_fake_data_based_on_real_data(
-      image, label, FLAGS.ct_resolution, FLAGS.min_fake_lesion_ratio,
-      gen_prob_indicator, FLAGS.gen_fake_probability)
-
-  def _truncated_normal(mean, stddev):
-    v = tf.random.normal(shape=[], mean=mean, stddev=stddev)
-    v = tf.clip_by_value(v, -2 * stddev + mean, 2 * stddev + mean)
-    return v
-
-  for static_axis in [0, 1, 2]:
-    if sample_slices and static_axis != 2:
-      continue
-    a0 = _truncated_normal(1.0, FLAGS.image_transform_ratio)
-    a1 = _truncated_normal(0.0, FLAGS.image_transform_ratio)
-    a2 = _truncated_normal(
-        0.0, FLAGS.image_translate_ratio * FLAGS.ct_resolution)
-    b0 = _truncated_normal(0.0, FLAGS.image_transform_ratio)
-    b1 = _truncated_normal(1.0, FLAGS.image_transform_ratio)
-    b2 = _truncated_normal(
-        0.0, FLAGS.image_translate_ratio * FLAGS.ct_resolution)
-    c0 = _truncated_normal(0.0, FLAGS.image_transform_ratio)
-    c1 = _truncated_normal(0.0, FLAGS.image_transform_ratio)
-    proj_matrix = [a0, a1, a2, b0, b1, b2, c0, c1]
-
-    image = _transform_slices(image, proj_matrix, static_axis, 'BILINEAR')
-    label = _transform_slices(label, proj_matrix, static_axis, 'NEAREST')
-
-  if FLAGS.image_noise_ratio > 0.000001:
-    image = _maybe_add_noise(
-        image, 1, 4, FLAGS.image_noise_probability, FLAGS.image_noise_ratio)
-
-  for flip_axis in [0, 1, 2]:
-    flip_indicator = tf.random.uniform(shape=[])
-    image = _flip_slices(image, flip_indicator, flip_axis)
-    label = _flip_slices(label, flip_indicator, flip_axis)
-
-  # Only rotate 0 or 180 degress
-  rot90_k = 2 * tf.random_uniform(shape=[], minval=0, maxval=2, dtype=tf.int32)
-  image = _rot90_slices(image, rot90_k, static_axis=2)
-  label = _rot90_slices(label, rot90_k, static_axis=2)
-
-  if FLAGS.per_class_color_scale > 0.000001 and (
-      FLAGS.per_class_color_shift > 0.000001):
-    # Randomly change (mostly increase) intensity of non-lesion region.
-    per_class_noise = _truncated_normal(
-        FLAGS.per_class_color_shift, FLAGS.per_class_color_scale)
-    image = image + per_class_noise * (
-        image * tf.cast(tf.greater(label, 1.5), tf.float32))
-
-    # Randomly change (mostly decrease) intensity of lesion region.
-    per_class_noise = _truncated_normal(
-        -FLAGS.per_class_color_shift, FLAGS.per_class_color_scale)
-    image = image + per_class_noise * (
-        image * tf.cast(tf.less(label, 1.5), tf.float32))
-
-  if FLAGS.image_corrupt_ratio_mean > 0.000001 and (
-      FLAGS.image_corrupt_ratio_stddev > 0.000001):
-    # Corrupt non-lesion region according to keep_mask.
-    keep_mask = _gen_rand_mask(
-        1 - FLAGS.image_corrupt_ratio_mean,
-        FLAGS.image_corrupt_ratio_stddev,
-        FLAGS.ct_resolution // 3, image.shape)
-
-    keep_mask = tf.logical_or(tf.greater(label, 1.5), keep_mask)
-    image *= tf.cast(keep_mask, tf.float32)
-
-  return image, label
-
-
 def get_dataset_creator(dataset_str):
   """Returns a function that creates an unbatched dataset."""
   if dataset_str == 'train':
@@ -392,8 +134,10 @@ def get_dataset_creator(dataset_str):
       image = tf.decode_raw(parsed['image/ct_image'], tf.float32)
       label = tf.decode_raw(parsed['image/label'], tf.float32)
 
-      # Preprocess color, clip to 0 ~ 1.
-      image = tf.clip_by_value(image / 1024.0 + 0.5, 0, 1)
+      if dataset_str != 'train':
+        # Preprocess color, clip to 0 ~ 1.
+        # The training set is already preprocessed.
+        image = tf.clip_by_value(image / 1024.0 + 0.5, 0, 1)
 
       image = tf.reshape(image, spatial_dims)
       label = tf.reshape(label, spatial_dims)
@@ -409,14 +153,15 @@ def get_dataset_creator(dataset_str):
         image = tf.slice(image, slice_begin, slice_size)
         label = tf.slice(label, slice_begin, slice_size)
 
-        if dataset_str == 'train':
-          image, label = _data_augmentation(image, label, sample_slices=True)
+      if dataset_str == 'train':
+        for flip_axis in [0, 1, 2]:
+          image, label = data_aug_lib.maybe_flip(image, label, flip_axis)
+        image, label = data_aug_lib.maybe_rot180(image, label, static_axis=2)
+
+      if FLAGS.sample_slices:
         # Only get the center slice of label.
         label = tf.slice(label, [0, 0, FLAGS.image_c // 2],
                          [FLAGS.ct_resolution, FLAGS.ct_resolution, 1])
-
-      elif dataset_str == 'train':
-        image, label = _data_augmentation(image, label, sample_slices=False)
 
       spatial_dims_w_blocks = [FLAGS.image_nx_block,
                                FLAGS.ct_resolution // FLAGS.image_nx_block,
