@@ -73,3 +73,9 @@ utils.run.mesh_shape = @mesh_tensorflow.transformer.utils.tpu_mesh_shape()
 
 # Override this for model-parallelism
 utils.tpu_mesh_shape.model_parallelism = 1
+
+# bfloat16 activations for faster allreduce
+# Note that bfloat16 kernels do not exist for CPU, so you will need to remove
+# this if you want to run on CPU. It can also cause some numerical
+# instabilities, but it is often significantly faster.
+utils.get_variable_dtype.activation_dtype = "bfloat16"

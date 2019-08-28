@@ -727,7 +727,7 @@ def trim_and_pad_dataset(dataset, length, feature_keys=None):
     t = t[:length_k]
     pad_amt = length_k - tf.shape(t)[0]
     padded_t = tf.pad(t, [(0, pad_amt)] + [(0, 0)] * (len(t.shape) - 1))
-    padded_t.set_shape([length_k] + t.shape[1:])
+    padded_t.set_shape([length_k] + t.shape.as_list()[1:])
     return padded_t
 
   return dataset.map(

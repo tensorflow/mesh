@@ -39,10 +39,10 @@ from tensorflow.contrib.tpu.python.tpu import tpu_config
 from tensorflow.contrib.tpu.python.tpu import tpu_estimator
 from tensorflow.python.ops import resources  # pylint: disable=g-direct-tensorflow-import
 
-tf.flags.DEFINE_multi_string("gin_file", None,
-                             "List of paths to the config files.")
-tf.flags.DEFINE_multi_string(
-    "gin_param", None, "Newline separated list of Gin parameter bindings.")
+tf.flags.DEFINE_multi_string("gin_file", None, "Path to a Gin file.")
+tf.flags.DEFINE_multi_string("gin_param", None, "Gin parameter binding.")
+tf.flags.DEFINE_multi_string("gin_location_prefix", [], "Gin file search path.")
+
 FLAGS = tf.flags.FLAGS
 
 _DEFAULT_CONFIG_FILE = "./gin/defaults.gin"
@@ -56,6 +56,9 @@ _INPUT_FEATURES = [
 
 def parse_gin_defaults_and_flags():
   """Parses all default gin files and those provides via flags."""
+  # Register .gin file search paths with gin
+  for gin_file_path in FLAGS.gin_location_prefix:
+    gin.add_config_file_search_path(gin_file_path)
   # Set up the default values for the configurable parameters. These values will
   # be overridden by any user provided gin files/parameters.
   gin.parse_config_file(
