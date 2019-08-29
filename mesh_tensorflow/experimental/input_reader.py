@@ -93,12 +93,13 @@ class SubBatchSlicer(object):
   """Reads and distributes a sub-batch on a host."""
 
   def __init__(self, sub_batch_ds_creator, host_id, all_sub_batch_pnums,
-               simd_mesh_impl, mtf_input_shapes, external_worker):
+               simd_mesh_impl, mtf_input_shapes, external_worker, global_batch):
     self._host_id = host_id
     self._all_sub_batch_pnums = all_sub_batch_pnums
     self._simd_mesh_impl = simd_mesh_impl
     self._mtf_input_shapes = mtf_input_shapes
     self._external_worker = external_worker
+    self._global_batch = global_batch
 
     self._validate_args()
 
@@ -152,9 +153,10 @@ class SubBatchSlicer(object):
   def _slice_tensor(self, input_tensor, mtf_input_shape, pnum):
     """Slice input_tensor according to mtf_input_shape and pnum."""
     s_begin = self._simd_mesh_impl.slice_begin(mtf_input_shape, pnum)
-    # Always slice from 0 in the first dimension (batch dimension), since
-    # input_tensor a sub-batch tensor.
-    s_begin[0] = 0
+    if not self._global_batch:
+      # Always slice from 0 in the first dimension (batch dimension), since
+      # input_tensor a sub-batch tensor.
+      s_begin[0] = 0
     if tuple(s_begin) in self._slice_dict:
       return self._slice_dict[tuple(s_begin)]
 
@@ -248,7 +250,8 @@ class SimdMeshImplInputReader(object):
                ds_creator,
                mtf_input_shapes,
                ds_prefetch_size=tf.data.experimental.AUTOTUNE,
-               external_worker=True):
+               external_worker=True,
+               is_eval_mode=False):
     """Input pipeline for the SIMD implementation of MeshTensorflow.
 
     Args:
@@ -264,6 +267,10 @@ class SimdMeshImplInputReader(object):
       external_worker: Whether you have an external tpu_worker or not. Set it to
         False if you run the program locally, for example, during local unit
         test.
+      is_eval_mode: In evaluation mode, only one dataset object will be created,
+        as opposed to one dataset for each sub-batch. Default is False. Set it
+        to True during evaluation, to ensure that one evaluation instance will
+        be used once and only once.
     Returns:
       An infeed queue, a list of enqueue ops, and a list of initializer ops.
     Note:
@@ -310,6 +317,7 @@ class SimdMeshImplInputReader(object):
     self._mtf_input_shapes = mtf_input_shapes
     self._ds_prefetch_size = ds_prefetch_size
     self._external_worker = external_worker
+    self._is_eval_mode = is_eval_mode
 
     self._gen_infeed_queue()
 
@@ -351,6 +359,9 @@ class SimdMeshImplInputReader(object):
 
     # For each sub-batch, we need to know which host should read it.
     hosts_to_hold_ds = self._get_hosts_to_hold_ds(pnum_maps[0])
+    if self._is_eval_mode:
+      # There should be just one dataset-holding host.
+      hosts_to_hold_ds = hosts_to_hold_ds[:1]
     sub_batch_size = batch_size // len(hosts_to_hold_ds)
     tf.logging.info("MTF sub_batch_size: {}".format(sub_batch_size))
     assert sub_batch_size * len(hosts_to_hold_ds) == batch_size
@@ -364,17 +375,30 @@ class SimdMeshImplInputReader(object):
     # For each sub-batch, create a SubBatchSlicer object.
     for sub_batch_i, host_id in enumerate(hosts_to_hold_ds):
       # Get the list of pnums for each input.
-      all_sub_batch_pnums = []
-      for pnum_map in pnum_maps:
-        sub_batch_pnums = pnum_map[sub_batch_i, ...].flatten().tolist()
-        all_sub_batch_pnums.append(sub_batch_pnums)
+      if self._is_eval_mode:
+        all_sub_batch_pnums = [
+            pnum_map.flatten().tolist() for pnum_map in pnum_maps]
 
-      sub_batch_slicer_list.append(SubBatchSlicer(sub_batch_ds_creator,
-                                                  host_id,
-                                                  all_sub_batch_pnums,
-                                                  self._simd_mesh_impl,
-                                                  self._mtf_input_shapes,
-                                                  self._external_worker))
+        sub_batch_slicer_list.append(SubBatchSlicer(sub_batch_ds_creator,
+                                                    host_id,
+                                                    all_sub_batch_pnums,
+                                                    self._simd_mesh_impl,
+                                                    self._mtf_input_shapes,
+                                                    self._external_worker,
+                                                    global_batch=True))
+      else:
+        all_sub_batch_pnums = []
+        for pnum_map in pnum_maps:
+          sub_batch_pnums = pnum_map[sub_batch_i, ...].flatten().tolist()
+          all_sub_batch_pnums.append(sub_batch_pnums)
+
+        sub_batch_slicer_list.append(SubBatchSlicer(sub_batch_ds_creator,
+                                                    host_id,
+                                                    all_sub_batch_pnums,
+                                                    self._simd_mesh_impl,
+                                                    self._mtf_input_shapes,
+                                                    self._external_worker,
+                                                    global_batch=False))
 
     # Slots for all laidout tensors.
     all_laidout_tensors = [[_NO_DATA] * len(self._mtf_input_shapes) \

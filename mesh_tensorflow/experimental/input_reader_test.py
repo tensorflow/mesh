@@ -19,6 +19,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+from absl.testing import parameterized
 import mesh_tensorflow as mtf
 import mesh_tensorflow.experimental.input_reader as input_reader
 import numpy as np
@@ -30,7 +31,7 @@ from tensorflow.contrib.tpu.python.tpu import device_assignment
 from tensorflow.core.protobuf.tpu import topology_pb2
 
 
-class MtfInputReaderTest(tf.test.TestCase):
+class MtfInputReaderTest(parameterized.TestCase, tf.test.TestCase):
 
   def initialize_system(self, sess):
     """Run tpu.initialize_system and return the number of TPU devices."""
@@ -41,7 +42,8 @@ class MtfInputReaderTest(tf.test.TestCase):
         topology_object.num_tpu_devices_per_task)
     return topology, num_cores
 
-  def test_get_laidout_tensors(self):
+  @parameterized.parameters((True,), (False,))
+  def test_get_laidout_tensors(self, is_eval_mode):
     mesh_shape = "mesh_x:2, mesh_y:1"
     layout = "batch:mesh_x, io:mesh_y"
     batch_io_dim = 4
@@ -77,7 +79,8 @@ class MtfInputReaderTest(tf.test.TestCase):
 
       simd_input_reader = input_reader.SimdMeshImplInputReader(
           mesh_impl, stateful_ds_creator, mtf_input_shapes,
-          external_worker=False)
+          external_worker=False,
+          is_eval_mode=is_eval_mode)
 
       def model_fn(features):
         return features
@@ -97,10 +100,24 @@ class MtfInputReaderTest(tf.test.TestCase):
       print("core_0_data: {}".format(core_0_data))
       print("core_1_data: {}".format(core_1_data))
 
-      self.assertAllClose(
-          np.array([[1, 0, 0, 0], [0, 1, 0, 0]], dtype=np.float32), core_0_data)
-      self.assertAllClose(
-          np.array([[0, 0, 1, 0], [0, 0, 0, 1]], dtype=np.float32), core_1_data)
+      if is_eval_mode:
+        # If there is only one dataset object, then the stateful_ds_creator()
+        # should be called only once.
+        self.assertAllClose(
+            np.array([[1, 0, 0, 0], [0, 1, 0, 0]], dtype=np.float32),
+            core_0_data)
+        self.assertAllClose(
+            np.array([[1, 0, 0, 0], [0, 1, 0, 0]], dtype=np.float32),
+            core_1_data)
+      else:
+        # If there are two dataset objects, then the stateful_ds_creator()
+        # should be called twice.
+        self.assertAllClose(
+            np.array([[1, 0, 0, 0], [0, 1, 0, 0]], dtype=np.float32),
+            core_0_data)
+        self.assertAllClose(
+            np.array([[0, 0, 1, 0], [0, 0, 0, 1]], dtype=np.float32),
+            core_1_data)
 
       sess.run(tf.tpu.shutdown_system())
 

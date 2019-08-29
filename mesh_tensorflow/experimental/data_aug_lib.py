@@ -27,6 +27,12 @@ from __future__ import print_function
 import tensorflow as tf
 
 
+def _truncated_normal(mean, stddev):
+  v = tf.random.normal(shape=[], mean=mean, stddev=stddev)
+  v = tf.clip_by_value(v, -2 * stddev + mean, 2 * stddev + mean)
+  return v
+
+
 def _rand_noise(noise_mean, noise_dev, scale, shape):
   """Generate random noise given a particular scale and shape."""
   noise_shape = [x // scale for x in shape]
@@ -44,6 +50,80 @@ def _rand_noise(noise_mean, noise_dev, scale, shape):
         noise, [shape[0], shape[2]])
     noise = tf.transpose(noise, [0, 2, 1])
   return noise
+
+
+def projective_transform(
+    image, label, image_translate_ratio, image_transform_ratio,
+    sampled_2d_slices=False):
+  """Apply projective transformation on image and label."""
+
+  if image_translate_ratio < 0.000001 and (
+      image_transform_ratio < 0.000001):
+    return image, label
+
+  def _projective_transform(data, proj_matrix, static_axis, interpolation):
+    """Apply projective transformation."""
+    if static_axis == 2:
+      data = tf.contrib.image.transform(
+          data, proj_matrix, interpolation)
+    elif static_axis == 1:
+      data = tf.transpose(data, [0, 2, 1])
+      data = tf.contrib.image.transform(
+          data, proj_matrix, interpolation)
+      data = tf.transpose(data, [0, 2, 1])
+    else:
+      data = tf.transpose(data, [2, 1, 0])
+      data = tf.contrib.image.transform(
+          data, proj_matrix, interpolation)
+      data = tf.transpose(data, [2, 1, 0])
+    return data
+
+  for static_axis in [0, 1, 2]:
+    if sampled_2d_slices and static_axis != 2:
+      continue
+    a0 = _truncated_normal(1.0, image_transform_ratio)
+    a1 = _truncated_normal(0.0, image_transform_ratio)
+    a2 = _truncated_normal(
+        0.0, image_translate_ratio * image.shape[0])
+    b0 = _truncated_normal(0.0, image_transform_ratio)
+    b1 = _truncated_normal(1.0, image_transform_ratio)
+    b2 = _truncated_normal(
+        0.0, image_translate_ratio * image.shape[0])
+    c0 = _truncated_normal(0.0, image_transform_ratio)
+    c1 = _truncated_normal(0.0, image_transform_ratio)
+    proj_matrix = [a0, a1, a2, b0, b1, b2, c0, c1]
+
+    image = _projective_transform(image, proj_matrix, static_axis, 'BILINEAR')
+    label = _projective_transform(label, proj_matrix, static_axis, 'NEAREST')
+
+  return image, label
+
+
+def maybe_add_noise(image, scale0, scale1,
+                    image_noise_probability, image_noise_ratio):
+  """Add noise at two scales."""
+
+  if image_noise_probability < 0.000001 or (
+      image_noise_ratio < 0.000001):
+    return image
+
+  noise_list = []
+  for scale in [scale0, scale1]:
+    rand_image_noise_ratio = tf.random.uniform(
+        shape=[], minval=0.0, maxval=image_noise_ratio)
+    # Eliminate the background intensity with 60 percentile.
+    noise_dev = rand_image_noise_ratio * (
+        tf.contrib.distributions.percentile(image, q=95) - \
+        tf.contrib.distributions.percentile(image, q=60))
+    noise_list.append(_rand_noise(0.0, noise_dev, scale, image.shape))
+
+  skip_noise = tf.greater(tf.random.uniform([]), image_noise_probability)
+  image = tf.cond(skip_noise,
+                  lambda: image, lambda: image + noise_list[0])
+  image = tf.cond(skip_noise,
+                  lambda: image, lambda: image + noise_list[1])
+
+  return image
 
 
 def _gen_rand_mask(ratio_mean, ratio_stddev, scale, shape, smoothness=0):
@@ -188,3 +268,46 @@ def maybe_rot180(image, label, static_axis, rot180_k=None):
     return data
 
   return _maybe_rot180(image), _maybe_rot180(label)
+
+
+def intensity_shift(
+    image, label, per_class_intensity_scale, per_class_intensity_shift):
+  """Perturb intensity in lesion and non-lesion regions."""
+
+  if per_class_intensity_scale < 0.000001 and (
+      per_class_intensity_shift < 0.000001):
+    return image, label
+
+  # Randomly change (mostly increase) intensity of non-lesion region.
+  per_class_noise = _truncated_normal(
+      per_class_intensity_shift, per_class_intensity_scale)
+  image = image + per_class_noise * (
+      image * tf.cast(tf.greater(label, 1.5), tf.float32))
+
+  # Randomly change (mostly decrease) intensity of lesion region.
+  per_class_noise = _truncated_normal(
+      -per_class_intensity_shift, per_class_intensity_scale)
+  image = image + per_class_noise * (
+      image * tf.cast(tf.less(label, 1.5), tf.float32))
+
+  return image
+
+
+def image_corruption(
+    image, label, image_corrupt_ratio_mean, image_corrupt_ratio_stddev):
+  """Randomly drop non-lesion pixels."""
+
+  if image_corrupt_ratio_mean < 0.000001 and (
+      image_corrupt_ratio_stddev < 0.000001):
+    return image
+
+  # Corrupt non-lesion region according to keep_mask.
+  keep_mask = _gen_rand_mask(
+      1 - image_corrupt_ratio_mean,
+      image_corrupt_ratio_stddev,
+      image.shape[0] // 3, image.shape)
+
+  keep_mask = tf.logical_or(tf.greater(label, 1.5), keep_mask)
+  image *= tf.cast(keep_mask, tf.float32)
+
+  return image

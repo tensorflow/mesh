@@ -1606,8 +1606,8 @@ def max_pool2d(x, ksize=(2, 2), name="max_pool2d"):
   Returns:
     a Tensor
   """
-  return mtf.PoolOperation(x, ksize, strides=ksize,
-                           pool_fn_string="MAX_2D", name=name).outputs[0]
+  return x if tuple(ksize) == (1, 1) else mtf.PoolOperation(
+      x, ksize, strides=ksize, pool_fn_string="MAX_2D", name=name).outputs[0]
 
 
 def max_pool3d(x, ksize=(2, 2, 2), name="max_pool3d"):
@@ -1627,8 +1627,8 @@ def max_pool3d(x, ksize=(2, 2, 2), name="max_pool3d"):
   Returns:
     a Tensor
   """
-  return mtf.PoolOperation(x, ksize, strides=ksize,
-                           pool_fn_string="MAX_3D", name=name).outputs[0]
+  return x if tuple(ksize) == (1, 1, 1) else mtf.PoolOperation(
+      x, ksize, strides=ksize, pool_fn_string="MAX_3D", name=name).outputs[0]
 
 
 def avg_pool2d(x, ksize=(2, 2), name="avg_pool2d"):
@@ -1647,8 +1647,8 @@ def avg_pool2d(x, ksize=(2, 2), name="avg_pool2d"):
   Returns:
     a Tensor
   """
-  return mtf.PoolOperation(x, ksize, strides=ksize,
-                           pool_fn_string="AVG_2D", name=name).outputs[0]
+  return x if tuple(ksize) == (1, 1) else mtf.PoolOperation(
+      x, ksize, strides=ksize, pool_fn_string="AVG_2D", name=name).outputs[0]
 
 
 def avg_pool3d(x, ksize=(2, 2, 2), name="avg_pool3d"):
@@ -1668,5 +1668,5 @@ def avg_pool3d(x, ksize=(2, 2, 2), name="avg_pool3d"):
   Returns:
     a Tensor
   """
-  return mtf.PoolOperation(x, ksize, strides=ksize,
-                           pool_fn_string="AVG_3D", name=name).outputs[0]
+  return x if tuple(ksize) == (1, 1, 1) else mtf.PoolOperation(
+      x, ksize, strides=ksize, pool_fn_string="AVG_3D", name=name).outputs[0]

@@ -274,7 +274,7 @@ def _train_phase(mesh_impl, cpu_devices, d_assignment, num_hosts, num_cores):
       ds_creator = unet.get_dataset_creator('train')
       mtf_shapes = unet.get_input_mtf_shapes('train')
       simd_input_reader = input_reader.SimdMeshImplInputReader(
-          mesh_impl, ds_creator, mtf_shapes)
+          mesh_impl, ds_creator, mtf_shapes, is_eval_mode=False)
 
       model_train_fn, train_hooks = _get_model_fn(
           'train', cpu_devices, d_assignment, num_hosts)
@@ -315,7 +315,7 @@ def _eval_phase(mesh_impl, cpu_devices, d_assignment, num_hosts, num_cores):
       ds_creator = unet.get_dataset_creator('eval')
       mtf_shapes = unet.get_input_mtf_shapes('eval')
       simd_input_reader = input_reader.SimdMeshImplInputReader(
-          mesh_impl, ds_creator, mtf_shapes)
+          mesh_impl, ds_creator, mtf_shapes, is_eval_mode=True)
 
       model_eval_fn, eval_hooks = _get_model_fn(
           'eval', cpu_devices, d_assignment, num_hosts)
