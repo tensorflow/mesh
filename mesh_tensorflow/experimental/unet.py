@@ -42,6 +42,10 @@ flags.DEFINE_integer('ct_resolution', 128,
                      'Resolution of CT images along depth, height and '
                      'width dimensions.')
 
+flags.DEFINE_integer('n_dataset_read_interleave', 16,
+                     'The number of interleave processes.')
+flags.DEFINE_integer('n_dataset_processes', 16,
+                     'The number of data augmentation processes.')
 flags.DEFINE_integer('batch_size_train', 32, 'Training batch size.')
 flags.DEFINE_integer('batch_size_eval', 32, 'Evaluation batch size.')
 flags.DEFINE_integer('image_nx_block', 8, 'The number of x blocks.')
@@ -53,9 +57,14 @@ flags.DEFINE_integer('label_c', 3, 'The number of output classes.')
 flags.DEFINE_integer('pred_downsample', 2,
                      'Down-sampling the results by the factor of '
                      '`pred_downsample`, before outputing the results.')
+flags.DEFINE_boolean('output_ground_truth', True,
+                     'Whether to return the ground truth tensor in Unet, '
+                     'in addition to returning the prediction tensor.')
 
 flags.DEFINE_integer('n_base_filters', 32, 'The number of filters.')
 flags.DEFINE_integer('network_depth', 4, 'The number of pooling layers.')
+flags.DEFINE_integer('n_conv_per_block', 2,
+                     'The number of conv layers between poolings.')
 flags.DEFINE_boolean('with_batch_norm', True, 'Whether to use batch norm.')
 flags.DEFINE_float('dropout_keep_p', 0.5, 'Probability to keep activations.')
 
@@ -121,6 +130,40 @@ def get_dataset_creator(dataset_str):
   def _dataset_creator():
     """Returns an unbatch dataset."""
 
+    def _get_stacked_2d_slices(image_3d, label_3d):
+      """Return 2d slices of the 3d scan."""
+      image_stack = []
+      label_stack = []
+
+      for begin_idx in range(0, FLAGS.ct_resolution - FLAGS.image_c + 1):
+        slice_begin = [0, 0, begin_idx]
+        slice_size = [FLAGS.ct_resolution, FLAGS.ct_resolution, FLAGS.image_c]
+        image = tf.slice(image_3d, slice_begin, slice_size)
+
+        slice_begin = [0, 0, begin_idx + FLAGS.image_c // 2]
+        slice_size = [FLAGS.ct_resolution, FLAGS.ct_resolution, 1]
+        label = tf.slice(label_3d, slice_begin, slice_size)
+
+        spatial_dims_w_blocks = [FLAGS.image_nx_block,
+                                 FLAGS.ct_resolution // FLAGS.image_nx_block,
+                                 FLAGS.image_ny_block,
+                                 FLAGS.ct_resolution // FLAGS.image_ny_block]
+
+        image = tf.reshape(image, spatial_dims_w_blocks + [FLAGS.image_c])
+        label = tf.reshape(label, spatial_dims_w_blocks)
+
+        label = tf.cast(label, tf.int32)
+        label = tf.one_hot(label, FLAGS.label_c)
+
+        data_dtype = tf.as_dtype(FLAGS.mtf_dtype)
+        image = tf.cast(image, data_dtype)
+        label = tf.cast(label, data_dtype)
+
+        image_stack.append(image)
+        label_stack.append(label)
+
+      return tf.stack(image_stack), tf.stack(label_stack)
+
     def _parser_fn(serialized_example):
       """Parses a single tf.Example into image and label tensors."""
       features = {}
@@ -129,6 +172,10 @@ def get_dataset_creator(dataset_str):
       parsed = tf.parse_single_example(serialized_example, features=features)
 
       spatial_dims = [FLAGS.ct_resolution] * 3
+      if FLAGS.sampled_2d_slices:
+        noise_shape = [FLAGS.ct_resolution] * 2 + [FLAGS.image_c]
+      else:
+        noise_shape = [FLAGS.ct_resolution] * 3
 
       image = tf.decode_raw(parsed['image/ct_image'], tf.float32)
       label = tf.decode_raw(parsed['image/label'], tf.float32)
@@ -141,12 +188,15 @@ def get_dataset_creator(dataset_str):
       image = tf.reshape(image, spatial_dims)
       label = tf.reshape(label, spatial_dims)
 
+      if dataset_str == 'eval' and FLAGS.sampled_2d_slices:
+        return _get_stacked_2d_slices(image, label)
+
       if FLAGS.sampled_2d_slices:
         # Take random slices of images and label
         begin_idx = tf.random_uniform(
             shape=[], minval=0,
             maxval=FLAGS.ct_resolution - FLAGS.image_c + 1, dtype=tf.int32)
-        slice_begin = tf.stack([0, 0, begin_idx])
+        slice_begin = [0, 0, begin_idx]
         slice_size = [FLAGS.ct_resolution, FLAGS.ct_resolution, FLAGS.image_c]
 
         image = tf.slice(image, slice_begin, slice_size)
@@ -160,13 +210,13 @@ def get_dataset_creator(dataset_str):
             image, label,
             FLAGS.per_class_intensity_scale, FLAGS.per_class_intensity_shift)
         image = data_aug_lib.image_corruption(
-            image, label,
+            image, label, FLAGS.ct_resolution,
             FLAGS.image_corrupt_ratio_mean, FLAGS.image_corrupt_ratio_stddev)
         image = data_aug_lib.maybe_add_noise(
-            image, 1, 4,
+            image, noise_shape, 1, 4,
             FLAGS.image_noise_probability, FLAGS.image_noise_ratio)
         image, label = data_aug_lib.projective_transform(
-            image, label,
+            image, label, FLAGS.ct_resolution,
             FLAGS.image_translate_ratio, FLAGS.image_transform_ratio,
             FLAGS.sampled_2d_slices)
 
@@ -202,7 +252,7 @@ def get_dataset_creator(dataset_str):
       dataset = dataset.apply(
           tf.data.experimental.parallel_interleave(
               lambda file_name: dataset_fn(file_name).prefetch(1),
-              cycle_length=32,
+              cycle_length=FLAGS.n_dataset_read_interleave,
               sloppy=True))
     else:
       dataset = dataset.apply(
@@ -212,9 +262,14 @@ def get_dataset_creator(dataset_str):
               sloppy=False))
 
     if shuffle:
-      dataset = dataset.shuffle(64).map(_parser_fn, num_parallel_calls=64)
+      dataset = dataset.shuffle(FLAGS.n_dataset_processes).map(
+          _parser_fn, num_parallel_calls=FLAGS.n_dataset_processes)
     else:
       dataset = dataset.map(_parser_fn)
+
+    if dataset_str == 'eval' and FLAGS.sampled_2d_slices:
+      # When evaluating on slices, unbatch slices that belong to one CT scan.
+      dataset = dataset.apply(tf.data.experimental.unbatch())
 
     return dataset
 
@@ -251,40 +306,102 @@ def get_input_mtf_shapes(dataset_str):
   return [mtf_image_shape, mtf_label_shape]
 
 
-def postprocess(results, pred_output_dir):
-  """Do whatever to the results returned by unet_with_spatial_partition."""
-  pred_liver = np.concatenate([result[0] for result in results], axis=0)
-  pred_lesion = np.concatenate([result[1] for result in results], axis=0)
-  label = np.concatenate([result[2] for result in results], axis=0)
-  area_int = np.concatenate([result[3] for result in results])
-  area_sum = np.concatenate([result[4] for result in results])
-  global_step = results[-1][-1]
+class PostProcessor(object):
+  """Merge and save evaluation results."""
 
-  dice_per_case = (
-      2.0 * area_int[area_sum > 0] / area_sum[area_sum > 0]).mean()
-  dice_global = (2.0 * area_int.sum() / area_sum.sum())
-  tf.logging.info('final dice_per_case: %f, dice_global: %f',
-                  dice_per_case, dice_global)
+  def __init__(self):
+    self._area_int = []
+    self._area_sum = []
+    self._instance_i = 0
 
-  if not tf.gfile.IsDirectory(pred_output_dir):
-    tf.gfile.MakeDirs(pred_output_dir)
+  def record(self, results, pred_output_dir):
+    """Do whatever to the results returned by unet_with_spatial_partition."""
+    if FLAGS.output_ground_truth:
+      pred_liver, pred_lesion, label, area_int, area_sum, _, global_step = (
+          results)
+    else:
+      pred_liver, pred_lesion, area_int, area_sum, _, global_step = results
 
-  with tf.gfile.Open(os.path.join(
-      pred_output_dir, 'pred_liver_{}.npy'.format(global_step)), 'wb') as f:
-    np.save(f, pred_liver)
+    if not tf.gfile.IsDirectory(pred_output_dir):
+      tf.gfile.MakeDirs(pred_output_dir)
 
-  with tf.gfile.Open(os.path.join(
-      pred_output_dir, 'pred_lesion_{}.npy'.format(global_step)), 'wb') as f:
-    np.save(f, pred_lesion)
+    if FLAGS.sampled_2d_slices:
+      with tf.gfile.Open(os.path.join(
+          pred_output_dir, 'pred_liver_{}_{}.npy'.format(
+              global_step, self._instance_i)), 'wb') as f:
+        np.save(f, pred_liver)
 
-  with tf.gfile.Open(os.path.join(
-      pred_output_dir, 'label_{}.npy'.format(global_step)), 'wb') as f:
-    np.save(f, label)
+      with tf.gfile.Open(os.path.join(
+          pred_output_dir, 'pred_lesion_{}_{}.npy'.format(
+              global_step, self._instance_i)), 'wb') as f:
+        np.save(f, pred_lesion)
+
+      if FLAGS.output_ground_truth:
+        with tf.gfile.Open(os.path.join(
+            pred_output_dir, 'label_{}_{}.npy'.format(
+                global_step, self._instance_i)), 'wb') as f:
+          np.save(f, label)
+
+      self._instance_i += 1
+    else:
+      pred_liver = self._reshape_to_cubes(pred_liver)
+      for ins_i, pred_liver_instance in enumerate(pred_liver):
+        with tf.gfile.Open(os.path.join(
+            pred_output_dir, 'pred_liver_{}_{}.npy'.format(
+                global_step, self._instance_i + ins_i)), 'wb') as f:
+          np.save(f, pred_liver_instance)
+
+      pred_lesion = self._reshape_to_cubes(pred_lesion)
+      for ins_i, pred_lesion_instance in enumerate(pred_lesion):
+        with tf.gfile.Open(os.path.join(
+            pred_output_dir, 'pred_lesion_{}_{}.npy'.format(
+                global_step, self._instance_i + ins_i)), 'wb') as f:
+          np.save(f, pred_lesion_instance)
+
+      if FLAGS.output_ground_truth:
+        label = self._reshape_to_cubes(label)
+        for ins_i, label_instance in enumerate(label):
+          with tf.gfile.Open(os.path.join(
+              pred_output_dir, 'label_{}_{}.npy'.format(
+                  global_step, self._instance_i + ins_i)), 'wb') as f:
+            np.save(f, label_instance)
+
+      self._instance_i += len(pred_liver)
+
+    self._area_int.append(area_int)
+    self._area_sum.append(area_sum)
+
+  def finish(self):
+    """Merge the results and compute final dice scores."""
+    area_int = np.concatenate(self._area_int)
+    area_sum = np.concatenate(self._area_sum)
+
+    if FLAGS.sampled_2d_slices:
+      # Merge the results on 2d slices.
+      assert area_int.size % (FLAGS.ct_resolution - FLAGS.image_c + 1) == 0, (
+          'Wrong number of results: {}'.format(area_int.shape))
+      area_int = area_int.reshape([-1, FLAGS.ct_resolution - FLAGS.image_c + 1])
+      area_int = area_int.sum(axis=1)
+      area_sum = area_sum.reshape([-1, FLAGS.ct_resolution - FLAGS.image_c + 1])
+      area_sum = area_sum.sum(axis=1)
+
+    dice_per_case = (2 * area_int / (area_sum + 0.001)).mean()
+    dice_global = 2 * area_int.sum() / (area_sum.sum() + 0.001)
+    # pylint: disable=logging-format-interpolation
+    tf.logging.info('dice_per_case: {}, dice_global: {}'.format(
+        dice_per_case, dice_global))
+    # pylint: enable=logging-format-interpolation
+
+  def _reshape_to_cubes(self, data):
+    reso = FLAGS.ct_resolution // FLAGS.pred_downsample
+    data = np.transpose(data, (0, 1, 3, 2, 4, 5))
+    data = np.reshape(data, (data.shape[0], reso, reso, reso))
+    return data
 
 
 def conv_with_spatial_partition(
     x, sampled_2d_slices, image_nx_dim, image_ny_dim, n_filters,
-    with_batch_norm, keep_p, is_training, odim_name, variable_dtype, name):
+    keep_p, with_batch_norm, is_training, odim_name, variable_dtype, name):
   """Conv with spatial partition, batch_noram and activation."""
   if sampled_2d_slices:
     x = mtf.layers.conv2d_with_blocks(
@@ -420,24 +537,24 @@ def unet_with_spatial_partition(mesh, dataset_str, images, labels):
   all_bn_update_ops = []
   # add levels with convolution or down-sampling
   for depth in range(FLAGS.network_depth):
-    x, bn_update_ops = conv_with_spatial_partition(
-        x, FLAGS.sampled_2d_slices, image_nx_dim, image_ny_dim,
-        FLAGS.n_base_filters * (2**depth),
-        1.0 if depth == 0 else FLAGS.dropout_keep_p,  # no dropout in 1st layer.
-        FLAGS.with_batch_norm,
-        is_training,
-        'conv_{}_0'.format(depth),
-        variable_dtype, 'conv_down_{}_0'.format(depth))
-    all_bn_update_ops.extend(bn_update_ops)
-
-    x, bn_update_ops = conv_with_spatial_partition(
-        x, FLAGS.sampled_2d_slices, image_nx_dim, image_ny_dim,
-        FLAGS.n_base_filters * (2**depth),
-        FLAGS.dropout_keep_p, FLAGS.with_batch_norm, is_training,
-        'conv_{}_1'.format(depth),
-        variable_dtype, 'conv_down_{}_1'.format(depth))
+    for n_conv in range(FLAGS.n_conv_per_block):
+      if depth == 0 and n_conv == 0:
+        # no dropout in 1st layer.
+        dropout_keep_p = 1.0
+      else:
+        dropout_keep_p = FLAGS.dropout_keep_p
+      x, bn_update_ops = conv_with_spatial_partition(
+          x, FLAGS.sampled_2d_slices,
+          image_nx_dim, image_ny_dim,
+          FLAGS.n_base_filters * (2**depth),
+          dropout_keep_p,
+          FLAGS.with_batch_norm,
+          is_training,
+          'conv_{}_{}'.format(depth, n_conv),
+          variable_dtype,
+          'conv_down_{}_{}'.format(depth, n_conv))
+      all_bn_update_ops.extend(bn_update_ops)
     levels.append(x)
-    all_bn_update_ops.extend(bn_update_ops)
 
     if depth < FLAGS.network_depth - 1:
       if FLAGS.sampled_2d_slices:
@@ -451,26 +568,24 @@ def unet_with_spatial_partition(mesh, dataset_str, images, labels):
         x, FLAGS.sampled_2d_slices, image_nx_dim, image_ny_dim,
         FLAGS.n_base_filters * (2**depth),
         FLAGS.dropout_keep_p,
-        'conv_{}_1'.format(depth),
+        'conv_{}_{}'.format(depth, FLAGS.n_conv_per_block - 1),
         variable_dtype, 'deconv_{}_0'.format(depth))
-    x = mtf.concat([x, levels[depth]],
-                   concat_dim_name='conv_{}_1'.format(depth))
+    x = mtf.concat(
+        [x, levels[depth]],
+        concat_dim_name='conv_{}_{}'.format(depth, FLAGS.n_conv_per_block - 1))
 
-    x, bn_update_ops = conv_with_spatial_partition(
-        x, FLAGS.sampled_2d_slices, image_nx_dim, image_ny_dim,
-        FLAGS.n_base_filters * (2**depth),
-        FLAGS.dropout_keep_p, FLAGS.with_batch_norm, is_training,
-        'conv_{}_0'.format(depth),
-        variable_dtype, 'conv_up_{}_0'.format(depth))
-    all_bn_update_ops.extend(bn_update_ops)
-
-    x, bn_update_ops = conv_with_spatial_partition(
-        x, FLAGS.sampled_2d_slices, image_nx_dim, image_ny_dim,
-        FLAGS.n_base_filters * (2**depth),
-        FLAGS.dropout_keep_p, FLAGS.with_batch_norm, is_training,
-        'conv_{}_1'.format(depth),
-        variable_dtype, 'conv_up_{}_1'.format(depth))
-    all_bn_update_ops.extend(bn_update_ops)
+    for n_conv in range(FLAGS.n_conv_per_block):
+      x, bn_update_ops = conv_with_spatial_partition(
+          x, FLAGS.sampled_2d_slices,
+          image_nx_dim, image_ny_dim,
+          FLAGS.n_base_filters * (2**depth),
+          FLAGS.dropout_keep_p,
+          FLAGS.with_batch_norm,
+          is_training,
+          'conv_{}_{}'.format(depth, n_conv),
+          variable_dtype,
+          'conv_up_{}_{}'.format(depth, n_conv))
+      all_bn_update_ops.extend(bn_update_ops)
 
   # no dropout in the final layer.
   if FLAGS.sampled_2d_slices:
@@ -558,25 +673,30 @@ def unet_with_spatial_partition(mesh, dataset_str, images, labels):
   }
 
   if FLAGS.sampled_2d_slices:
-    liver_prob = mtf.reduce_sum(mtf.slice(y_prob, 1, 1, 'label_c'),
-                                reduced_dim=mtf.Dimension('label_c', 1))
-    preds = [liver_prob, lesion_prob,
-             mtf.cast(argmax_t, mtf_dtype), intersect, area_sum]
+    y_prob_downsampled = mtf.layers.avg_pool2d(
+        y_prob, ksize=(FLAGS.pred_downsample,) * 2)
+    if FLAGS.output_ground_truth:
+      lesion_gt_downsampled = mtf.layers.avg_pool2d(
+          mtf.slice(t, 2, 1, 'label_c'), ksize=(FLAGS.pred_downsample,) * 2)
   else:
     y_prob_downsampled = mtf.layers.avg_pool3d(
         y_prob, ksize=(FLAGS.pred_downsample,) * 3)
-    liver_prob_downsampled = mtf.slice(y_prob_downsampled, 1, 1, 'label_c')
-    lesion_prob_downsampled = mtf.slice(y_prob_downsampled, 2, 1, 'label_c')
-    lesion_gt_downsampled = mtf.layers.avg_pool3d(
-        mtf.slice(t, 2, 1, 'label_c'), ksize=(FLAGS.pred_downsample,) * 3)
-    preds = [
-        mtf.reduce_sum(liver_prob_downsampled,
-                       reduced_dim=mtf.Dimension('label_c', 1)),
-        mtf.reduce_sum(lesion_prob_downsampled,
-                       reduced_dim=mtf.Dimension('label_c', 1)),
-        mtf.reduce_sum(lesion_gt_downsampled,
-                       reduced_dim=mtf.Dimension('label_c', 1)),
-        intersect,
-        area_sum]
+    if FLAGS.output_ground_truth:
+      lesion_gt_downsampled = mtf.layers.avg_pool3d(
+          mtf.slice(t, 2, 1, 'label_c'), ksize=(FLAGS.pred_downsample,) * 3)
+
+  liver_prob_downsampled = mtf.slice(y_prob_downsampled, 1, 1, 'label_c')
+  lesion_prob_downsampled = mtf.slice(y_prob_downsampled, 2, 1, 'label_c')
+  preds = [
+      mtf.reduce_sum(liver_prob_downsampled,
+                     reduced_dim=mtf.Dimension('label_c', 1)),
+      mtf.reduce_sum(lesion_prob_downsampled,
+                     reduced_dim=mtf.Dimension('label_c', 1))]
+
+  if FLAGS.output_ground_truth:
+    preds.append(mtf.reduce_sum(
+        lesion_gt_downsampled, reduced_dim=mtf.Dimension('label_c', 1)))
+
+  preds.extend([intersect, area_sum])
 
   return preds, loss, eval_metrics, all_bn_update_ops

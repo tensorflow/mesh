@@ -35,6 +35,8 @@ FLAGS = flags.FLAGS
 
 flags.DEFINE_string('input_file_pattern', '', 'Path to input CT scans.')
 flags.DEFINE_string('output_folder', '', 'Path to output folder.')
+flags.DEFINE_string('output_file_prefix',
+                    'augmented', 'Filename prefix.')
 
 flags.DEFINE_integer('ct_resolution', 128,
                      'Resolution of CT images along depth, height and '
@@ -84,7 +86,8 @@ def _dataset_creator():
   return dataset
 
 
-def save_to_tfrecord(image, label, process_no, idx, output_path):
+def save_to_tfrecord(image, label, process_no, idx,
+                     output_path, output_file_prefix):
   """Save to TFRecord."""
   d_feature = {}
   d_feature['image/ct_image'] = tf.train.Feature(
@@ -96,7 +99,8 @@ def save_to_tfrecord(image, label, process_no, idx, output_path):
   serialized = example.SerializeToString()
 
   result_file = os.path.join(
-      output_path, 'augmented-{}-{}.tfrecords'.format(process_no, idx))
+      output_path,
+      '{}-{}-{}.tfrecords'.format(output_file_prefix, process_no, idx))
   options = tf.python_io.TFRecordOptions(
       tf.python_io.TFRecordCompressionType.GZIP)
   with tf.python_io.TFRecordWriter(result_file, options=options) as w:
@@ -117,7 +121,8 @@ def apply_data_aug():
     for idx in range(FLAGS.num_data_aug):
       image_np, label_np = sess.run([image, label])
       save_to_tfrecord(
-          image_np, label_np, FLAGS.process_no, idx, FLAGS.output_folder)
+          image_np, label_np, FLAGS.process_no, idx,
+          FLAGS.output_folder, FLAGS.output_file_prefix)
   return
 
 

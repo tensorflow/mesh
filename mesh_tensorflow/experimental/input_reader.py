@@ -358,10 +358,11 @@ class SimdMeshImplInputReader(object):
       pnum_maps.append(self._get_pnum_map(mtf_shape))
 
     # For each sub-batch, we need to know which host should read it.
-    hosts_to_hold_ds = self._get_hosts_to_hold_ds(pnum_maps[0])
     if self._is_eval_mode:
-      # There should be just one dataset-holding host.
-      hosts_to_hold_ds = hosts_to_hold_ds[:1]
+      # There should be just one dataset-holding host. Make the last host do it.
+      hosts_to_hold_ds = [self._p_dev.num_hosts - 1]
+    else:
+      hosts_to_hold_ds = self._get_hosts_to_hold_ds(pnum_maps[0])
     sub_batch_size = batch_size // len(hosts_to_hold_ds)
     tf.logging.info("MTF sub_batch_size: {}".format(sub_batch_size))
     assert sub_batch_size * len(hosts_to_hold_ds) == batch_size

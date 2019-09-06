@@ -53,7 +53,7 @@ def _rand_noise(noise_mean, noise_dev, scale, shape):
 
 
 def projective_transform(
-    image, label, image_translate_ratio, image_transform_ratio,
+    image, label, reso, image_translate_ratio, image_transform_ratio,
     sampled_2d_slices=False):
   """Apply projective transformation on image and label."""
 
@@ -84,11 +84,11 @@ def projective_transform(
     a0 = _truncated_normal(1.0, image_transform_ratio)
     a1 = _truncated_normal(0.0, image_transform_ratio)
     a2 = _truncated_normal(
-        0.0, image_translate_ratio * image.shape[0])
+        0.0, image_translate_ratio * reso)
     b0 = _truncated_normal(0.0, image_transform_ratio)
     b1 = _truncated_normal(1.0, image_transform_ratio)
     b2 = _truncated_normal(
-        0.0, image_translate_ratio * image.shape[0])
+        0.0, image_translate_ratio * reso)
     c0 = _truncated_normal(0.0, image_transform_ratio)
     c1 = _truncated_normal(0.0, image_transform_ratio)
     proj_matrix = [a0, a1, a2, b0, b1, b2, c0, c1]
@@ -99,7 +99,7 @@ def projective_transform(
   return image, label
 
 
-def maybe_add_noise(image, scale0, scale1,
+def maybe_add_noise(image, noise_shape, scale0, scale1,
                     image_noise_probability, image_noise_ratio):
   """Add noise at two scales."""
 
@@ -111,11 +111,8 @@ def maybe_add_noise(image, scale0, scale1,
   for scale in [scale0, scale1]:
     rand_image_noise_ratio = tf.random.uniform(
         shape=[], minval=0.0, maxval=image_noise_ratio)
-    # Eliminate the background intensity with 60 percentile.
-    noise_dev = rand_image_noise_ratio * (
-        tf.contrib.distributions.percentile(image, q=95) - \
-        tf.contrib.distributions.percentile(image, q=60))
-    noise_list.append(_rand_noise(0.0, noise_dev, scale, image.shape))
+    noise_list.append(
+        _rand_noise(0.0, rand_image_noise_ratio, scale, noise_shape))
 
   skip_noise = tf.greater(tf.random.uniform([]), image_noise_probability)
   image = tf.cond(skip_noise,
@@ -170,21 +167,35 @@ def maybe_gen_fake_data_based_on_real_data(
 
   intensity_diff = tf.reduce_mean(liver_intensity) - (
       tf.reduce_mean(lesion_intensity))
+  intensity_diff *= 1.15
   intensity_diff = tf.cond(tf.is_nan(intensity_diff),
                            lambda: 0.0, lambda: intensity_diff)
 
-  lesion_area = tf.reduce_sum(tf.cast(lesion_mask, tf.float32))
-  liver_area = tf.reduce_sum(tf.cast(liver_mask, tf.float32))
-  lesion_liver_ratio = tf.cond(tf.greater(liver_area, 0.0),
-                               lambda: lesion_area / liver_area, lambda: 0.0)
-  lesion_liver_ratio += min_fake_lesion_ratio
+  lesion_liver_ratio = 0.0
+  lesion_liver_ratio += tf.random.normal(shape=[], mean=0.01, stddev=0.01)
+  lesion_liver_ratio += tf.random.normal(shape=[], mean=0.0, stddev=0.05)
+  lesion_liver_ratio = tf.clip_by_value(
+      lesion_liver_ratio, min_fake_lesion_ratio, min_fake_lesion_ratio + 0.20)
 
   fake_lesion_mask = tf.logical_and(
       _gen_rand_mask(ratio_mean=lesion_liver_ratio, ratio_stddev=0.0,
-                     scale=reso // 8, shape=label.shape,
-                     smoothness=reso // 16),
+                     scale=reso // 32, shape=label.shape,
+                     smoothness=reso // 32),
       tf.logical_not(background_mask))
   liver_mask = tf.logical_not(tf.logical_or(background_mask, fake_lesion_mask))
+
+  # Blur the masks
+  lesion_mask_blur = tf.squeeze(tf.nn.conv3d(
+      tf.expand_dims(tf.expand_dims(tf.cast(lesion_mask, tf.float32), -1), 0),
+      filter=tf.ones([reso // 32] * 3 + [1, 1], tf.float32) / (reso // 32) ** 3,
+      strides=[1, 1, 1, 1, 1],
+      padding='SAME'))
+  fake_lesion_mask_blur = tf.squeeze(tf.nn.conv3d(
+      tf.expand_dims(tf.expand_dims(
+          tf.cast(fake_lesion_mask, tf.float32), -1), 0),
+      filter=tf.ones([reso // 32] * 3 + [1, 1], tf.float32) / (reso // 32) ** 3,
+      strides=[1, 1, 1, 1, 1],
+      padding='SAME'))
 
   # Remove real lesion and add fake lesion.
   # If the intensitify is too small (maybe no liver or lesion region labeled),
@@ -195,8 +206,8 @@ def maybe_gen_fake_data_based_on_real_data(
   # pylint: disable=g-long-lambda
   image = tf.cond(
       tf.greater(gen_prob_indicator, 1 - gen_fake_probability),
-      lambda: image + intensity_diff * tf.cast(lesion_mask, tf.float32) \
-                    - intensity_diff * tf.cast(fake_lesion_mask, tf.float32),
+      lambda: image + intensity_diff * lesion_mask_blur \
+                    - intensity_diff * fake_lesion_mask_blur,
       lambda: image)
   label = tf.cond(
       tf.greater(gen_prob_indicator, 1 - gen_fake_probability),
@@ -276,7 +287,7 @@ def intensity_shift(
 
   if per_class_intensity_scale < 0.000001 and (
       per_class_intensity_shift < 0.000001):
-    return image, label
+    return image
 
   # Randomly change (mostly increase) intensity of non-lesion region.
   per_class_noise = _truncated_normal(
@@ -294,7 +305,7 @@ def intensity_shift(
 
 
 def image_corruption(
-    image, label, image_corrupt_ratio_mean, image_corrupt_ratio_stddev):
+    image, label, reso, image_corrupt_ratio_mean, image_corrupt_ratio_stddev):
   """Randomly drop non-lesion pixels."""
 
   if image_corrupt_ratio_mean < 0.000001 and (
@@ -305,7 +316,7 @@ def image_corruption(
   keep_mask = _gen_rand_mask(
       1 - image_corrupt_ratio_mean,
       image_corrupt_ratio_stddev,
-      image.shape[0] // 3, image.shape)
+      reso // 3, image.shape)
 
   keep_mask = tf.logical_or(tf.greater(label, 1.5), keep_mask)
   image *= tf.cast(keep_mask, tf.float32)

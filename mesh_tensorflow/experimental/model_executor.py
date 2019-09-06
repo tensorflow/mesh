@@ -33,8 +33,10 @@ from mesh_tensorflow.experimental import input_reader
 from mesh_tensorflow.experimental import unet
 from tensorflow.contrib import tpu
 from tensorflow.contrib.tpu.python.tpu import device_assignment
+from tensorflow.python.framework import ops
 from tensorflow.python.ops import control_flow_ops
 from tensorflow.python.platform import flags
+from tensorflow.python.tpu.ops import tpu_ops
 
 
 FLAGS = flags.FLAGS
@@ -59,6 +61,7 @@ flags.DEFINE_string('checkpoint_dir', '', 'Path to saved models.')
 flags.DEFINE_integer('save_checkpoints_steps', 500,
                      'Frequency for saving models.')
 
+flags.DEFINE_boolean('write_summary', True, 'Whether to write summary.')
 flags.DEFINE_string('summary_dir', '', 'Path to saved summaries.')
 flags.DEFINE_string('pred_output_dir', '', 'Path to saved pred results.')
 
@@ -128,14 +131,14 @@ def _list_cpu_devices(sess):
 def _get_model_fn(train_or_eval, cpu_devices, d_assignment, num_hosts):
   """Returns _model_fn."""
   captured_hooks = _CapturedObject()
+  captured_output_dtypes_shapes = _CapturedObject()
   assert train_or_eval in ['train', 'eval']
 
   def _model_fn(input_fea, input_lab):
     """Creates a model, add summary, modes (train or eval), and hooks."""
 
-    def _add_summary(lowering, train_or_eval, loss, scalars, global_step):
+    def _add_summary(lowering, train_or_eval, tf_loss, scalars, global_step):
       """Add all summaries."""
-      tf_loss = tf.cast(lowering.export_to_tf_tensor(loss), tf.float32)
       for k in scalars.keys():
         if not isinstance(scalars[k], tf.Tensor):
           scalars[k] = tf.cast(
@@ -219,11 +222,14 @@ def _get_model_fn(train_or_eval, cpu_devices, d_assignment, num_hosts):
       tf_preds = [tf.cast(
           lowering.export_to_tf_tensor(pred), tf.float32) for pred in preds]
 
-    tf_loss = _add_summary(lowering, train_or_eval, loss, scalars, global_step)
+    tf_loss = tf.cast(lowering.export_to_tf_tensor(loss), tf.float32)
+    if FLAGS.write_summary:
+      tf_loss = _add_summary(
+          lowering, train_or_eval, tf_loss, scalars, global_step)
+    master_to_slice_hook = mtf.MtfRestoreHook(lowering)
 
-    with mtf.utils.outside_all_rewrites():
-      master_to_slice_hook = mtf.MtfRestoreHook(lowering)
-      if train_or_eval == 'train':
+    if train_or_eval == 'train':
+      with mtf.utils.outside_all_rewrites():
         saver = tf.train.Saver(tf.global_variables(),
                                save_relative_paths=True)
         tf.add_to_collection(tf.GraphKeys.SAVERS, saver)
@@ -235,11 +241,16 @@ def _get_model_fn(train_or_eval, cpu_devices, d_assignment, num_hosts):
         captured_hooks.capture([master_to_slice_hook, slice_to_master_hook])
         return tf_update_ops_group
 
-      else:  # train_or_eval == 'eval':
-        captured_hooks.capture([master_to_slice_hook, None])
-        return tf_preds + [tf_loss, global_step]
+    else:  # train_or_eval == 'eval':
+      tf_preds.extend([tf_loss, global_step])
+      tf_preds_dtypes = [tf_pred.dtype for tf_pred in tf_preds]
+      tf_preds_shapes = [tf_pred.shape for tf_pred in tf_preds]
+      captured_hooks.capture([master_to_slice_hook, None])
+      captured_output_dtypes_shapes.capture(
+          [tf_preds_dtypes, tf_preds_shapes])
+      return tpu_ops.outfeed_enqueue_tuple(tf_preds)
 
-  return _model_fn, captured_hooks
+  return _model_fn, captured_hooks, captured_output_dtypes_shapes
 
 
 def _get_scaffold(additional_initializers):
@@ -266,87 +277,138 @@ def _print_variable_values(sess):
 
 def _train_phase(mesh_impl, cpu_devices, d_assignment, num_hosts, num_cores):
   """Train network."""
-  with tf.Graph().as_default():
-    summary_writer = tf.contrib.summary.create_file_writer(FLAGS.summary_dir)
-    with summary_writer.as_default(), (
-        tf.contrib.summary.always_record_summaries()):
-      # Setup input pipeline.
-      ds_creator = unet.get_dataset_creator('train')
-      mtf_shapes = unet.get_input_mtf_shapes('train')
-      simd_input_reader = input_reader.SimdMeshImplInputReader(
-          mesh_impl, ds_creator, mtf_shapes, is_eval_mode=False)
+  if FLAGS.num_train_iterations_per_loop <= 0:
+    return
 
-      model_train_fn, train_hooks = _get_model_fn(
-          'train', cpu_devices, d_assignment, num_hosts)
-      tpu_train_computation = tpu.replicate(
-          computation=model_train_fn,
-          inputs=[[]] * num_cores,
-          infeed_queue=simd_input_reader.infeed_queue,
-          device_assignment=d_assignment)
+  def _run_train_phase():
+    """The real function that runs the training phase."""
+    # Setup input pipeline.
+    ds_creator = unet.get_dataset_creator('train')
+    mtf_shapes = unet.get_input_mtf_shapes('train')
+    simd_input_reader = input_reader.SimdMeshImplInputReader(
+        mesh_impl, ds_creator, mtf_shapes, is_eval_mode=False)
 
-      ###########################################################
-      # Training.
-      master_to_slice_hook, slice_to_master_hook = train_hooks.get()
-      ckpt_loader_hook = _CkptLoaderHook()
+    model_train_fn, train_hooks, _ = _get_model_fn(
+        'train', cpu_devices, d_assignment, num_hosts)
+    tpu_train_computation = tpu.replicate(
+        computation=model_train_fn,
+        inputs=[[]] * num_cores,
+        infeed_queue=simd_input_reader.infeed_queue,
+        device_assignment=d_assignment)
+
+    ###########################################################
+    # Training.
+    master_to_slice_hook, slice_to_master_hook = train_hooks.get()
+    ckpt_loader_hook = _CkptLoaderHook()
+    if FLAGS.write_summary:
       flush_summary = tf.contrib.summary.flush()
 
-      with tf.train.MonitoredTrainingSession(
-          master=FLAGS.master,
-          scaffold=_get_scaffold(additional_initializers=[]),
-          hooks=[ckpt_loader_hook, master_to_slice_hook, slice_to_master_hook],
-          config=tf.ConfigProto(allow_soft_placement=True)) as sess:
+    with tf.train.MonitoredTrainingSession(
+        master=FLAGS.master,
+        scaffold=_get_scaffold(additional_initializers=[]),
+        hooks=[ckpt_loader_hook, master_to_slice_hook, slice_to_master_hook],
+        config=tf.ConfigProto(allow_soft_placement=True)) as sess:
 
+      if FLAGS.write_summary:
         tf.contrib.summary.initialize(session=sess)
-        simd_input_reader.start_infeed_thread(
-            sess, FLAGS.num_train_iterations_per_loop)
+      simd_input_reader.start_infeed_thread(
+          sess, FLAGS.num_train_iterations_per_loop)
 
-        for step in range(FLAGS.num_train_iterations_per_loop):
-          sess.run([tpu_train_computation, flush_summary])
-          tf.logging.info('train steps: {}'.format(step))
+      for step in range(FLAGS.num_train_iterations_per_loop):
+        sess.run(tpu_train_computation)
+        if FLAGS.write_summary:
+          sess.run(flush_summary)
+        tf.logging.info('train steps: {}'.format(step))
+
+  with tf.Graph().as_default():
+    if FLAGS.write_summary:
+      summary_writer = tf.contrib.summary.create_file_writer(FLAGS.summary_dir)
+      with summary_writer.as_default(), (
+          tf.contrib.summary.always_record_summaries()):
+        _run_train_phase()
+    else:
+      _run_train_phase()
 
 
 def _eval_phase(mesh_impl, cpu_devices, d_assignment, num_hosts, num_cores):
   """Evaluate network and write summary."""
-  with tf.Graph().as_default():
-    summary_writer = tf.contrib.summary.create_file_writer(FLAGS.summary_dir)
-    with summary_writer.as_default(), (
-        tf.contrib.summary.always_record_summaries()):
-      # Setup input pipeline.
-      ds_creator = unet.get_dataset_creator('eval')
-      mtf_shapes = unet.get_input_mtf_shapes('eval')
-      simd_input_reader = input_reader.SimdMeshImplInputReader(
-          mesh_impl, ds_creator, mtf_shapes, is_eval_mode=True)
+  if FLAGS.num_eval_iterations_per_loop <= 0:
+    return
 
-      model_eval_fn, eval_hooks = _get_model_fn(
-          'eval', cpu_devices, d_assignment, num_hosts)
-      tpu_eval_computation = tpu.replicate(
-          computation=model_eval_fn,
-          inputs=[[]] * num_cores,
-          infeed_queue=simd_input_reader.infeed_queue,
-          device_assignment=d_assignment)
+  def _run_eval_phase():
+    """The real function that runs the evaluation phase."""
+    # Setup input pipeline.
+    ds_creator = unet.get_dataset_creator('eval')
+    mtf_shapes = unet.get_input_mtf_shapes('eval')
+    simd_input_reader = input_reader.SimdMeshImplInputReader(
+        mesh_impl, ds_creator, mtf_shapes, is_eval_mode=True)
 
-      ###########################################################
-      # Evaluation.
-      master_to_slice_hook, _ = eval_hooks.get()
-      ckpt_loader_hook = _CkptLoaderHook()
+    model_eval_fn, eval_hooks, output_dtypes_shapes = _get_model_fn(
+        'eval', cpu_devices, d_assignment, num_hosts)
+    tpu_eval_computation = tpu.replicate(
+        computation=model_eval_fn,
+        inputs=[[]] * num_cores,
+        infeed_queue=simd_input_reader.infeed_queue,
+        device_assignment=d_assignment)
+
+    output_dtypes, output_shapes = output_dtypes_shapes.get()
+    outfeed_dequeue_ops = []
+
+    for host_id in range(num_hosts):
+      # pylint: disable=protected-access
+      with ops.device(input_reader._host_id_to_tf_device(
+          host_id, external_worker=True)):
+        for device_ordinal in range(num_cores // num_hosts):
+          outfeed_dequeue_op = tpu_ops.outfeed_dequeue_tuple(
+              dtypes=output_dtypes,
+              shapes=output_shapes,
+              device_ordinal=device_ordinal)
+
+          # We don't need output other than from core 0.
+          if outfeed_dequeue_ops:
+            outfeed_dequeue_ops.append(
+                [tf.reduce_mean(x) for x in outfeed_dequeue_op])
+          else:
+            outfeed_dequeue_ops.append(outfeed_dequeue_op)
+
+    ###########################################################
+    # Evaluation.
+    master_to_slice_hook, _ = eval_hooks.get()
+    ckpt_loader_hook = _CkptLoaderHook()
+    if FLAGS.write_summary:
       flush_summary = tf.contrib.summary.flush()
 
-      with tf.train.MonitoredSession(
-          session_creator=tf.train.ChiefSessionCreator(
-              master=FLAGS.master,
-              config=tf.ConfigProto(allow_soft_placement=True)),
-          hooks=[ckpt_loader_hook, master_to_slice_hook]) as sess:
+    with tf.train.MonitoredSession(
+        session_creator=tf.train.ChiefSessionCreator(
+            master=FLAGS.master,
+            config=tf.ConfigProto(allow_soft_placement=True)),
+        hooks=[ckpt_loader_hook, master_to_slice_hook]) as sess:
 
-        simd_input_reader.start_infeed_thread(
-            sess, FLAGS.num_eval_iterations_per_loop)
+      if FLAGS.write_summary:
+        tf.contrib.summary.initialize(session=sess)
+      simd_input_reader.start_infeed_thread(
+          sess, FLAGS.num_eval_iterations_per_loop)
 
-        results = []
-        for step in range(FLAGS.num_eval_iterations_per_loop):
-          # Only get results from the 0-th core.
-          results.append(sess.run(tpu_eval_computation)[0])
+      pprocessor = unet.PostProcessor()
+      for step in range(FLAGS.num_eval_iterations_per_loop):
+        # Only get results from the 0-th core.
+        sess.run(tpu_eval_computation)
+        results = sess.run(outfeed_dequeue_ops)[0]
+        pprocessor.record(results, FLAGS.pred_output_dir)
+
+        if FLAGS.write_summary:
           sess.run(flush_summary)
-          tf.logging.info('eval steps: {}'.format(step))
-        unet.postprocess(results, FLAGS.pred_output_dir)
+        tf.logging.info('eval steps: {}'.format(step))
+      pprocessor.finish()
+
+  with tf.Graph().as_default():
+    if FLAGS.write_summary:
+      summary_writer = tf.contrib.summary.create_file_writer(FLAGS.summary_dir)
+      with summary_writer.as_default(), (
+          tf.contrib.summary.always_record_summaries()):
+        _run_eval_phase()
+    else:
+      _run_eval_phase()
 
 
 def _shutdown():
@@ -360,6 +422,7 @@ def train_and_eval():
 
   TODO(lehou): Pack everything nicely as a set of APIs.
   """
+  tf.logging.info('FLAGS.master: {}'.format(FLAGS.master))
 
   # Open a session to get the list of CPU devices to hold master variables.
   with tf.Session(target=FLAGS.master,
