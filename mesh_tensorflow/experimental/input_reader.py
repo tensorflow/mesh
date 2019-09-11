@@ -35,7 +35,7 @@ Example of usage:
       inputs=[[]] * num_cores,
       infeed_queue=infeed_queue, ...)
 
-  # In model_fn, import the input tensors using mtf.import_laidout_tensor.
+  # In model_fn, import the input tensors using mtf.import_laid_out_tensor.
   def model_fn(features, labels):
     ...
     laidout_features = mtf.simd_mesh_impl.SimdMeshImpl.LaidOutTensor([features])
@@ -271,8 +271,6 @@ class SimdMeshImplInputReader(object):
         as opposed to one dataset for each sub-batch. Default is False. Set it
         to True during evaluation, to ensure that one evaluation instance will
         be used once and only once.
-    Returns:
-      An infeed queue, a list of enqueue ops, and a list of initializer ops.
     Note:
       1. The efficiency is optimized according to the shape of the 0-th tensor:
          mtf_input_shapes[0]. We recommand you to put the largest tensor as the
