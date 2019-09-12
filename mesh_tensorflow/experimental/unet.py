@@ -461,15 +461,17 @@ def deconv_with_spatial_partition(
   return x
 
 
-def unet_with_spatial_partition(mesh, dataset_str, images, labels):
+def unet_with_spatial_partition(mesh, mesh_impl, dataset_str, images, labels):
   """Builds the UNet model graph, train op and eval metrics.
 
   Args:
     mesh: a MeshTensorflow.mesh object.
+    mesh_impl: a mesh implementation, such as SimdMeshImpl and
+      PlacementMeshImpl.
     dataset_str: a string of either train or eval. This is used for batch_norm.
-    images: input image Tensor. Shape [batch, x, y, num_channels]
+    images: a laid out Tensor with shape [batch, x, y, num_channels]
       or [batch, x, y, z, num_channels].
-    labels: input label Tensor. Shape [batch, x, y, num_classes]
+    labels: a laid out Tensor with shape [batch, x, y, num_classes]
       or [batch, x, y, z, num_classes].
 
   Returns:
@@ -499,14 +501,14 @@ def unet_with_spatial_partition(mesh, dataset_str, images, labels):
   # Import input features.
   x = mtf.import_laid_out_tensor(
       mesh,
-      mtf.simd_mesh_impl.SimdMeshImpl.LaidOutTensor([images]),
+      mesh_impl.LaidOutTensor(images),
       mtf_images_shape)
   x = mtf.cast(x, mtf_dtype)
 
   # Import ground truth labels.
   t = mtf.import_laid_out_tensor(
       mesh,
-      mtf.simd_mesh_impl.SimdMeshImpl.LaidOutTensor([labels]),
+      mesh_impl.LaidOutTensor(labels),
       mtf_labels_shape)
   t = mtf.cast(t, mtf_dtype)
 

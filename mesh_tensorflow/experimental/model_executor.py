@@ -41,6 +41,7 @@ from tensorflow.python.tpu.ops import tpu_ops
 
 FLAGS = flags.FLAGS
 
+flags.DEFINE_boolean('use_tpu', True, 'Use TPU or GPU.')
 flags.DEFINE_float('lr', 0.003, 'Learning rate.')
 flags.DEFINE_float('lr_drop_steps', 20000,
                    'Learning rate drops for every `lr_drop_steps` steps.')
@@ -106,29 +107,123 @@ class _CkptLoaderHook(tf.estimator.SessionRunHook):
         saver.restore(session, check_point)
 
 
-def _list_cpu_devices(sess):
-  """Return the list of CPU devices in legacy name."""
-  def _convert_to_legacy_name(n):
-    n = re.sub('device:CPU', 'cpu', n)
-    return n
+class MeshContext(object):
+  """Creates mtf graph, mesh, and mesh implementation."""
 
-  def _sort_device_name(devices):
-    parsed = []
-    for d in devices:
-      m = re.match('/job:(.*)/replica:(.*)/task:(.*)/.*', d)
-      parsed.append((m.group(1), int(m.group(2)), int(m.group(3)), d))
-    return [_[3] for _ in sorted(parsed)]
+  def __init__(self, sess, use_tpu, mesh_shape, layout_rules):
+    super(MeshContext, self).__init__()
+    self._use_tpu = use_tpu
+    self._mesh_shape = mtf.convert_to_shape(mesh_shape)
+    self._layout_rules = layout_rules
 
-  all_devices = sess.list_devices()
-  cpus = []
-  for d in all_devices:
-    if d.device_type == 'CPU':
-      cpus += [_convert_to_legacy_name(d.name)]
+    self._d_assignment = None
+    self._num_hosts = None
+    self._num_cores = None
 
-  return [n for n in _sort_device_name(cpus) if 'coordinator' not in n]
+    self._cpu_devices, self._gpu_devices = self._list_cpu_gpu_devices(sess)
+
+    if self._use_tpu:
+      topology = sess.run(tpu.initialize_system())
+      topo_object = tf.contrib.tpu.Topology(serialized=topology)
+      self._num_cores = int(np.prod(topo_object.mesh_shape))
+      self._num_hosts = int(topo_object.num_tasks)
+      num_cores_per_host = int(self._num_cores // self._num_hosts)
+      assert num_cores_per_host == int(topo_object.num_tpus_per_task)
+
+      # Get a device_assignment object for mtf.
+      self._d_assignment = device_assignment.device_assignment(
+          topology, computation_shape=[1, 1, 1],
+          num_replicas=self._num_cores)
+
+      self._mesh_impl = mtf.simd_mesh_impl.SimdMeshImpl(
+          self._mesh_shape, self._layout_rules, None, self._d_assignment)
+    else:
+      self._mesh_impl = mtf.placement_mesh_impl.PlacementMeshImpl(
+          self._mesh_shape, self._layout_rules, self._gpu_devices)
+
+  def create_graph_mesh_and_mesh_impl(self):
+    """Creates mtf graph, mesh, and mesh impl.
+
+    This function can be called inside model_fn, which might be tpu_rewritten.
+
+    Returns:
+      graph, mesh, mesh_impl
+    """
+
+    if self._use_tpu:
+      assert self._d_assignment
+      graph = mtf.Graph()
+
+      # Worker 0 caches all the TPU binaries.
+      replica_cache_size = 300 * 1024 * 1024  # 300M per replica.
+      worker0_mem = replica_cache_size * 8 * self._num_hosts
+      devices_memory_usage = [worker0_mem] + [0] * (self._num_hosts - 1)
+      var_placer = mtf.utils.BalancedVariablePlacer(self._cpu_devices,
+                                                    devices_memory_usage)
+      mesh = mtf.Mesh(graph, 'my_mesh', var_placer)
+      mesh_impl = mtf.simd_mesh_impl.SimdMeshImpl(
+          self._mesh_shape, self._layout_rules, None, self._d_assignment)
+      return graph, mesh, mesh_impl
+
+    else:
+      graph = mtf.Graph()
+      mesh = mtf.Mesh(graph, 'my_mesh', None)
+      mesh_impl = mtf.placement_mesh_impl.PlacementMeshImpl(
+          self._mesh_shape, self._layout_rules, self._gpu_devices)
+      return graph, mesh, mesh_impl
+
+  @property
+  def device_assignment(self):
+    return self._d_assignment
+
+  @property
+  def num_hosts(self):
+    return self._num_hosts
+
+  @property
+  def num_cores(self):
+    return self._num_cores
+
+  @property
+  def num_cores_per_host(self):
+    return self._num_cores // self._num_hosts
+
+  @property
+  def mesh_impl(self):
+    return self._mesh_impl
+
+  def _list_cpu_gpu_devices(self, sess):
+    """Return the list of CPU and GPU (if any) devices in legacy name."""
+    def _convert_to_legacy_name(n):
+      n = re.sub('device:CPU', 'cpu', n)
+      n = re.sub('device:GPU', 'gpu', n)
+      return n
+
+    def _sort_device_name(devices):
+      parsed = []
+      for d in devices:
+        m = re.match('/job:(.*)/replica:(.*)/task:(.*)/.*', d)
+        parsed.append((m.group(1), int(m.group(2)), int(m.group(3)), d))
+      return [_[3] for _ in sorted(parsed)]
+
+    all_devices = sess.list_devices()
+
+    cpus = []
+    for d in all_devices:
+      if d.device_type == 'CPU':
+        cpus += [_convert_to_legacy_name(d.name)]
+    cpus = [n for n in _sort_device_name(cpus) if 'coordinator' not in n]
+
+    gpus = []
+    for d in all_devices:
+      if d.device_type == 'GPU':
+        gpus += [_convert_to_legacy_name(d.name)]
+    gpus = _sort_device_name(gpus)
+
+    return cpus, gpus
 
 
-def _get_model_fn(train_or_eval, cpu_devices, d_assignment, num_hosts):
+def _get_model_fn(train_or_eval, mesh_context):
   """Returns _model_fn."""
   captured_hooks = _CapturedObject()
   captured_output_dtypes_shapes = _CapturedObject()
@@ -136,6 +231,12 @@ def _get_model_fn(train_or_eval, cpu_devices, d_assignment, num_hosts):
 
   def _model_fn(input_fea, input_lab):
     """Creates a model, add summary, modes (train or eval), and hooks."""
+
+    # input_fea and input_lab should be a list (laid_out_tensors).
+    if not isinstance(input_fea, list):
+      input_fea = [input_fea]
+    if not isinstance(input_lab, list):
+      input_lab = [input_lab]
 
     def _add_summary(lowering, train_or_eval, tf_loss, scalars, global_step):
       """Add all summaries."""
@@ -157,40 +258,31 @@ def _get_model_fn(train_or_eval, cpu_devices, d_assignment, num_hosts):
         with tf.control_dependencies(sum_ops):
           return tf.identity(tf_loss)
 
-      # Cast the global step to tf.int32, since
-      # outside_compilation does not support tf.int64.
-      tf_loss = tpu.outside_compilation(
-          _host_loss_summary,
-          tf.cast(global_step, tf.int32),
-          tf_loss,
-          **scalars)
+      if FLAGS.use_tpu:
+        # Cast the global step to tf.int32, since
+        # outside_compilation does not support tf.int64.
+        tf_loss = tpu.outside_compilation(
+            _host_loss_summary,
+            tf.cast(global_step, tf.int32),
+            tf_loss,
+            **scalars)
+      else:
+        tf_loss = _host_loss_summary(
+            tf.cast(global_step, tf.int32),
+            tf_loss,
+            **scalars)
 
       return tf_loss
 
     global_step = tf.train.get_or_create_global_step()
-    graph = mtf.Graph()
+    graph, mesh, mesh_impl = mesh_context.create_graph_mesh_and_mesh_impl()
 
-    # Worker 0 caches all the TPU binaries.
-    replica_cache_size = 300 * 1024 * 1024  # 300M per replica.
-    worker0_mem = replica_cache_size * 8 * num_hosts
-    devices_memory_usage = [worker0_mem] + [0] * (num_hosts - 1)
-
-    tf.logging.info('cpu_devices: {}, devices_mem: {}'.format(
-        cpu_devices, devices_memory_usage))
-    var_placer = mtf.utils.BalancedVariablePlacer(cpu_devices,
-                                                  devices_memory_usage)
-
-    mesh = mtf.Mesh(graph, 'my_mesh', var_placer)
-
-    mesh_shape = mtf.convert_to_shape(FLAGS.mesh_shape)
-    layout_rules = unet.get_layout()
-    mesh_impl = mtf.simd_mesh_impl.SimdMeshImpl(
-        mesh_shape, layout_rules, None, d_assignment)
-
-    with mtf.utils.outside_all_rewrites():  # Do not tpu_rewrite this part.
+    with mtf.utils.outside_all_rewrites():
+      # Do not tpu_rewrite this part. Inside this unet, If you use Tensorflow,
+      # instead of Mesh-Tensorflor, it will cause host to tpu send/rec.
       preds, loss, scalars, bn_update_ops = (
           unet.unet_with_spatial_partition(
-              mesh, train_or_eval, input_fea, input_lab))
+              mesh, mesh_impl, train_or_eval, input_fea, input_lab))
 
     if train_or_eval == 'train':
       var_grads = mtf.gradients(
@@ -211,7 +303,6 @@ def _get_model_fn(train_or_eval, cpu_devices, d_assignment, num_hosts):
       tf_update_ops.append(tf.assign_add(global_step, 1))
       tf_update_ops.extend(
           [lowering.lowered_operation(op) for op in bn_update_ops])
-      tf_update_ops_group = tf.group(tf_update_ops)
 
     else:  # train_or_eval == 'eval':
       preds = [mtf.anonymize(pred) for pred in preds]
@@ -239,16 +330,22 @@ def _get_model_fn(train_or_eval, cpu_devices, d_assignment, num_hosts):
             save_steps=FLAGS.save_checkpoints_steps,
             saver=saver, listeners=[saver_listener])
         captured_hooks.capture([master_to_slice_hook, slice_to_master_hook])
-        return tf_update_ops_group
+        return tf.group([tf_loss] + tf_update_ops)
 
     else:  # train_or_eval == 'eval':
-      tf_preds.extend([tf_loss, global_step])
-      tf_preds_dtypes = [tf_pred.dtype for tf_pred in tf_preds]
-      tf_preds_shapes = [tf_pred.shape for tf_pred in tf_preds]
-      captured_hooks.capture([master_to_slice_hook, None])
-      captured_output_dtypes_shapes.capture(
-          [tf_preds_dtypes, tf_preds_shapes])
-      return tpu_ops.outfeed_enqueue_tuple(tf_preds)
+      if FLAGS.use_tpu:
+        tf_preds.extend([tf_loss, global_step])
+        tf_preds_dtypes = [tf_pred.dtype for tf_pred in tf_preds]
+        tf_preds_shapes = [tf_pred.shape for tf_pred in tf_preds]
+        captured_hooks.capture([master_to_slice_hook, None])
+        captured_output_dtypes_shapes.capture(
+            [tf_preds_dtypes, tf_preds_shapes])
+        return tpu_ops.outfeed_enqueue_tuple(tf_preds)
+
+      else:
+        tf_preds.extend([tf_loss, global_step])
+        captured_hooks.capture([master_to_slice_hook, None])
+        return tf_preds
 
   return _model_fn, captured_hooks, captured_output_dtypes_shapes
 
@@ -275,8 +372,8 @@ def _print_variable_values(sess):
     tf.logging.info('{}'.format(np.array(value).flatten()))
 
 
-def _train_phase(mesh_impl, cpu_devices, d_assignment, num_hosts, num_cores):
-  """Train network."""
+def _train_phase(mesh_context):
+  """Handles input pipeline and trains the network."""
   if FLAGS.num_train_iterations_per_loop <= 0:
     return
 
@@ -285,16 +382,24 @@ def _train_phase(mesh_impl, cpu_devices, d_assignment, num_hosts, num_cores):
     # Setup input pipeline.
     ds_creator = unet.get_dataset_creator('train')
     mtf_shapes = unet.get_input_mtf_shapes('train')
-    simd_input_reader = input_reader.SimdMeshImplInputReader(
-        mesh_impl, ds_creator, mtf_shapes, is_eval_mode=False)
 
-    model_train_fn, train_hooks, _ = _get_model_fn(
-        'train', cpu_devices, d_assignment, num_hosts)
-    tpu_train_computation = tpu.replicate(
-        computation=model_train_fn,
-        inputs=[[]] * num_cores,
-        infeed_queue=simd_input_reader.infeed_queue,
-        device_assignment=d_assignment)
+    model_train_fn, train_hooks, _ = _get_model_fn('train', mesh_context)
+
+    if FLAGS.use_tpu:
+      assert mesh_context.device_assignment
+      assert mesh_context.num_cores
+      simd_input_reader = input_reader.SimdMeshImplInputReader(
+          mesh_context.mesh_impl, ds_creator, mtf_shapes, is_eval_mode=False)
+      train_computation = tpu.replicate(
+          computation=model_train_fn,
+          inputs=[[]] * mesh_context.num_cores,
+          infeed_queue=simd_input_reader.infeed_queue,
+          device_assignment=mesh_context.device_assignment)
+
+    else:
+      placement_input_reader = input_reader.PlacementMeshImplInputReader(
+          mesh_context.mesh_impl, ds_creator, mtf_shapes, is_eval_mode=False)
+      train_computation = placement_input_reader.gpu_placement(model_train_fn)
 
     ###########################################################
     # Training.
@@ -311,11 +416,15 @@ def _train_phase(mesh_impl, cpu_devices, d_assignment, num_hosts, num_cores):
 
       if FLAGS.write_summary:
         tf.contrib.summary.initialize(session=sess)
-      simd_input_reader.start_infeed_thread(
-          sess, FLAGS.num_train_iterations_per_loop)
+
+      if FLAGS.use_tpu:
+        simd_input_reader.start_infeed_thread(
+            sess, FLAGS.num_train_iterations_per_loop)
+      else:
+        placement_input_reader.initialize(sess)
 
       for step in range(FLAGS.num_train_iterations_per_loop):
-        sess.run(tpu_train_computation)
+        sess.run(train_computation)
         if FLAGS.write_summary:
           sess.run(flush_summary)
         tf.logging.info('train steps: {}'.format(step))
@@ -330,8 +439,8 @@ def _train_phase(mesh_impl, cpu_devices, d_assignment, num_hosts, num_cores):
       _run_train_phase()
 
 
-def _eval_phase(mesh_impl, cpu_devices, d_assignment, num_hosts, num_cores):
-  """Evaluate network and write summary."""
+def _eval_phase(mesh_context):
+  """Handles input pipeline and evaluates the network."""
   if FLAGS.num_eval_iterations_per_loop <= 0:
     return
 
@@ -340,36 +449,46 @@ def _eval_phase(mesh_impl, cpu_devices, d_assignment, num_hosts, num_cores):
     # Setup input pipeline.
     ds_creator = unet.get_dataset_creator('eval')
     mtf_shapes = unet.get_input_mtf_shapes('eval')
-    simd_input_reader = input_reader.SimdMeshImplInputReader(
-        mesh_impl, ds_creator, mtf_shapes, is_eval_mode=True)
 
     model_eval_fn, eval_hooks, output_dtypes_shapes = _get_model_fn(
-        'eval', cpu_devices, d_assignment, num_hosts)
-    tpu_eval_computation = tpu.replicate(
-        computation=model_eval_fn,
-        inputs=[[]] * num_cores,
-        infeed_queue=simd_input_reader.infeed_queue,
-        device_assignment=d_assignment)
+        'eval', mesh_context)
 
-    output_dtypes, output_shapes = output_dtypes_shapes.get()
-    outfeed_dequeue_ops = []
+    if FLAGS.use_tpu:
+      assert mesh_context.device_assignment
+      assert mesh_context.num_cores
+      simd_input_reader = input_reader.SimdMeshImplInputReader(
+          mesh_context.mesh_impl, ds_creator, mtf_shapes, is_eval_mode=True)
+      eval_computation = tpu.replicate(
+          computation=model_eval_fn,
+          inputs=[[]] * mesh_context.num_cores,
+          infeed_queue=simd_input_reader.infeed_queue,
+          device_assignment=mesh_context.device_assignment)
 
-    for host_id in range(num_hosts):
-      # pylint: disable=protected-access
-      with ops.device(input_reader._host_id_to_tf_device(
-          host_id, external_worker=True)):
-        for device_ordinal in range(num_cores // num_hosts):
-          outfeed_dequeue_op = tpu_ops.outfeed_dequeue_tuple(
-              dtypes=output_dtypes,
-              shapes=output_shapes,
-              device_ordinal=device_ordinal)
+      output_dtypes, output_shapes = output_dtypes_shapes.get()
+      outfeed_dequeue_ops = []
 
-          # We don't need output other than from core 0.
-          if outfeed_dequeue_ops:
-            outfeed_dequeue_ops.append(
-                [tf.reduce_mean(x) for x in outfeed_dequeue_op])
-          else:
-            outfeed_dequeue_ops.append(outfeed_dequeue_op)
+      # Create outfeed_dequeue_ops.
+      for host_id in range(mesh_context.num_hosts):
+        # pylint: disable=protected-access
+        with ops.device(input_reader._host_id_to_tf_device(
+            host_id, external_worker=True)):
+          for device_ordinal in range(mesh_context.num_cores_per_host):
+            outfeed_dequeue_op = tpu_ops.outfeed_dequeue_tuple(
+                dtypes=output_dtypes,
+                shapes=output_shapes,
+                device_ordinal=device_ordinal)
+
+            # We don't need output other than from core 0.
+            if outfeed_dequeue_ops:
+              outfeed_dequeue_ops.append(
+                  [tf.reduce_mean(x) for x in outfeed_dequeue_op])
+            else:
+              outfeed_dequeue_ops.append(outfeed_dequeue_op)
+
+    else:
+      placement_input_reader = input_reader.PlacementMeshImplInputReader(
+          mesh_context.mesh_impl, ds_creator, mtf_shapes, is_eval_mode=False)
+      eval_computation = placement_input_reader.gpu_placement(model_eval_fn)
 
     ###########################################################
     # Evaluation.
@@ -386,14 +505,21 @@ def _eval_phase(mesh_impl, cpu_devices, d_assignment, num_hosts, num_cores):
 
       if FLAGS.write_summary:
         tf.contrib.summary.initialize(session=sess)
-      simd_input_reader.start_infeed_thread(
-          sess, FLAGS.num_eval_iterations_per_loop)
+
+      if FLAGS.use_tpu:
+        simd_input_reader.start_infeed_thread(
+            sess, FLAGS.num_eval_iterations_per_loop)
+      else:
+        placement_input_reader.initialize(sess)
 
       pprocessor = unet.PostProcessor()
       for step in range(FLAGS.num_eval_iterations_per_loop):
         # Only get results from the 0-th core.
-        sess.run(tpu_eval_computation)
-        results = sess.run(outfeed_dequeue_ops)[0]
+        if FLAGS.use_tpu:
+          sess.run(eval_computation)
+          results = sess.run(outfeed_dequeue_ops)[0]
+        else:
+          results = sess.run(eval_computation)
         pprocessor.record(results, FLAGS.pred_output_dir)
 
         if FLAGS.write_summary:
@@ -422,36 +548,20 @@ def train_and_eval():
 
   TODO(lehou): Pack everything nicely as a set of APIs.
   """
-  tf.logging.info('FLAGS.master: {}'.format(FLAGS.master))
 
-  # Open a session to get the list of CPU devices to hold master variables.
+  mesh_context = None
+  tf.logging.info('FLAGS.master: {}'.format(FLAGS.master))
   with tf.Session(target=FLAGS.master,
                   config=tf.ConfigProto(allow_soft_placement=True)) as sess:
-    topology = sess.run(tpu.initialize_system())
-    cpu_devices = _list_cpu_devices(sess)
-
-  topo_object = tf.contrib.tpu.Topology(serialized=topology)
-  num_cores = int(np.prod(topo_object.mesh_shape))
-  num_hosts = int(topo_object.num_tasks)
-  num_cores_per_host = int(num_cores // num_hosts)
-  assert num_cores_per_host == int(topo_object.num_tpus_per_task)
-
-  # Get a device_assignment object for mtf.
-  d_assignment = device_assignment.device_assignment(
-      topology, computation_shape=[1, 1, 1],
-      num_replicas=num_cores)
-
-  # Get mesh_impl.
-  mesh_shape = mtf.convert_to_shape(FLAGS.mesh_shape)
-  layout_rules = unet.get_layout()
-  mesh_impl = mtf.simd_mesh_impl.SimdMeshImpl(
-      mesh_shape, layout_rules, None, d_assignment)
+    mesh_context = MeshContext(
+        sess, FLAGS.use_tpu, FLAGS.mesh_shape, unet.get_layout())
 
   for _ in range(FLAGS.num_training_loops):
-    _train_phase(mesh_impl, cpu_devices, d_assignment, num_hosts, num_cores)
-    _eval_phase(mesh_impl, cpu_devices, d_assignment, num_hosts, num_cores)
+    _train_phase(mesh_context)
+    _eval_phase(mesh_context)
 
-  _shutdown()
+  if FLAGS.use_tpu:
+    _shutdown()
 
   tf.logging.info('finished.')
 

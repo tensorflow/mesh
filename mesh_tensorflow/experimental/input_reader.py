@@ -15,8 +15,11 @@
 
 """Input pipeline for MeshTensorflow.
 
-A user provides the following, and this set of APIs will handle the input
-pipeline for MeshTensorflow.
+If you run MeshTensorflow models on TPUs, please use SimdMeshImplInputReader
+as your input pipeline. Otherwise, please use PlacementMeshImplInputReader.
+
+For SimdMeshImplInputReader, a user provides the following, and this set of APIs
+will handle the input pipeline for MeshTensorflow.
   1. An instance of mtf.simd_mesh_impl.SimdMeshImpl.
   2. A function that creates a tf.data.Dataset.
      The Dataset returns single examples (no batch dimension).
@@ -513,3 +516,39 @@ class SimdMeshImplInputReader(object):
 
     return infeed_queue, enqueue_ops
 
+
+class PlacementMeshImplInputReader(object):
+  """Handles input pipeline for PlacementMeshImpl."""
+
+  def __init__(self,
+               placement_mesh_impl,
+               ds_creator,
+               mtf_input_shapes,
+               ds_prefetch_size=tf.data.experimental.AUTOTUNE,
+               is_eval_mode=False):
+
+    self._placement_mesh_impl = placement_mesh_impl
+    self._mtf_input_shapes = mtf_input_shapes
+
+    batch_size = mtf_input_shapes[0].dims[0].size
+    if is_eval_mode:
+      ds = ds_creator().batch(
+          batch_size, drop_remainder=False).prefetch(ds_prefetch_size)
+    else:
+      ds = ds_creator().batch(
+          batch_size, drop_remainder=True).prefetch(ds_prefetch_size)
+    self._ds_iterator = ds.make_initializable_iterator()
+    self._input_initializers = [self._ds_iterator.initializer]
+
+  def initialize(self, sess):
+    sess.run(self._input_initializers)
+
+  def gpu_placement(self, model_fn):
+    image, label = self._ds_iterator.get_next()
+    image_laid_out = self._placement_mesh_impl.make_slices(
+        image, self._mtf_input_shapes[0])
+    label_laid_out = self._placement_mesh_impl.make_slices(
+        label, self._mtf_input_shapes[1])
+    computation = model_fn(image_laid_out, label_laid_out)
+
+    return computation
