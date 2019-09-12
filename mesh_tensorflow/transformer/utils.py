@@ -432,7 +432,7 @@ def tpu_estimator_model_fn(model_type,
     else:
       assert mode == tf.estimator.ModeKeys.TRAIN
       num_microbatches = serialize_num_microbatches(batch_dim,
-                                                    sequence_length,
+                                                    length_dim,
                                                     mesh_shape,
                                                     layout_rules)
       def model_fn(mtf_features):
@@ -1003,7 +1003,7 @@ def compute_batch_size(sequence_length,
 
 @gin.configurable
 def serialize_num_microbatches(batch_dim,
-                               sequence_length,
+                               length_dim,
                                mesh_shape,
                                layout_rules,
                                tokens_per_microbatch_per_replica=None):
@@ -1017,7 +1017,7 @@ def serialize_num_microbatches(batch_dim,
 
   Args:
     batch_dim: a mtf.Dimension
-    sequence_length: a dict from string to int
+    length_dim: a mtf.Dimension
     mesh_shape: an input to mtf.convert_to_shape()
     layout_rules: an input to mtf.convert_to_layout_rules()
     tokens_per_microbatch_per_replica: an optional integer, e.g. 2048
@@ -1026,12 +1026,10 @@ def serialize_num_microbatches(batch_dim,
   """
   if not tokens_per_microbatch_per_replica:
     return 1
-  sequence_length = max(sequence_length.values())
   batch_per_replica = mtf.tensor_dim_to_size_per_split(
       layout_rules, mesh_shape, batch_dim)
   # number of sequences per microbatch
-  microbatch_size = max(
-      1, tokens_per_microbatch_per_replica // max(sequence_length.values()))
+  microbatch_size = max(1, tokens_per_microbatch_per_replica // length_dim.size)
   # decrease microbatch_size until it is a divisor of batch_per_replica
   # This is guaranteed to stop at microbatch_size=1 if not earlier.
   while batch_per_replica % microbatch_size:
@@ -1041,12 +1039,12 @@ def serialize_num_microbatches(batch_dim,
       "serialize_num_microbatches: "
       "tokens_per_microbatch_per_replica=%d "
       "batch_dim=%s "
-      "sequence_length=%s "
+      "length_dim=%s "
       "batch_per_replica=%d "
       "num_microbatches=%d",
       tokens_per_microbatch_per_replica,
       batch_dim,
-      sequence_length,
+      length_dim,
       batch_per_replica,
       num_microbatches)
   return num_microbatches
