@@ -405,13 +405,17 @@ def _train_phase(mesh_context):
     # Training.
     master_to_slice_hook, slice_to_master_hook = train_hooks.get()
     ckpt_loader_hook = _CkptLoaderHook()
+    step_counter_hook = tf.train.StepCounterHook(every_n_steps=10)
+    all_hooks = [ckpt_loader_hook, master_to_slice_hook,
+                 slice_to_master_hook, step_counter_hook]
+
     if FLAGS.write_summary:
       flush_summary = tf.contrib.summary.flush()
 
     with tf.train.MonitoredTrainingSession(
         master=FLAGS.master,
         scaffold=_get_scaffold(additional_initializers=[]),
-        hooks=[ckpt_loader_hook, master_to_slice_hook, slice_to_master_hook],
+        hooks=all_hooks,
         config=tf.ConfigProto(allow_soft_placement=True)) as sess:
 
       if FLAGS.write_summary:
@@ -494,6 +498,8 @@ def _eval_phase(mesh_context):
     # Evaluation.
     master_to_slice_hook, _ = eval_hooks.get()
     ckpt_loader_hook = _CkptLoaderHook()
+    all_hooks = [ckpt_loader_hook, master_to_slice_hook]
+
     if FLAGS.write_summary:
       flush_summary = tf.contrib.summary.flush()
 
@@ -501,7 +507,7 @@ def _eval_phase(mesh_context):
         session_creator=tf.train.ChiefSessionCreator(
             master=FLAGS.master,
             config=tf.ConfigProto(allow_soft_placement=True)),
-        hooks=[ckpt_loader_hook, master_to_slice_hook]) as sess:
+        hooks=all_hooks) as sess:
 
       if FLAGS.write_summary:
         tf.contrib.summary.initialize(session=sess)
