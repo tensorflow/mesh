@@ -80,10 +80,10 @@ def mnist_model(image, labels, mesh):
   # add some convolutional layers to demonstrate that convolution works.
   filters1_dim = mtf.Dimension("filters1", 16)
   filters2_dim = mtf.Dimension("filters2", 16)
-  f1 = mtf.relu(mtf.conv2d_with_blocks(
+  f1 = mtf.relu(mtf.layers.conv2d_with_blocks(
       x, filters1_dim, filter_size=[9, 9], strides=[1, 1], padding="SAME",
       h_blocks_dim=row_blocks_dim, w_blocks_dim=col_blocks_dim, name="conv0"))
-  f2 = mtf.relu(mtf.conv2d_with_blocks(
+  f2 = mtf.relu(mtf.layers.conv2d_with_blocks(
       f1, filters2_dim, filter_size=[9, 9], strides=[1, 1], padding="SAME",
       h_blocks_dim=row_blocks_dim, w_blocks_dim=col_blocks_dim, name="conv1"))
   x = mtf.reduce_mean(f2, reduced_dim=filters2_dim)
