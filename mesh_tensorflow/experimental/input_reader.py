@@ -58,7 +58,6 @@ Also check out SimdMeshImplInputReader.gen_infeed_queue().
 
 from __future__ import absolute_import
 from __future__ import division
-from __future__ import google_type_annotations
 from __future__ import print_function
 
 import collections
