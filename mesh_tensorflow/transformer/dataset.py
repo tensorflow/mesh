@@ -142,7 +142,9 @@ def ensure_dataset_eos(dataset, feature_keys=None):
     if k not in feature_keys:
       return v
     return tf.concat([v[0:-1], tf.clip_by_value(v[-1:], 0, 1)], axis=0)
-  return dataset.map(lambda ex: {k: _ensure_eos(k, v) for k, v in ex.items()})
+  return dataset.map(
+      lambda ex: {k: _ensure_eos(k, v) for k, v in ex.items()},
+      num_parallel_calls=tf.data.experimental.AUTOTUNE)
 
 
 def encode_dataset(dataset, vocabulary):
@@ -656,7 +658,7 @@ def _pack_with_tf_ops(dataset, keys, length):
     return packed
   dataset = dataset.map(map_fn,
                         num_parallel_calls=tf.data.experimental.AUTOTUNE)
-  return dataset.flat_map(tf.data.Dataset.from_tensor_slices)
+  return dataset.unbatch()
 
 
 def _pack_with_custom_ops(dataset, keys, length):
@@ -704,7 +706,7 @@ def _pack_with_custom_ops(dataset, keys, length):
     return packed
   dataset = dataset.map(map_fn_custom,
                         num_parallel_calls=tf.data.experimental.AUTOTUNE)
-  dataset = dataset.flat_map(tf.data.Dataset.from_tensor_slices)
+  dataset = dataset.unbatch()
   return dataset
 
 
