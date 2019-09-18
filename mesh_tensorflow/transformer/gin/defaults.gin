@@ -3,6 +3,7 @@
 import mesh_tensorflow.optimize
 import mesh_tensorflow.transformer.learning_rate_schedules
 import mesh_tensorflow.transformer.transformer_layers
+import mesh_tensorflow.transformer.learning_rate_schedules
 
 # for Unitransformer models (e.g. language-model)
 transformer.make_layer_stack.layers = [

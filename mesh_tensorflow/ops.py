@@ -1799,8 +1799,14 @@ class GenericGradOperation(Operation):
         [lowering.tensors[x].tensor_list for x in self._forward_op.inputs])
     all_grad_ys = transpose_list_of_lists(
         [lowering.tensors[dy].tensor_list for dy in self._grad_ys])
-    all_grad_xs = [tf.gradients(ys=ys, xs=xs, grad_ys=grad_ys) for
-                   ys, xs, grad_ys in zip(all_ys, all_xs, all_grad_ys)]
+    all_grad_xs = [
+        tf.gradients(  # pylint: disable=g-complex-comprehension
+            ys=ys,
+            xs=xs,
+            grad_ys=grad_ys,
+            unconnected_gradients=tf.UnconnectedGradients.ZERO)
+        for ys, xs, grad_ys in zip(all_ys, all_xs, all_grad_ys)
+    ]
     grad_xs = transpose_list_of_lists(all_grad_xs)
     for out, grad_x in zip(self.outputs, grad_xs):
       lowering.set_tensor_lowering(
