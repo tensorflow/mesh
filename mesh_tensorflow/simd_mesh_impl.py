@@ -640,10 +640,23 @@ def tile_2d(physical_shape, tile_shape,
   tile_ring = _ring_2d(t0, t1)
   tiles_ring = _ring_2d(p0 // t0, p1 // t1)
   for logical_pnum in range(p0 * p1 * p2):
-    core_on_chip = logical_pnum % p2
-    logical_chip_num = logical_pnum // p2
-    logical_pos_in_tile = logical_chip_num % (t0 * t1)
-    logical_tile_num = logical_chip_num // (t0 * t1)
+    logical_tile_num = logical_pnum // (t0 * t1 * p2)
+    if p2 == 2 and not cores_name:
+      # Go through all chips using core 0, then go through all chips
+      #   backwards using core 1.  This is better in the case where
+      #   one of the tile dimensions is 1, so the last chip is not adjacent
+      #   to the first chip.
+      core_in_tile = logical_pnum % (t0 * t1 * p2)
+      core_on_chip = core_in_tile // t0 * t1
+      if core_on_chip == 0:
+        logical_pos_in_tile = core_in_tile
+      else:
+        logical_pos_in_tile = t0 * t1 * p2 - 1 - core_in_tile
+    else:
+      # Go through all chips once, using both cores on each chip.
+      core_on_chip = logical_pnum % p2
+      logical_chip_num = logical_pnum // p2
+      logical_pos_in_tile = logical_chip_num % (t0 * t1)
     tile_i, tile_j = tile_ring[logical_pos_in_tile]
     tiles_i, tiles_j = tiles_ring[logical_tile_num]
     physical_pnum = core_on_chip + p2 * (
