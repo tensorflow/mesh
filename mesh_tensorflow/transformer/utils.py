@@ -370,6 +370,8 @@ def tpu_estimator_model_fn(model_type,
             x, [x], "import feature %s" % key, summarize=1000, first_n=10)
       mtf_features[key] = mtf.import_fully_replicated(
           mesh, x, feature_shape, name=key)
+      if key == "targets":
+        anon_targets = mtf.anonymize(mtf_features[key])
 
     if mode == tf.estimator.ModeKeys.PREDICT:
       def _feature_shape(key):
@@ -435,74 +437,71 @@ def tpu_estimator_model_fn(model_type,
           scaffold_fn=scaffold_fn,
           prediction_hooks=[mtf.MtfRestoreHook(lowering)])
 
-    elif mode == tf.estimator.ModeKeys.EVAL:
-      raise NotImplementedError("We don't expect to use mode == eval.")
+    assert (mode == tf.estimator.ModeKeys.TRAIN or
+            mode == tf.estimator.ModeKeys.EVAL)
 
-    else:
-      assert mode == tf.estimator.ModeKeys.TRAIN
+    def logits_and_loss(mtf_features):
+      """Compute logits and loss.
+
+      Args:
+        mtf_features: a dictionary
+      Returns:
+        logits: a mtf.Tensor
+        loss: a mtf.Tensor
+      """
+      if model_type == "lm":
+        if "inputs" in mtf_features:
+          mtf_features = _dynamic_text2self(mtf_features)
+        _, _, length_dim = mtf_features["targets"].shape
+        inputs = mtf.shift(mtf_features["targets"], offset=1,
+                           dim=length_dim, wrap=False)
+      else:
+        inputs = mtf_features["inputs"]
+
+      if isinstance(transformer_model, transformer.Unitransformer):
+        position_kwargs = dict(
+            sequence_id=mtf_features.get("targets_segmentation", None),
+            position=mtf_features.get("targets_position", None),
+        )
+      elif isinstance(
+          transformer_model,
+          transformer.Bitransformer) or model_type == "bi_student_teacher":
+        position_kwargs = dict(
+            encoder_sequence_id=mtf_features.get("inputs_segmentation", None),
+            decoder_sequence_id=mtf_features.get("targets_segmentation",
+                                                 None),
+            decoder_subsequence_id=mtf_features.get("targets_subsegmentation",
+                                                    None),
+            encoder_position=mtf_features.get("inputs_position", None),
+            decoder_position=mtf_features.get("targets_position", None),
+        )
+      else:
+        raise ValueError("unrecognized class")
+
+      return  transformer_model.call_simple(
+          inputs=inputs,
+          targets=mtf_features["targets"],
+          compute_loss=True,
+          mode=mode,
+          variable_dtype=get_variable_dtype(),
+          **position_kwargs)
+
+    if mode == tf.estimator.ModeKeys.TRAIN:
       num_microbatches = serialize_num_microbatches(batch_dim,
                                                     sequence_length,
                                                     mesh_shape,
                                                     layout_rules)
-      def model_fn(mtf_features):
-        """The kind of function we need for mtf.serialize_training_step.
-
-        Args:
-          mtf_features: a dictionary
-        Returns:
-          a dictionary
-        """
-        if model_type == "lm":
-          if "inputs" in mtf_features:
-            mtf_features = _dynamic_text2self(mtf_features)
-          _, _, length_dim = mtf_features["targets"].shape
-          inputs = mtf.shift(mtf_features["targets"], offset=1,
-                             dim=length_dim, wrap=False)
-        else:
-          inputs = mtf_features["inputs"]
-
-        if isinstance(transformer_model, transformer.Unitransformer):
-          position_kwargs = dict(
-              sequence_id=mtf_features.get("targets_segmentation", None),
-              position=mtf_features.get("targets_position", None),
-          )
-        elif isinstance(
-            transformer_model,
-            transformer.Bitransformer) or model_type == "bi_student_teacher":
-          position_kwargs = dict(
-              encoder_sequence_id=mtf_features.get("inputs_segmentation", None),
-              decoder_sequence_id=mtf_features.get("targets_segmentation",
-                                                   None),
-              decoder_subsequence_id=mtf_features.get("targets_subsegmentation",
-                                                      None),
-              encoder_position=mtf_features.get("inputs_position", None),
-              decoder_position=mtf_features.get("targets_position", None),
-          )
-        else:
-          raise ValueError("unrecognized class")
-
-        logits, loss = transformer_model.call_simple(
-            inputs=inputs,
-            targets=mtf_features["targets"],
-            compute_loss=True,
-            mode=mode,
-            variable_dtype=get_variable_dtype(),
-            **position_kwargs)
-        if num_microbatches > 1:
-          loss /= float(num_microbatches)
-        del logits
-        return {"loss": loss}
-
       if num_microbatches > 1:
+        def serialized_fn(mtf_features):
+          return {
+              "loss": (logits_and_loss(mtf_features)[1] / num_microbatches)}
         var_grads, loss_dict = mtf.serialize_training_step(
-            mtf_features, model_fn, batch_dim, num_microbatches)
+            mtf_features, serialized_fn, batch_dim, num_microbatches)
+        loss = loss_dict["loss"]
       else:
-        loss_dict = model_fn(mtf_features)
+        loss = logits_and_loss(mtf_features)[1]
         var_grads = mtf.gradients(
-            [loss_dict["loss"]],
-            [v.outputs[0] for v in graph.trainable_variables])
-
-      loss = loss_dict["loss"]
+            [loss], [v.outputs[0] for v in graph.trainable_variables])
 
       if tpu_summaries:
         mtf.scalar_summary("loss", loss)
@@ -607,6 +606,29 @@ def tpu_estimator_model_fn(model_type,
                   saver_hook,
                   gin_config_saver_hook,
               ])
+    elif mode == tf.estimator.ModeKeys.EVAL:
+      logits, loss = logits_and_loss(mtf_features)
+      anon_logits = mtf.anonymize(logits)
+      lowering = mtf.Lowering(graph, {mesh: mesh_impl}, autostack=autostack)
+      tf_loss = tf.to_float(lowering.export_to_tf_tensor(loss))
+      tf_loss = tf.to_float(tf_loss)
+      tf_logits = tf.to_float(lowering.export_to_tf_tensor(anon_logits))
+
+      def padded_neg_log_perplexity(logits, labels):
+        weights = tf.to_float(tf.not_equal(labels, 0))
+        xent = tf.nn.sparse_softmax_cross_entropy_with_logits(
+            labels=labels, logits=logits)
+        return {"neg_log_perplexity": tf.metrics.mean(-xent, weights)}
+
+      labels = lowering.export_to_tf_tensor(anon_targets)
+      eval_metrics = (padded_neg_log_perplexity, [tf_logits, labels])
+      with mtf.utils.outside_all_rewrites():
+        restore_hook = mtf.MtfRestoreHook(lowering)
+      return tpu_estimator.TPUEstimatorSpec(
+          tf.estimator.ModeKeys.EVAL,
+          evaluation_hooks=[restore_hook],
+          loss=tf_loss,
+          eval_metrics=eval_metrics)
 
   return my_model_fn
 
@@ -1163,7 +1185,8 @@ def run(tpu_job_name,
         learning_rate_schedule=None,
         optimizer=None,
         predict_fn=None,
-        variable_filter=None):
+        variable_filter=None,
+        perplexity_eval_steps=10):
   """Run training/eval/inference.
 
   Args:
@@ -1206,7 +1229,7 @@ def run(tpu_job_name,
       continuously waiting for new checkpoints via
       `tf.contrib.training.checkpoints_iterator`.
     export_path: a string, path to export the saved model
-    mode: string, train/eval/infer
+    mode: string, train/eval/perplexity_eval/infer
     iterations_per_loop: integer, steps per train loop
     save_checkpoints_steps: integer, steps per checkpoint
     keep_checkpoint_max: an integer, keep up to this many checkpoints
@@ -1236,6 +1259,7 @@ def run(tpu_job_name,
     variable_filter: a string, a variable will only be trained if
       this string appears in its name. If None (default), train all trainable
       variables.
+    perplexity_eval_steps: an integer - number of steps for perplexity eval
   """
   if isinstance(sequence_length, int):
     sequence_length = {"inputs": sequence_length,
@@ -1322,7 +1346,7 @@ def run(tpu_job_name,
       export_to_tpu=False,
       params={})
 
-  if mode == "train":
+  if (mode == "train" or mode == "perplexity_eval"):
     if train_dataset_fn is None:
       raise ValueError("Must provide train_dataset_fn through gin for train.")
     def input_fn(params):
@@ -1334,8 +1358,17 @@ def run(tpu_job_name,
       dataset = dataset.prefetch(tf.data.experimental.AUTOTUNE)
       return dataset
 
-    estimator.train(input_fn=input_fn, max_steps=train_steps)
-
+    if mode == "train":
+      estimator.train(input_fn=input_fn, max_steps=train_steps)
+    elif mode == "perplexity_eval":
+      checkpoint_paths = get_checkpoint_iterator(
+          eval_checkpoint_step, model_dir)
+      for checkpoint_path in checkpoint_paths:
+        _ = estimator.evaluate(input_fn=input_fn,
+                               steps=perplexity_eval_steps,
+                               checkpoint_path=checkpoint_path)
+    else:
+      raise ValueError("should not get here")
   elif mode == "eval":
     if eval_dataset_fn is None:
       raise ValueError("Must provide eval_dataset_fn through gin for eval.")

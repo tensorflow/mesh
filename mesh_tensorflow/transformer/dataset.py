@@ -116,7 +116,7 @@ def pack_or_pad(
   Returns:
     a tf.data.Dataset where all features have fixed shape [length].
   """
-  feature_keys = feature_keys or dataset.output_shapes.keys()
+  feature_keys = feature_keys or list(dataset.output_shapes.keys())
   if pack:
     dataset = pack_dataset(dataset, length=length, keys=feature_keys)
   # Pad/trim length of each example to length.
@@ -515,7 +515,7 @@ def pack_dataset(dataset, length, keys=None, use_custom_ops=False):
   """
   shapes = dataset.output_shapes
   if keys is None:
-    keys = shapes.keys()
+    keys = list(shapes.keys())
   for k in keys:
     if k not in shapes:
       raise ValueError("Key %s not found in dataset.  Available keys are %s"
