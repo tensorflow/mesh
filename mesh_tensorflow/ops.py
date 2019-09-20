@@ -4917,6 +4917,8 @@ def gather(weights, indices, dim, output_shape=None):
   """
   dim = convert_to_dimension(dim)
   output_shape = convert_to_shape(output_shape)
+  if not isinstance(indices, Tensor):
+    indices = constant(weights.mesh, indices, dtype=tf.int32)
   if weights.dtype == tf.bool:
     return cast(gather(to_float(weights), indices, dim, output_shape), tf.bool)
   return einsum([one_hot(indices, dim, dtype=weights.dtype), weights],
