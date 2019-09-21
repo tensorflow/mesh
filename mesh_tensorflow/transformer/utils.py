@@ -294,7 +294,7 @@ def tpu_estimator_model_fn(model_type,
       on TPU.  This may be slow, since it uses a host call hack.
     predict_fn: an optional function, see docs for run for more information
     variable_filter: a string, a variable will only be trained if
-      this string appears in its name. If None (default), train all trainable
+      its name matches this regex. If None (default), train all trainable
       variables.
     init_checkpoint: a string, if not None then read in variables from this
       checkpoint path when initializing variables. Will only initialize
@@ -515,12 +515,15 @@ def tpu_estimator_model_fn(model_type,
       else:
         learning_rate = learning_rate_schedule
 
-      filter_string = variable_filter or ""
+      pattern = re.compile(variable_filter or "")
       train_vars = graph.trainable_variables
-      filtered_vars = [v for v in train_vars if filter_string in v.name]
+      filtered_vars = [v for v in train_vars if pattern.search(v.name)]
       filtered_grads = [
-          g for g, v in zip(var_grads, train_vars) if filter_string in v.name
+          g for g, v in zip(var_grads, train_vars) if pattern.findall(v.name)
       ]
+      if variable_filter:
+        tf.logging.info("Variables being trained:")
+        tf.logging.info([v.name for v in filtered_vars])
 
       update_ops = optimizer(learning_rate=learning_rate).apply_grads(
           filtered_grads, filtered_vars
@@ -1257,7 +1260,7 @@ def run(tpu_job_name,
           mtf.Tensor with shape [batch_dim, length_dim].
         - variable_dtype: an mtf.VariableDType
     variable_filter: a string, a variable will only be trained if
-      this string appears in its name. If None (default), train all trainable
+      its name matches this regex. If None (default), train all trainable
       variables.
     perplexity_eval_steps: an integer - number of steps for perplexity eval
   """
