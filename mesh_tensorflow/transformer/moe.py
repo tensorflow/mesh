@@ -65,6 +65,8 @@ class MoE1D(transformer.TransformerLayer):
 
   def call(self, context, x, losses=None):
     """Call the layer."""
+    if context.ensemble_dim:
+      raise NotImplementedError("MoE not yet implemented with ensembles")
 
     # Dim cheat sheet:
     # <B>: batch dims, e.g.
@@ -133,6 +135,8 @@ class MoE2D(transformer.TransformerLayer):
 
   def call(self, context, x, losses=None):
     """Call the layer."""
+    if context.ensemble_dim:
+      raise NotImplementedError("MoE not yet implemented with ensembles")
     has_length_dim = context.length_dim in x.shape.dims
     if not has_length_dim:
       x_shape = x.shape

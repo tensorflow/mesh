@@ -49,16 +49,20 @@ class DenseReluDense(transformer.TransformerLayer):
     """Call the layer."""
     io_channels = x.shape.dims[-1]
     hidden_channels = mtf.Dimension("d_ff", self.hidden_size)
+    if context.model.ensemble_dim:
+      expert_dims = [context.model.ensemble_dim]
+    else:
+      expert_dims = None
     h = mtf.layers.dense(x, hidden_channels,
                          use_bias=False, activation=mtf.relu,
                          variable_dtype=context.variable_dtype,
-                         name="wi")
+                         name="wi", expert_dims=expert_dims)
     if context.train and self.dropout_rate != 0.0:
       h = mtf.dropout(h, 1.0 - self.dropout_rate,
                       noise_shape=h.shape - context.length_dim)
     return mtf.layers.dense(h, io_channels, use_bias=False, activation=None,
                             variable_dtype=context.variable_dtype,
-                            name="wo")
+                            name="wo", expert_dims=expert_dims)
 
 
 def attention_params(context,
@@ -115,7 +119,8 @@ def attention_params(context,
       query_heads_dims=query_heads_dims,
       memory_heads_dims=memory_heads_dims,
       variable_dtype=context.variable_dtype,
-      shared_kv=shared_kv)
+      shared_kv=shared_kv,
+      ensemble_dim=context.model.ensemble_dim)
 
 
 @gin.configurable
@@ -276,14 +281,22 @@ class SelfAttention(transformer.TransformerLayer):
           num_buckets=buckets_dim.size)
       if (self.relative_attention_type == "bias" or
           self.relative_attention_type == "bias_shared"):
+        bias_shape = [heads_dim, buckets_dim]
+        if context.model.ensemble_dim:
+          bias_shape = [context.model.ensemble_dim] + bias_shape
         values = mtf.get_variable(
             context.mesh, "relative_attention_bias",
-            [heads_dim, buckets_dim], dtype=context.variable_dtype)
+            bias_shape, dtype=context.variable_dtype)
       elif self.relative_attention_type == "contextual":
+        if context.model.ensemble_dim:
+          expert_dims = [context.model.ensemble_dim]
+        else:
+          expert_dims = None
         values = layers.dense(
             x, [buckets_dim, heads_dim],
             variable_dtype=context.variable_dtype,
-            name="relative_attention_contextual")
+            name="relative_attention_contextual",
+            expert_dims=expert_dims)
       else:
         raise ValueError("unrecognized relative_attention_type \"%s\"" %
                          self.relative_attention_type)

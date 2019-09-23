@@ -142,7 +142,9 @@ class Context(object):
                shared_params=None,
                encoder_layer_outputs=None,
                write_priority=None,
-               read_priority=None):
+               read_priority=None,
+               inputs=None,
+               encoder_inputs=None):
     """Create a context.
 
     Args:
@@ -193,6 +195,10 @@ class Context(object):
         in self-attention, position a can see position b iff
         read_priority[a] >= write_priority[b]
       read_priority: an optional Tensor
+      inputs: an optional int32 Tensor with the input token ids
+      encoder_inputs: an optional int32 Tensor with the input token ids to the
+        encoder half of the Bitransformer of which this Unitransformer is the
+        decoder.
     """
     self.model = model
     self.mesh = mesh
@@ -221,6 +227,8 @@ class Context(object):
     self.cache = {}
     self.write_priority = write_priority
     self.read_priority = read_priority
+    self.inputs = inputs
+    self.encoder_inputs = encoder_inputs
 
   @property
   def train(self):
@@ -344,9 +352,21 @@ class LayerStack(TransformerLayer):
       return x
 
   def _layer_norm(self, context, x, name=None):
+    """Layer normalization.
+
+    Args:
+      context: a Context
+      x: a Tensor
+      name: an optional string
+    Returns:
+      a Tensor
+    """
     with tf.variable_scope(name, default_name="layer_norm"):
+      scale_shape = [context.model.model_dim]
+      if context.model.ensemble_dim:
+        scale_shape = [context.model.ensemble_dim] + scale_shape
       scale = mtf.get_variable(
-          context.mesh, "scale", mtf.Shape([context.model.model_dim]),
+          context.mesh, "scale", mtf.Shape(scale_shape),
           initializer=tf.ones_initializer(),
           dtype=context.variable_dtype)
       variance = mtf.reduce_mean(
@@ -384,6 +404,7 @@ class Unitransformer(object):
                layout=None,
                mesh_shape=None,
                vocab_divisor=128,
+               ensemble=None,
                loss_fn=None,
                positional_embedding=True,
                input_full_attention=False,
@@ -406,6 +427,7 @@ class Unitransformer(object):
       mesh_shape: optional - an input to mtf.convert_to_shape
         Some layers (e.g. MoE layers) cheat by looking at layout and mesh_shape
       vocab_divisor: an integer
+      ensemble: an optional integer (for creating an ensemble of models)
       loss_fn: an optional function to override self._compute_loss
       positional_embedding: a boolean
       input_full_attention: a boolean
@@ -442,6 +464,8 @@ class Unitransformer(object):
     self.name = name
     self.layout = layout
     self.mesh_shape = mesh_shape
+    self.ensemble_dim = (
+        mtf.Dimension("ensemble", ensemble) if ensemble else None)
     if loss_fn:
       self._compute_loss = loss_fn
     self.positional_embedding = positional_embedding
@@ -501,12 +525,18 @@ class Unitransformer(object):
       logits: a Tensor with shape [<batch_dims>, length_dim, output_vocab_dim]
     """
     mesh = inputs.mesh
+    if self.ensemble_dim and self.ensemble_dim not in inputs.shape.dims:
+      # Training an ensemble where all models are trained on the same examples.
+      inputs = mtf.broadcast(inputs, [self.ensemble_dim] + inputs.shape.dims)
+      if targets:
+        targets = mtf.broadcast(
+            targets, [self.ensemble_dim] + targets.shape.dims)
     if "embedding" in context.shared_params:
       embedding_weights = context.shared_params["embedding"]
     else:
       embedding_weights = mtf.layers.embedding_weights(
           mesh, self.input_vocab_dim, self.model_dim, context.variable_dtype,
-          name="embedding")
+          name="embedding", ensemble_dim=self.ensemble_dim)
     x = mtf.gather(embedding_weights, inputs, self.input_vocab_dim)
     if self.positional_embedding:
       if "positional_embedding" in context.shared_params:
@@ -514,7 +544,7 @@ class Unitransformer(object):
       else:
         pos_emb_var = mtf.layers.embedding_weights(
             mesh, self.max_length_dim, self.model_dim, context.variable_dtype,
-            "positional_embedding")
+            "positional_embedding", ensemble_dim=self.ensemble_dim)
       if (context.length_dim is not None and
           context.length_dim.size > self.max_length_dim.size):
         message = (
@@ -554,6 +584,9 @@ class Unitransformer(object):
     if targets is not None and context.losses is not None:
       context.losses.append(
           self._compute_loss(context, logits, targets, self.output_vocab_dim))
+    if self.ensemble_dim:
+      logits = reduce_ensemble_logits(
+          logits, self.ensemble_dim, self.output_vocab_dim)
     return logits
 
   def call_simple(self,
@@ -567,6 +600,7 @@ class Unitransformer(object):
                   position=None,
                   encoder_output=None,
                   encoder_sequence_id=None,
+                  encoder_inputs=None,
                   shared_params=None,
                   layer_outputs=None,
                   encoder_layer_outputs=None):
@@ -587,6 +621,7 @@ class Unitransformer(object):
       position: an optional Tensor
       encoder_output: an optional Tensor
       encoder_sequence_id: an optional Tensor
+      encoder_inputs: an optional Tensor
       shared_params: an optional dictionary
       layer_outputs: an optional list to append Tensor layer activations to
       encoder_layer_outputs: optional - readonly list of tensor activations when
@@ -647,7 +682,9 @@ class Unitransformer(object):
         layer_outputs=layer_outputs,
         encoder_layer_outputs=encoder_layer_outputs,
         write_priority=write_priority,
-        read_priority=read_priority)
+        read_priority=read_priority,
+        inputs=inputs,
+        encoder_inputs=encoder_inputs)
     with tf.variable_scope(self.name):
       logits = self._call_internal(context, inputs, targets)
     if compute_loss:
@@ -665,6 +702,7 @@ class Unitransformer(object):
                             variable_dtype=mtf.VariableDType(tf.float32),
                             encoder_output=None,
                             encoder_sequence_id=None,
+                            encoder_inputs=None,
                             shared_params=None,
                             has_partial_sequences=True,
                             encoder_layer_outputs=None,
@@ -691,6 +729,7 @@ class Unitransformer(object):
       variable_dtype: a mtf.VariableDType
       encoder_output: an optional Tensor
       encoder_sequence_id: an optional Tensor
+      encoder_inputs: an optional Tensor
       shared_params: an optional dictionary
       has_partial_sequences: a boolean
       encoder_layer_outputs: optional - readonly list of tensor activations when
@@ -739,7 +778,9 @@ class Unitransformer(object):
         shared_params=shared_params,
         encoder_layer_outputs=encoder_layer_outputs,
         write_priority=write_priority,
-        read_priority=read_priority)
+        read_priority=read_priority,
+        inputs=inputs,
+        encoder_inputs=encoder_inputs)
 
     shifted_inputs = mtf.shift(inputs, offset=1, dim=length_dim, wrap=False)
     with tf.variable_scope(self.name):
@@ -775,6 +816,7 @@ class Unitransformer(object):
 
     def body_fn(position, ids, *states):
       """One step in the decode loop."""
+      inputs_this_step = mtf.gather(ids, position - 1, length_dim)
       context_incremental = Context(
           model=self,
           mesh=inputs.mesh,
@@ -792,8 +834,9 @@ class Unitransformer(object):
           shared_params=shared_params,
           encoder_layer_outputs=encoder_layer_outputs,
           write_priority=write_priority,
-          read_priority=position)
-      inputs_this_step = mtf.gather(ids, position - 1, length_dim)
+          read_priority=position,
+          inputs=inputs_this_step,
+          encoder_inputs=encoder_inputs)
       with tf.variable_scope(self.name, reuse=True):
         logits = self._call_internal(context_incremental, inputs_this_step)
         if never_end:
@@ -840,6 +883,7 @@ class Unitransformer(object):
                   variable_dtype=mtf.VariableDType(tf.float32),
                   encoder_output=None,
                   encoder_sequence_id=None,
+                  encoder_inputs=None,
                   alpha=0.6,
                   shared_params=None,
                   encoder_layer_outputs=None):
@@ -852,6 +896,7 @@ class Unitransformer(object):
       variable_dtype: a mtf.VariableDType
       encoder_output: an optional Tensor
       encoder_sequence_id: an optional Tensor
+      encoder_inputs: an optional Tensor
       alpha: a floating point value (length bonus)
       shared_params: an optional dictionary
       encoder_layer_outputs: optional - readonly list of tensor activations when
@@ -901,7 +946,9 @@ class Unitransformer(object):
         shared_params=shared_params,
         encoder_layer_outputs=encoder_layer_outputs,
         write_priority=write_priority,
-        read_priority=read_priority)
+        read_priority=read_priority,
+        inputs=inputs,
+        encoder_inputs=encoder_inputs)
 
     shifted_inputs = mtf.shift(inputs, offset=1, dim=length_dim, wrap=False)
     with tf.variable_scope(self.name):
@@ -914,6 +961,7 @@ class Unitransformer(object):
 
     def logits_fn(step_num, ids, states):
       """logits_fn for mtf.beam_search.beam_search()."""
+      inputs_this_step = mtf.gather(ids, step_num - 1, length_dim)
       context_incremental = Context(
           model=self,
           mesh=inputs.mesh,
@@ -931,8 +979,9 @@ class Unitransformer(object):
           shared_params=shared_params,
           encoder_layer_outputs=encoder_layer_outputs,
           write_priority=write_priority,
-          read_priority=step_num)
-      inputs_this_step = mtf.gather(ids, step_num - 1, length_dim)
+          read_priority=step_num,
+          inputs=inputs_this_step,
+          encoder_inputs=encoder_inputs)
       with tf.variable_scope(self.name, reuse=True):
         logits = self._call_internal(context_incremental, inputs_this_step)
       return mtf.to_float(logits), context_incremental.new_states
@@ -948,7 +997,7 @@ class Unitransformer(object):
         mesh_shape=self.mesh_shape,
         layout=self.layout)
     return mtf.gather(
-        beams, mtf.constant(inputs.mesh, 0, dtype=tf.int32), beam_dim)
+        beams, mtf.constant(inputs.mesh, 2, dtype=tf.int32), beam_dim)
 
 
 @gin.configurable
@@ -997,13 +1046,15 @@ class Bitransformer(object):
             self.encoder.input_vocab_dim,
             self.encoder.model_dim,
             variable_dtype,
-            name="embedding")
+            name="embedding",
+            ensemble_dim=self.encoder.ensemble_dim)
         if (self.encoder.positional_embedding
             and self.decoder.positional_embedding
             and self.encoder.max_length_dim == self.decoder.max_length_dim):
           shared_params["positional_embedding"] = mtf.layers.embedding_weights(
               mesh, self.encoder.max_length_dim, self.encoder.model_dim,
-              variable_dtype, "positional_embedding")
+              variable_dtype, "positional_embedding",
+              ensemble_dim=self.encoder.ensemble_dim)
     return shared_params
 
   def call_simple(self,
@@ -1068,6 +1119,7 @@ class Bitransformer(object):
         subsequence_id=decoder_subsequence_id,
         encoder_output=encoder_output,
         encoder_sequence_id=encoder_sequence_id,
+        encoder_inputs=inputs,
         position=decoder_position,
         shared_params=shared_params,
         encoder_layer_outputs=encoder_layer_outputs)
@@ -1135,6 +1187,7 @@ class Bitransformer(object):
           variable_dtype=variable_dtype,
           encoder_output=encoder_output,
           encoder_sequence_id=encoder_sequence_id,
+          encoder_inputs=inputs,
           shared_params=shared_params,
           has_partial_sequences=False,
           encoder_layer_outputs=encoder_layer_outputs)
@@ -1159,6 +1212,7 @@ class Bitransformer(object):
           variable_dtype=variable_dtype,
           encoder_output=encoder_output,
           encoder_sequence_id=encoder_sequence_id,
+          encoder_inputs=inputs,
           alpha=alpha,
           shared_params=shared_params,
           encoder_layer_outputs=encoder_layer_outputs)
@@ -1471,3 +1525,49 @@ def text2self_inputs_mask(ids, eos_id=1):
   length_dim = ids.shape.dims[-1]
   return mtf.equal(mtf.mod(mtf.cumsum(mtf.to_int32(mtf.equal(ids, eos_id)),
                                       length_dim, exclusive=True), 2), 0)
+
+
+@gin.configurable
+def reduce_ensemble_logits_select(logits, ensemble_dim, vocab_dim, model_id=0):
+  """Select logits from the model_id-th element of the ensemble."""
+  del vocab_dim
+  return mtf.gather(logits, model_id % ensemble_dim.size, ensemble_dim)
+
+
+@gin.configurable
+def reduce_ensemble_logits_mean_prob(logits, ensemble_dim, vocab_dim):
+  """Probabilities equal to arithmetic mean probability across models."""
+  probs = mtf.softmax(logits, reduced_dim=vocab_dim)
+  probs = mtf.reduce_mean(probs, reduced_dim=ensemble_dim)
+  return mtf.log(mtf.maximum(probs, 1e-20))
+
+
+@gin.configurable
+def reduce_ensemble_logits_mean_logit(logits, ensemble_dim, vocab_dim):
+  """Probabilities proportional to geometric mean probability across models."""
+  del vocab_dim
+  return mtf.reduce_mean(logits, reduced_dim=ensemble_dim)
+
+
+@gin.configurable
+def reduce_ensemble_logits(logits, ensemble_dim, vocab_dim,
+                           reduce_fn=reduce_ensemble_logits_mean_prob):
+  """Configurable reduction function for decoding from an ensemble.
+
+  reduce_fn is a function which takes:
+     a logits tensor containing ensemble_dim (logits from all models)
+     ensemble_dim
+     vocab_dim
+  and returns a logits tensor without ensemble_dim.
+
+  Args:
+    logits: a mtf.Tensor containing ensemble_dim
+    ensemble_dim: a mtf.Dimension
+    vocab_dim: a mtf.Dimension
+    reduce_fn: a function
+  Returns:
+    a mtf.Tensor with shape logits.shape - ensemble_dim
+  """
+  return reduce_fn(logits, ensemble_dim, vocab_dim)
+
+

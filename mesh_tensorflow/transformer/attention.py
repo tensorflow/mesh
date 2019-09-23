@@ -90,7 +90,8 @@ class AttentionParams(object):
                memory_heads_dims,
                variable_dtype,
                shared_kv=False,
-               combine_dims=True):
+               combine_dims=True,
+               ensemble_dim=None):
     """Create attention parameters.
 
     combine_dims is a hack for faster execution.  The heads and key/value
@@ -109,6 +110,7 @@ class AttentionParams(object):
       variable_dtype: a mtf.VariableDType
       shared_kv: a boolean
       combine_dims: a boolean
+      ensemble_dim: an optional Dimension
     """
     if shared_kv and key_dim != value_dim:
       raise ValueError("shared_kv requires key_dim == value_dim")
@@ -137,6 +139,11 @@ class AttentionParams(object):
         stddev=memory_input_dim.size ** -0.5)
     o_init = tf.random_normal_initializer(
         stddev=mtf.Shape(self.query_heads_dims + [value_dim]).size ** -0.5)
+    if ensemble_dim:
+      q_shape = [ensemble_dim] + q_shape
+      k_shape = [ensemble_dim] + k_shape
+      v_shape = [ensemble_dim] + v_shape
+      o_shape = [ensemble_dim] + o_shape
     self.wq = mtf.get_variable(
         mesh, "q", q_shape, initializer=q_init, dtype=variable_dtype)
     if shared_kv:
@@ -233,8 +240,8 @@ class AttentionParams(object):
     """
     if self.combine_dims:
       o = mtf.transpose(o, o.shape - self.o_dims + self.o_dims)
-      o = mtf.replace_dimensions(o, self.o_dims, self.wo.shape.dims[0])
-      reduced_dims = [self.wo.shape.dims[0]]
+      o = mtf.replace_dimensions(o, self.o_dims, self.wo.shape.dims[-2])
+      reduced_dims = [self.wo.shape.dims[-2]]
     else:
       reduced_dims = self.o_dims
     return mtf.einsum(

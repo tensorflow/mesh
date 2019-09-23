@@ -184,7 +184,8 @@ def build_model(model_type="bitransformer",
 
 @gin.configurable
 def tpu_mesh_shape(tpu_topology=gin.REQUIRED,
-                   model_parallelism=gin.REQUIRED):
+                   model_parallelism=gin.REQUIRED,
+                   ensemble_parallelism=None):
   """Create a mesh_shape for data-parallelism and model-parallelism on TPU.
 
   Example: tpu_mesh_shape("4x4", 8) -> mtf.Shape(("batch", 4), ("model", 8))
@@ -193,13 +194,20 @@ def tpu_mesh_shape(tpu_topology=gin.REQUIRED,
   Args:
     tpu_topology: a string - e.g. "2x2"
     model_parallelism: an integer - the number of cores per model replica
+    ensemble_parallelism: an optional integer - if present then create an
+      "ensemble" mesh-dimension as well, for splitting the models in an
+      ensemble.
   Returns:
     a mtf.Shape
   """
   x, y = tpu_topology.split("x")
   num_cores = int(x) * int(y) * 2
   data_parallelism = num_cores // model_parallelism
+  if ensemble_parallelism:
+    data_parallelism //= ensemble_parallelism
   dims = []
+  if ensemble_parallelism and ensemble_parallelism > 1:
+    dims.append(mtf.Dimension("ensemble", ensemble_parallelism))
   if data_parallelism > 1:
     dims.append(mtf.Dimension("batch", data_parallelism))
   if model_parallelism > 1:
@@ -222,6 +230,7 @@ def _logical_to_physical(physical_shape, mesh_shape):
     a permutation of range(mesh_shape.size) or None
   """
   mesh_shape = mesh_shape.to_integer_list
+  mesh_shape = [i for i in mesh_shape if i != 1]
   tf.logging.info("Mesh shape = %s" % mesh_shape)
   tf.logging.info("Physical shape = %s" % physical_shape)
   if len(mesh_shape) != 2:
@@ -269,7 +278,8 @@ def tpu_estimator_model_fn(model_type,
                            tpu_summaries=False,
                            predict_fn=None,
                            variable_filter=None,
-                           init_checkpoint=None):
+                           init_checkpoint=None,
+                           ensemble_inputs=None):
   """Create a TPUEstimator model function.
 
   Args:
@@ -299,6 +309,10 @@ def tpu_estimator_model_fn(model_type,
     init_checkpoint: a string, if not None then read in variables from this
       checkpoint path when initializing variables. Will only initialize
       variables that appear both in the current graph and the checkpoint.
+    ensemble_inputs: an optional integer - pass the size of the ensemble to
+      train an ensemble where each model gets different inputs.
+      You also need to configure Unitransformer.ensemble  to the right size.
+      If None, then all models are trained on the same inputs.
 
   Returns:
     a function to be passed to TPUEstimator
@@ -357,13 +371,12 @@ def tpu_estimator_model_fn(model_type,
       #   the "_<suffix>".
       feature_length = sequence_length[key.split("_")[0]]
       length_dim = mtf.Dimension("length", feature_length)
-      feature_shape = mtf.Shape([outer_batch_dim, batch_dim, length_dim])
-
+      ensemble_dims = ([mtf.Dimension("ensemble", ensemble_inputs)]
+                       if ensemble_inputs else [])
+      feature_shape = mtf.Shape(
+          ensemble_dims + [outer_batch_dim, batch_dim, length_dim])
       x = tf.to_int32(features[key])
-      x = tf.reshape(
-          x, [outer_batch_size,
-              batch_size // outer_batch_size, length_dim.size]
-      )
+      x = tf.reshape(x, feature_shape.to_integer_list)
       if not use_tpu:
         tf.logging.info("feature %s : %s" % (key, x))
         x = tf.Print(
@@ -1189,7 +1202,8 @@ def run(tpu_job_name,
         optimizer=None,
         predict_fn=None,
         variable_filter=None,
-        perplexity_eval_steps=10):
+        perplexity_eval_steps=10,
+        ensemble_inputs=None):
   """Run training/eval/inference.
 
   Args:
@@ -1263,6 +1277,10 @@ def run(tpu_job_name,
       its name matches this regex. If None (default), train all trainable
       variables.
     perplexity_eval_steps: an integer - number of steps for perplexity eval
+    ensemble_inputs: an optional integer - pass the size of the ensemble to
+      train an ensemble where each model gets different inputs.
+      You also need to configure Unitransformer.ensemble  to the right size.
+      If None, then all models are trained on the same inputs.
   """
   if isinstance(sequence_length, int):
     sequence_length = {"inputs": sequence_length,
@@ -1289,6 +1307,9 @@ def run(tpu_job_name,
 
   if mode == "train" and dataset_split != "train":
     raise ValueError("mode==\"train\" requires dataset_split==\"train\"")
+
+  if mode != "train":
+    ensemble_inputs = None
 
   mesh_shape = mtf.convert_to_shape(mesh_shape)
   layout_rules = mtf.convert_to_layout_rules(layout_rules)
@@ -1337,7 +1358,8 @@ def run(tpu_job_name,
       save_checkpoints_steps=save_checkpoints_steps,
       optimizer=optimizer,
       predict_fn=predict_fn,
-      variable_filter=variable_filter)
+      variable_filter=variable_filter,
+      ensemble_inputs=ensemble_inputs)
 
   estimator = tpu_estimator.TPUEstimator(
       model_fn=model_fn,
@@ -1357,7 +1379,8 @@ def run(tpu_job_name,
       dataset = train_dataset_fn(sequence_length=sequence_length,
                                  vocabulary=vocabulary,
                                  dataset_split=dataset_split)
-      dataset = dataset.repeat().batch(batch_size, drop_remainder=True)
+      dataset = dataset.repeat().batch(
+          batch_size * (ensemble_inputs or 1), drop_remainder=True)
       dataset = dataset.prefetch(tf.data.experimental.AUTOTUNE)
       return dataset
 
@@ -1446,6 +1469,7 @@ def run(tpu_job_name,
 
     checkpoint_paths = get_checkpoint_iterator(eval_checkpoint_step, model_dir)
     for checkpoint_path in checkpoint_paths:
+      tf.logging.info("Checkpoint path %s" % checkpoint_path)
       global_step = int(get_step_from_checkpoint_path(checkpoint_path))
       if global_step == 0:
         continue
