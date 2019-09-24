@@ -4681,10 +4681,6 @@ def top_1(x, reduced_dim, dtype=tf.int32, name=None):
     indices: a Tensor with given dtype
     values: optional Tensor equal to mtf.reduce_max(x, reduced_dim=reduced_dim)
   """
-  if x.dtype == tf.bfloat16:
-    # The code below sometimes produces bad results with bfloat16
-    # TODO(noam): write a test and diagnose this.
-    x = to_float(x)
   reduced_dim = convert_to_dimension(reduced_dim)
   with tf.name_scope(name, default_name="top_1"):
     max_val = reduce_max(x, reduced_dim=reduced_dim)
