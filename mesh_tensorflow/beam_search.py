@@ -64,7 +64,7 @@ def compute_topk_scores_and_seq(sequences, scores, scores_to_gather, flags,
      selector)
   """
   unused_batch_dim, old_beam_dim, unused_length_dim = sequences.shape.dims
-  topk_indices, _ = mtf.top_k(scores, old_beam_dim, beam_dim)
+  _, topk_indices = mtf.top_k(scores, old_beam_dim, k_dim=beam_dim)
 
   selector = mtf.one_hot(topk_indices, old_beam_dim, dtype=tf.float32)
 
@@ -314,8 +314,8 @@ def beam_search(logits_fn,
           curr_scores, [batch_dim, beam_dim, major_vocab, minor_vocab])
       prefilter = mtf.Dimension("prefilter", num_prefilter or double_beam.size)
       # shape = [batch_dim, beam_dim, major_vocab, prefilter]
-      top_minor_vocab_ids, top_scores = mtf.top_k(
-          curr_scores, reduced_dim=minor_vocab, new_dim=prefilter)
+      top_scores, top_minor_vocab_ids = mtf.top_k(
+          curr_scores, reduced_dim=minor_vocab, k_dim=prefilter)
       combined = mtf.Dimension(
           "combined", beam_dim.size * major_vocab.size * prefilter.size)
       top_scores = mtf.reshape(top_scores, [batch_dim, combined])
@@ -323,8 +323,8 @@ def beam_search(logits_fn,
           top_minor_vocab_ids, [batch_dim, combined])
       # shpae = [batch_dim, double_beam]
       # ids are indices representing (beam, major_vocab, prefilter)
-      top_combined_ids, top_scores = mtf.top_k(
-          top_scores, reduced_dim=combined, new_dim=double_beam)
+      top_scores, top_combined_ids = mtf.top_k(
+          top_scores, reduced_dim=combined, k_dim=double_beam)
       top_minor_vocab_ids = mtf.gather(
           top_minor_vocab_ids, top_combined_ids, combined,
           output_shape=[batch_dim, double_beam])
@@ -340,8 +340,8 @@ def beam_search(logits_fn,
       # Flatten out (beam_size, vocab_size) probs into a list of possibilities
       flat_curr_scores = mtf.reshape(
           curr_scores, flat_shape, name="flatten_scores")
-      top_ids, top_scores = mtf.top_k(
-          flat_curr_scores, reduced_dim=beam_and_vocab_dim, new_dim=double_beam)
+      top_scores, top_ids = mtf.top_k(
+          flat_curr_scores, reduced_dim=beam_and_vocab_dim, k_dim=double_beam)
       # Work out what beam the top probs are in.
       top_beam_index = top_ids // vocab_dim.size
       top_ids %= vocab_dim.size  # Unflatten the ids

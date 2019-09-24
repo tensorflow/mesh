@@ -713,7 +713,7 @@ def _top_2_gating(
 
   # FIND TOP 2 EXPERTS PER POSITON
   # Find the top expert for each position. shape=[batch, group]
-  index_1, gate_1 = mtf.top_1(raw_gates, experts_dim)
+  gate_1, index_1 = mtf.top_1(raw_gates, experts_dim)
   # [batch, group, experts]
   mask_1 = mtf.one_hot(index_1, experts_dim, dtype=raw_gates.dtype)
   density_1_proxy = raw_gates
@@ -723,7 +723,7 @@ def _top_2_gating(
     density_1_proxy *= mtf.to_float(mtf.equal(importance, 1.0))
   gates_without_top_1 = raw_gates * (1.0 - mask_1)
   # [batch, group]
-  index_2, gate_2 = mtf.top_1(gates_without_top_1, experts_dim)
+  gate_2, index_2 = mtf.top_1(gates_without_top_1, experts_dim)
   # [batch, group, experts]
   mask_2 = mtf.one_hot(index_2, experts_dim, dtype=raw_gates.dtype)
   if importance is not None:

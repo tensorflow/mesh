@@ -4669,78 +4669,133 @@ def reduce_any(x,
                          name=name or "reduce_any"), tf.bool)
 
 
-def top_1(x, reduced_dim, dtype=tf.int32, name=None):
-  """Argmax and Max.
+class TopKOperation(Operation):
+  """Compute top k indices and values - see comment on top_k() below."""
 
-  Args:
-    x: a Tensor
-    reduced_dim: a Dimension in x.shape.dims
-    dtype: a tf.dtype (for the output)
-    name: an optional string
-  Returns:
-    indices: a Tensor with given dtype
-    values: optional Tensor equal to mtf.reduce_max(x, reduced_dim=reduced_dim)
-  """
-  reduced_dim = convert_to_dimension(reduced_dim)
-  with tf.name_scope(name, default_name="top_1"):
-    max_val = reduce_max(x, reduced_dim=reduced_dim)
-    is_max = to_float(equal(x, max_val))
-    pos = mtf_range(x.mesh, reduced_dim, tf.float32)
-    ret = reduce_max(is_max * pos, reduced_dim=reduced_dim)
-    ret = cast(ret, dtype)
-    return ret, max_val
+  def __init__(self, x, reduced_dim, k_dim, name=None):
+    super(TopKOperation, self).__init__([x], name=name or "top_k")
+    self._value_dtype = x.dtype
+    if reduced_dim not in x.shape.dims:
+      raise ValueError("reduced dim %s must be in x.shape %s"
+                       % (reduced_dim, x.shape))
+    if k_dim.size > reduced_dim.size:
+      raise ValueError("k_dim.size must be <= reduced_dim.size: %s vs %s"
+                       % (k_dim, reduced_dim))
+    output_shape = x.shape - reduced_dim + k_dim
+    self._outputs = [Tensor(self, output_shape, x.dtype),
+                     Tensor(self, output_shape, tf.int32),]
+    self._reduced_dim = reduced_dim
+    self._k_dim = k_dim
+    self._splittable_dims, self._unsplittable_dims = (
+        self._initialize_splittable_and_unsplittable_dims(
+            "splittable", [self._k_dim.name]))
+
+  def gradient(self, grad_ys):
+    dvalue = grad_ys[0]
+    indices = self.outputs[1]
+    mapping = one_hot(indices, self._reduced_dim, dtype=self._value_dtype)
+    return [einsum([dvalue, mapping], output_shape=self.inputs[0].shape)]
+
+  def lower(self, lowering):
+    mesh_impl = lowering.mesh_impl(self)
+    x = self.inputs[0]
+    ndims = x.shape.ndims
+    reduced_axis = x.shape.dims.index(self._reduced_dim)
+    reduced_mesh_axis = mesh_impl.tensor_dimension_to_mesh_axis(
+        self._reduced_dim)
+    if reduced_mesh_axis is not None:
+      reduced_dim_per_shard = (
+          self._reduced_dim.size // mesh_impl.shape[reduced_mesh_axis].size)
+    else:
+      reduced_dim_per_shard = self._reduced_dim.size
+    def _slicewise_top_k(t):
+      t = tf.transpose(
+          t, [i for i in range(ndims) if i != reduced_axis] + [reduced_axis])
+      return tf.math.top_k(t, min(self._k_dim.size, reduced_dim_per_shard))
+    values, indices = mesh_impl.slicewise(_slicewise_top_k, lowering.tensors[x])
+    if reduced_mesh_axis is not None:
+      # indices are now indices within a shard.  Make them global indices.
+      indices = mesh_impl.slicewise(
+          lambda idxs, pcoord: idxs + pcoord * reduced_dim_per_shard,
+          indices, mesh_impl.laid_out_pcoord(reduced_mesh_axis))
+      # concatenate values and indices across processors,
+      #   duplicating the result across mesh axis `reduced_mesh_axis`.
+      values = mesh_impl.allconcat(values, reduced_mesh_axis, ndims - 1)
+      indices = mesh_impl.allconcat(indices, reduced_mesh_axis, ndims - 1)
+      # final reduction to find top k among all shards
+      def _global_top_k(vals, global_indices):
+        vals, local_indices = tf.math.top_k(vals, self._k_dim.size)
+        return vals, tf.gather(global_indices,
+                               local_indices,
+                               batch_dims=ndims-1)
+      values, indices = mesh_impl.slicewise(_global_top_k, values, indices)
+    lowering.set_tensor_lowering(self.outputs[0], values)
+    lowering.set_tensor_lowering(self.outputs[1], indices)
 
 
-def argmax(x, reduced_dim, dtype=tf.int32, name=None):
-  reduced_dim = convert_to_dimension(reduced_dim)
-  return top_1(x, reduced_dim, dtype, name)[0]
-
-
-def top_k(x, reduced_dim, new_dim, dtype=tf.int32, name=None):
-  """Like tf.top_k.
+def top_k(x, reduced_dim, k_dim, name=None):
+  """Like tf.math.top_k.
 
   This operation returns two tensors with the same shape.  The output shape
-  is identical to the shape of x, except that reduced_dim is replaced by
-  new_dim.
+  is identical to the shape of x, except that reduced_dim is removed and
+  k_dim is inserted at the end.
 
   Args:
     x: a Tensor
     reduced_dim: a Dimension in x.shape.dims.
-    new_dim: a Dimension.  The size determines k.
-    dtype: optional dtype for indices.
+    k_dim: a Dimension.  The size determines k.
     name: optional string.
   Returns:
-    indices: a Tensor with given dtype.
     values: a Tensor with same type as x.
+    indices: a Tensor with dtype tf.int32
+  """
+  op = TopKOperation(x, reduced_dim, k_dim, name=name)
+  return op.outputs[0], op.outputs[1]
+
+
+def top_1(x, reduced_dim, name=None):
+  """Max and Argmax.
+
+  Args:
+    x: a Tensor
+    reduced_dim: a Dimension in x.shape.dims
+    name: an optional string
+  Returns:
+    values: Tensor equal to mtf.reduce_max(x, reduced_dim=reduced_dim)
+    indices: a Tensor with given dtype
+  """
+  one_dim = Dimension("_one", 1)
+  values, indices = top_k(x, reduced_dim, one_dim, name=name)
+  values = reshape(values, values.shape - one_dim)
+  indices = reshape(indices, indices.shape - one_dim)
+  return values, indices
+
+
+def argmax(x, reduced_dim, name=None):
+  """Compute argmax.
+
+  Args:
+    x: a Tensor
+    reduced_dim: a Dimension in x.shape.dims
+    name: an optional string
+  Returns:
+    A Tensor with shape x.shape - reduced_dim and dtype tf.int32.
   """
   reduced_dim = convert_to_dimension(reduced_dim)
-  new_dim = convert_to_dimension(new_dim)
-  indices = []
-  values = []
-  k = new_dim.size
-  with tf.name_scope(name, default_name="top_k"):
-    for i in xrange(k):
-      max_index, max_val = top_1(x, reduced_dim, dtype)
-      indices.append(max_index)
-      values.append(max_val)
-      if i + 1 < k:
-        x += one_hot(max_index, reduced_dim, on_value=-1e9, dtype=x.dtype)
-  axis = x.shape.dims.index(reduced_dim)
-  return stack(indices, new_dim.name, axis), stack(values, new_dim.name, axis)
+  return top_1(x, reduced_dim, name=name)[1]
 
 
-def sample_with_temperature(x, dim, temperature=1.0, dtype=tf.int32, name=None):
+def sample_with_temperature(x, dim, temperature=1.0, name=None):
   """Either argmax or random sampling.
 
   Args:
     x: a Tensor.
     dim: a Dimension in x.shape.dims
     temperature: a float  0.0=argmax 1.0=random
-    dtype: a tf.dtype (for the output)
     name: an optional string
 
   Returns:
-    a Tensor with type dtype.
+    a Tensor with type tf.int32.
   """
   dim = convert_to_dimension(dim)
   with tf.name_scope(name, default_name="sample_with_temperature"):
@@ -4759,7 +4814,7 @@ def sample_with_temperature(x, dim, temperature=1.0, dtype=tf.int32, name=None):
               maxval=1.,
               dtype=x.dtype)))
       x += g * temperature
-    return argmax(x, dim, dtype, name)
+    return argmax(x, dim, name)
 
 
 def add(x1, x2, output_shape=None, name=None):

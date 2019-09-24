@@ -505,7 +505,7 @@ class NthSmallestTest(tf.test.TestCase):
     mtf_outputs = mtf.nth_smallest_element(
         mtf_inputs, n, reduced_dim, reverse, "test_nth_smallest")
     mesh_impl = mtf.placement_mesh_impl.PlacementMeshImpl(
-        shape="all:2", layout={"a:all"}, devices=["", ""])
+        shape="all:2", layout="a:all", devices=["", ""])
     lowering = mtf.Lowering(graph, {mesh: mesh_impl})
     actual_outputs = lowering.export_to_tf_tensor(mtf_outputs)
     self.assertAllEqual(self.evaluate(actual_outputs),
@@ -532,11 +532,65 @@ class NthSmallestTest(tf.test.TestCase):
     mtf_outputs = mtf.nth_smallest_element(
         mtf_inputs, n, reduced_dim, reverse, "test_nth_smallest")
     mesh_impl = mtf.placement_mesh_impl.PlacementMeshImpl(
-        shape="all:2", layout={"a:all"}, devices=["", ""])
+        shape="all:2", layout="a:all", devices=["", ""])
     lowering = mtf.Lowering(graph, {mesh: mesh_impl})
     actual_outputs = lowering.export_to_tf_tensor(mtf_outputs)
     self.assertAllEqual(self.evaluate(actual_outputs),
                         self.evaluate(expected_outputs))
+
+
+class TopKTest(tf.test.TestCase):
+
+  def testTopK(self):
+    graph = mtf.Graph()
+    mesh = mtf.Mesh(graph, "my_mesh")
+    a_dim = mtf.Dimension("a", 6)
+    b_dim = mtf.Dimension("b", 2)
+    inputs = tf.constant([[1, 10],
+                          [2, 9],
+                          [3, 8],
+                          [4, 7],
+                          [5, 6],
+                          [6, 5]],
+                         dtype=tf.float32)
+    k_dim = mtf.Dimension("k", 2)
+    d_values = tf.constant([[11, 12], [13, 14]], dtype=tf.float32)
+    reduced_dim = a_dim
+    expected_values = tf.constant([[6, 5], [10, 9]], dtype=tf.float32)
+    expected_indices = tf.constant([[5, 4], [0, 1]])
+    expected_d_inputs = tf.constant([[0, 13],
+                                     [0, 14],
+                                     [0, 0],
+                                     [0, 0],
+                                     [12, 0],
+                                     [11, 0]],
+                                    dtype=tf.float32)
+
+    mtf_inputs = mtf.import_fully_replicated(
+        mesh, inputs, shape=mtf.Shape([a_dim, b_dim]))
+    mtf_d_values = mtf.import_tf_tensor(
+        mesh, d_values, shape=mtf.Shape([b_dim, k_dim]))
+    mtf_values, mtf_indices = mtf.top_k(mtf_inputs,
+                                        reduced_dim=reduced_dim,
+                                        k_dim=k_dim,
+                                        name="test_nth_smallest")
+    [mtf_d_inputs] = mtf.gradients([mtf_values], [mtf_inputs], [mtf_d_values])
+    mesh_impl = mtf.placement_mesh_impl.PlacementMeshImpl(
+        shape="rows:2,cols:2", layout="a:rows,b:cols", devices=["", "", "", ""])
+    lowering = mtf.Lowering(graph, {mesh: mesh_impl})
+    actual_values = lowering.export_to_tf_tensor(mtf_values)
+    actual_indices = lowering.export_to_tf_tensor(mtf_indices)
+    actual_d_inputs = lowering.export_to_tf_tensor(mtf_d_inputs)
+    actual_inputs = lowering.export_to_tf_tensor(mtf_inputs)
+    self.assertAllEqual(self.evaluate(actual_inputs),
+                        self.evaluate(inputs))
+    self.assertAllEqual(self.evaluate(actual_values),
+                        self.evaluate(expected_values))
+    self.assertAllEqual(self.evaluate(actual_indices),
+                        self.evaluate(expected_indices))
+    self.assertAllEqual(self.evaluate(actual_d_inputs),
+                        self.evaluate(expected_d_inputs))
+
 
 if __name__ == "__main__":
   tf.test.main()
