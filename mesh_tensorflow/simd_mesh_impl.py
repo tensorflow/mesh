@@ -647,7 +647,7 @@ def tile_2d(physical_shape, tile_shape,
       #   one of the tile dimensions is 1, so the last chip is not adjacent
       #   to the first chip.
       core_in_tile = logical_pnum % (t0 * t1 * p2)
-      core_on_chip = core_in_tile // t0 * t1
+      core_on_chip = core_in_tile // (t0 * t1)
       if core_on_chip == 0:
         logical_pos_in_tile = core_in_tile
       else:
