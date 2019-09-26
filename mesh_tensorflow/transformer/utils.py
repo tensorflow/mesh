@@ -403,6 +403,9 @@ def tpu_estimator_model_fn(model_type,
             features=mtf_features,
             variable_dtype=get_variable_dtype())
       elif isinstance(transformer_model, transformer.Unitransformer):
+        # pad so that there is enough room for the targets
+        inputs = mtf.pad(
+            inputs, [0, sequence_length["targets"]], length_dim.name)
         mtf_samples = transformer_model.sample_autoregressive(
             inputs, variable_dtype=get_variable_dtype(),
             remove_partial_sequences=True)
