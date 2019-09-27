@@ -5132,14 +5132,18 @@ def pnum_to_processor_coordinates(mesh_shape, pnum):
   """Coordinates of a processor in the mesh.
 
   Args:
-    mesh_shape: a Shape
+    mesh_shape: a Shape or a list of integers
     pnum: an integer less than len(mesh_shape)
 
   Returns:
     a list of integers with length len(mesh_shape)
   """
+  if isinstance(mesh_shape, Shape):
+    mesh_shape = mesh_shape.to_integer_list
+  if not isinstance(mesh_shape, list):
+    raise ValueError("mesh_shape must be a Shape or a list of integers")
   ret = []
-  for dimsize in mesh_shape.to_integer_list[::-1]:
+  for dimsize in mesh_shape[::-1]:
     ret.append(pnum % dimsize)
     pnum //= dimsize
   return ret[::-1]
@@ -5149,15 +5153,19 @@ def processor_coordinates_to_pnum(mesh_shape, coord):
   """Inverse of pnum_to_processor_coordinates.
 
   Args:
-    mesh_shape: a Shape
+    mesh_shape: a Shape or a list of integers
     coord: a list of integers with length len(mesh_shape)
 
   Returns:
     an integer less than len(mesh_shape)
   """
+  if isinstance(mesh_shape, Shape):
+    mesh_shape = mesh_shape.to_integer_list
+  if not isinstance(mesh_shape, list):
+    raise ValueError("mesh_shape must be a Shape or a list of integers")
   ret = 0
   multiplier = 1
-  for c, d in zip(coord[::-1], mesh_shape.to_integer_list[::-1]):
+  for c, d in zip(coord[::-1], mesh_shape[::-1]):
     ret += multiplier * c
     multiplier *= d
   return ret

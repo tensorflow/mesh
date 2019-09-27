@@ -45,6 +45,19 @@ class SimdMeshImplTest(parameterized.TestCase):
                      mtf.Shape([expected_outer_dim, expected_inner_dim]))
     self.assertCountEqual(logical_to_physical, list(range(num_cores)))
 
+  @parameterized.parameters(
+      ([128], [8, 8, 2]),
+      ([8, 16], [8, 8, 2]),
+      ([32, 4], [8, 8, 2]),
+      ([2, 32, 4], [256]),
+      ([4, 4, 8], [8, 8, 2]),
+  )
+  def testLogicalToPhysical(self, physical_shape, logical_shape):
+    logical_to_physical = mtf.simd_mesh_impl.auto_logical_to_physical_tpu(
+        physical_shape, logical_shape)
+    self.assertCountEqual(
+        logical_to_physical, list(range(mtf.list_product(physical_shape))))
+
 
 if __name__ == "__main__":
   tf.test.main()

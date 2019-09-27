@@ -20,7 +20,6 @@ from __future__ import division
 from __future__ import print_function
 
 import functools
-import math
 import os
 import re
 
@@ -215,51 +214,6 @@ def tpu_mesh_shape(tpu_topology=gin.REQUIRED,
   return mtf.Shape(dims)
 
 
-def _logical_to_physical(physical_shape, mesh_shape):
-  """Mapping from logical mesh to physical TPU cores.
-
-  This is to create the logical_to_physical mapping for SimdMeshImpl.  For 2d
-  meshes, we use a tiled layout with the second logical mesh-dimension
-  corresponding to position within a tile.  This tends to give better
-  performance.  For non-2d meshes, we use the default mapping.
-
-  Args:
-    physical_shape: a list of integers - the physical mesh shape
-    mesh_shape: a mtf.Shape
-  Returns:
-    a permutation of range(mesh_shape.size) or None
-  """
-  mesh_shape = mesh_shape.to_integer_list
-  mesh_shape = [i for i in mesh_shape if i != 1]
-  tf.logging.info("Mesh shape = %s" % mesh_shape)
-  tf.logging.info("Physical shape = %s" % physical_shape)
-  if len(mesh_shape) != 2:
-    tf.logging.info("Not using tiled layout")
-    return None
-  # Use "tiled" mapping of logical mesh to physical mesh.
-  # The first logical-mesh dimension corresponds to which phyiscal tile
-  # and the second logical-mesh dimension corresponds to location within
-  # a tile.
-  tile_size = mesh_shape[1] // 2  # size in chips (each with 2 cores)
-  # If the tile size (in chips) is equal to one of the physical dimensions,
-  #   then use long thin tiles corresponding to that dimension.
-  # Otherwise, use approximately square tiles.
-  if tile_size == physical_shape[0]:
-    tile_shape = [tile_size, 1]
-  elif tile_size == physical_shape[1]:
-    tile_shape = [1, tile_size]
-  else:
-    lg_tile_size = int(math.log(tile_size, 2))
-    t0 = 2 ** (lg_tile_size // 2)
-    t1 = tile_size // t0
-    tile_shape = [t0, t1]
-  tf.logging.info("Tile shape = %s" % tile_shape)
-  _, logical_to_physical = mtf.simd_mesh_impl.tile_2d(
-      physical_shape, tile_shape)
-  tf.logging.info("logical_to_physical = %s" % (logical_to_physical,))
-  return logical_to_physical
-
-
 @gin.configurable
 def tpu_estimator_model_fn(model_type,
                            transformer_model,
@@ -347,7 +301,8 @@ def tpu_estimator_model_fn(model_type,
       mesh_devices = [""] * mesh_shape.size
       physical_shape = list(
           params["context"].device_assignment.topology.mesh_shape)
-      logical_to_physical = _logical_to_physical(physical_shape, mesh_shape)
+      logical_to_physical = mtf.simd_mesh_impl.auto_logical_to_physical_tpu(
+          mesh_shape.to_integer_list, physical_shape)
       mesh_impl = mtf.simd_mesh_impl.SimdMeshImpl(
           mesh_shape, layout_rules, mesh_devices, ctx.device_assignment,
           logical_to_physical=logical_to_physical)

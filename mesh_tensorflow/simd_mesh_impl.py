@@ -19,6 +19,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import math
 import os
 
 from mesh_tensorflow import ops_with_redefined_builtins as mtf
@@ -54,6 +55,7 @@ class SimdMeshImpl(mtf.MeshImpl):
         from logical cores to "physical" cores, where the physical cores are
         listed in lexicographic order in the physical mesh, and the logical
         cores are listed in lexicographic order in the logical mesh.
+        Default is lexicographic order.
       allreduce_in_bfloat16_max_group_size: an integer.  Allreduces of bfloat16
         tensors are done in float32 if the group size exceeds this value.
     """
@@ -64,6 +66,7 @@ class SimdMeshImpl(mtf.MeshImpl):
     tf.logging.info("SimdMeshImpl init: {0} {1}".format(shape, layout))
     tf.logging.info("Device Assignment: {0}".format(device_assignment))
     if logical_to_physical is None:
+      # TODO(noam): maybe use auto_logical_to_physical_tpu() here
       logical_to_physical = list(range(self.size))
     if sorted(logical_to_physical) != list(range(self.size)):
       raise ValueError(
@@ -572,6 +575,16 @@ class SimdMeshImpl(mtf.MeshImpl):
 def _ring_2d(m, n):
   """Ring-order of a mxn mesh.
 
+  If m and n are both even, then we generate a ring like this:
+
+     0 -- 1 -- 2 -- 3
+     |    |    |    |
+     15-- 6 -- 5 -- 4
+     |    |    |    |
+     14-- 7 -- 8 -- 9
+     |    |    |    |
+     13-- 12-- 11-- 10
+
   Args:
     m: an integer
     n: an integer
@@ -676,3 +689,112 @@ def tile_2d(physical_shape, tile_shape,
         [mtf.Dimension(outer_name, int(num_tiles)),
          mtf.Dimension(inner_name, int(tile_size))])
   return mesh_shape, logical_to_physical
+
+
+def auto_logical_to_physical_tpu(logical_shape,
+                                 physical_shape,
+                                 return_coordinates=False):
+  """Set up a mapping from logical to physical cores for TPU.
+
+  We will try to set up a mapping so that allreduce operations are relatively
+  fast, prioritizing the later dimensions in the mesh_shape.
+
+  Example:
+
+  auto_logical_to_physical_tpu(logical_shape=[16, 8], physical_shape=[8, 8, 2])
+
+  Heuristics in this function subject to change.
+
+  Args:
+    logical_shape: a list of integers
+    physical_shape: a list of integers - typically [X, Y, cores]
+    return_coordinates: a boolean - return a list of integer lists (coordinates)
+       instead of a list of processor indices
+
+  Returns:
+    logical_to_physical: a permutation of range(product(physical_shape)))
+  """
+  if mtf.list_product(logical_shape) != mtf.list_product(physical_shape):
+    raise ValueError(
+        "physical and logical shapes must have the same product "
+        "physical_shape=%s logical_shape=%s" % (physical_shape, logical_shape))
+  # drop logical dimensions of size 1
+  logical_shape = [i for i in logical_shape if i != 1]
+  num_cores = mtf.list_product(logical_shape)
+  # For physical shapes different from what we are used to [2^a, 2^b, 2],
+  #   return a simple default value (a lexicographic ordering)
+  def _default_value():
+    default = list(range(num_cores))
+    if return_coordinates:
+      default = [mtf.pnum_to_processor_coordinates(i) for i in default]
+    return default
+  if len(physical_shape) != 3:
+    return _default_value()
+  p0, p1, p2 = physical_shape
+  if p2 != 2:
+    return _default_value
+  for dimsize in [p0, p1]:
+    # if dimsize not a power of 2, give up
+    if dimsize & (dimsize - 1):
+      return _default_value()
+  # At this point, the physical shape has at least 1x1x2=2 cores, so there
+  #   must be at least one logical dimension.
+  assert logical_shape
+  if len(logical_shape) == 1:
+    # ring of p0 x p1 chips
+    ring = _ring_2d(p0, p1)
+    logical_to_physical = []
+    for logical_pnum in range(num_cores):
+      # Go through all chips using core 0, then go through all chips
+      #   backwards using core 1.  This is better in the case where
+      #   one of the tile dimensions is 1, so the last chip is not adjacent
+      #   to the first chip.
+      core_on_chip = logical_pnum // (p0 * p1)
+      if core_on_chip == 0:
+        chip_num = logical_pnum
+      else:
+        chip_num = num_cores - 1 - logical_pnum
+      i, j = ring[chip_num]
+      logical_to_physical.append((i, j, core_on_chip))
+  else:
+    # We have a p0 x p1 rectangle of chips, which we will tile with rectangular
+    #   tiles.  The first logical dimension correspond to the number of tiles,
+    #   and the other logical dimensions will correspond to position within a
+    #   tile.
+    num_tiles = logical_shape[0]
+    tile_chips = num_cores // num_tiles // p2
+    # If we can, we make each tile occupy exactly one row or column of chips.
+    # Otherwise, we make each tile approximately square.
+    if len(logical_shape) == 2 and tile_chips == p0:
+      t0, t1 = [tile_chips, 1]
+    elif len(logical_shape) == 2 and tile_chips == p1:
+      t0, t1 = [1, tile_chips]
+    else:
+      # try to make the tile approximately square
+      lg_tile_chips = int(math.log(tile_chips, 2))
+      t0 = 2 ** (lg_tile_chips // 2)
+      # make sure that the tile fits in the mesh - i.e.
+      #   t0 <= p0
+      #   t1 == tile_chips // t0 <= p1
+      t0 = min(t0, p0)
+      t0 = max(t0, tile_chips // p1)
+      t1 = tile_chips // t0
+    # recursive call to find mapping for one tile
+    tile_logical_to_physical = auto_logical_to_physical_tpu(
+        logical_shape[1:], [t0, t1, p2], return_coordinates=True)
+    tiles_ring = _ring_2d(p0 // t0, p1 // t1)
+    logical_to_physical = []
+    for logical_pnum in range(num_cores):
+      logical_tile_num = logical_pnum // (t0 * t1 * p2)
+      logical_pos_in_tile = logical_pnum % (t0 * t1 * p2)
+      logical_to_physical.append((
+          tiles_ring[logical_tile_num][0] * t0 +
+          tile_logical_to_physical[logical_pos_in_tile][0],
+          tiles_ring[logical_tile_num][1] * t1 +
+          tile_logical_to_physical[logical_pos_in_tile][1],
+          tile_logical_to_physical[logical_pos_in_tile][2]))
+  if return_coordinates:
+    return logical_to_physical
+  else:
+    return [mtf.processor_coordinates_to_pnum(physical_shape, coord)
+            for coord in logical_to_physical]
