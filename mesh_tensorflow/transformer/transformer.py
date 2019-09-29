@@ -408,7 +408,8 @@ class Unitransformer(object):
                loss_fn=None,
                positional_embedding=True,
                input_full_attention=False,
-               loss_on_targets_only=False):
+               loss_on_targets_only=False,
+               loss_denominator=None):
     """Create a Unitransformer.
 
     Args:
@@ -440,6 +441,15 @@ class Unitransformer(object):
         This is an option for seq-to-seq as a language model.  Each example
         consists of [<inputs>, EOS=1, <targets>, EOS=1].  We zero-out the
         loss for the inputs portion of the example.
+      loss_denominator: an optional float.  The default behavior is to
+        compute the mean loss across all tokens in the batch, making the
+        denomiator the size of the targets tensor (omitting ensemble
+        dimensions).
+        Passing a float here provides an alternative denomiator.
+        One use case is that when fine-tuning a model using a much smaller
+        batch size than the original training batch, one might want to use the
+        same denominator as was used for the pretraining.  This complication
+        might be avoided by always using loss_denominator = 1.0.
     """
     self.layer_stack = layer_stack
     self.model_dim = mtf.Dimension("d_model", d_model)
@@ -471,6 +481,7 @@ class Unitransformer(object):
     self.positional_embedding = positional_embedding
     self.input_full_attention = input_full_attention
     self.loss_on_targets_only = loss_on_targets_only
+    self._loss_denominator = loss_denominator
     if self.input_full_attention and not self.autoregressive:
       raise ValueError(
           "input_full_attention only makes sense with autoregressive")
@@ -509,7 +520,7 @@ class Unitransformer(object):
     if self.loss_on_targets_only:
       weights *= mtf.cast(mtf.logical_not(text2self_inputs_mask(targets)),
                           dtype=context.activation_dtype)
-    return mtf.reduce_mean(loss * weights)
+    return mtf.reduce_sum(loss * weights) / self.loss_denominator(targets)
 
   def _call_internal(self, context, inputs, targets=None):
     """Compute logits based on inputs (all positions in parallel).
@@ -588,6 +599,27 @@ class Unitransformer(object):
       logits = reduce_ensemble_logits(
           logits, self.ensemble_dim, self.output_vocab_dim)
     return logits
+
+  def loss_denominator(self, targets):
+    """Denominator applied to losses.
+
+    This is usually the size of the targets tensor (omitting ensemble
+    dimensions).  Alternitively, it is an override value passed to the
+    class constructor.
+
+    Args:
+      targets: a mtf.Tensor
+    Returns:
+      a float
+    """
+    if self._loss_denominator is not None:
+      return float(self._loss_denominator)
+    else:
+      ret = float(targets.shape.size)
+      if self.ensemble_dim:
+        # The ensembling should not decrease the gradient to each model
+        ret /= self.ensemble_dim.size
+      return float(ret)
 
   def call_simple(self,
                   inputs,
@@ -1020,6 +1052,9 @@ class Bitransformer(object):
   def output_vocab_dim(self):
     return self.decoder.output_vocab_dim
 
+  def loss_denominator(self, targets):
+    return self.decoder.loss_denominator(targets)
+
   @property
   def z_loss(self):
     return self.decoder.z_loss
@@ -1119,7 +1154,7 @@ class Bitransformer(object):
         subsequence_id=decoder_subsequence_id,
         encoder_output=encoder_output,
         encoder_sequence_id=encoder_sequence_id,
-        encoder_inputs=inputs,
+        encoder_inputs=mtf.layers.rename_length_to_memory_length(inputs),
         position=decoder_position,
         shared_params=shared_params,
         encoder_layer_outputs=encoder_layer_outputs)
@@ -1187,7 +1222,7 @@ class Bitransformer(object):
           variable_dtype=variable_dtype,
           encoder_output=encoder_output,
           encoder_sequence_id=encoder_sequence_id,
-          encoder_inputs=inputs,
+          encoder_inputs=mtf.layers.rename_length_to_memory_length(inputs),
           shared_params=shared_params,
           has_partial_sequences=False,
           encoder_layer_outputs=encoder_layer_outputs)
@@ -1313,7 +1348,8 @@ class StudentTeacher(object):
     # Ignore losses from padding regions.
     weights = mtf.layers.weights_nonzero(
         targets, dtype=variable_dtype.activation_dtype)
-    soft_loss = mtf.reduce_mean(soft_loss * weights)
+    soft_loss = (mtf.reduce_sum(soft_loss * weights) /
+                 self.student.loss_denominator(targets))
 
     loss = (1.0 - self.fraction_soft) * hard_loss \
            + self.temperature**2 * self.fraction_soft * soft_loss
