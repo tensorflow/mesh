@@ -343,9 +343,10 @@ def tpu_estimator_model_fn(model_type,
 
     if mode == tf.estimator.ModeKeys.PREDICT:
       def _feature_shape(key):
+        feature_length = sequence_length[key.split("_")[0]]
         return mtf.Shape([
             mtf.Dimension("batch", batch_size),
-            mtf.Dimension("length", sequence_length[key])
+            mtf.Dimension("length", feature_length)
         ])
       mtf_features = {
           k: mtf.reshape(v, _feature_shape(k))
