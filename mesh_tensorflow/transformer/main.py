@@ -77,7 +77,13 @@ def main(_):
       importlib.import_module(module)
 
   tf.io.gfile.makedirs(FLAGS.model_dir)
-  with tf.io.gfile.GFile(os.path.join(FLAGS.model_dir, "command"), "w") as f:
+  suffix = 0
+  command_filename = os.path.join(FLAGS.model_dir, "command")
+  while tf.io.gfile.exists(command_filename):
+    suffix += 1
+    command_filename = os.path.join(
+        FLAGS.model_dir, "command.{}".format(suffix))
+  with tf.io.gfile.GFile(command_filename, "w") as f:
     f.write(" ".join(sys.argv))
 
   utils.parse_gin_defaults_and_flags()
