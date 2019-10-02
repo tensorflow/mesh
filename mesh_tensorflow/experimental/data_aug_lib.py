@@ -24,6 +24,7 @@ from __future__ import print_function
 
 
 import tensorflow as tf
+import tensorflow_probability as tfp
 
 
 def _truncated_normal(mean, stddev):
@@ -144,7 +145,7 @@ def _gen_rand_mask(ratio_mean, ratio_stddev, scale, shape, smoothness=0):
     pattern = tf.reduce_sum(pattern, 0)
     pattern = tf.reduce_sum(pattern, -1)
 
-  thres = tf.contrib.distributions.percentile(pattern, q=percentil_q)
+  thres = tfp.stats.percentile(pattern, q=percentil_q)
   rand_mask = tf.less(pattern, thres)
 
   return rand_mask
