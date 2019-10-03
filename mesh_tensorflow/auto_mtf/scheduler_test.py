@@ -23,7 +23,9 @@ from absl.testing import parameterized
 import mesh_tensorflow as mtf
 from mesh_tensorflow.auto_mtf import graph_interface
 from mesh_tensorflow.auto_mtf import scheduler
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
+
+tf.disable_v2_behavior()
 
 
 class SchedulerTest(parameterized.TestCase, tf.test.TestCase):

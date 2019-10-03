@@ -24,12 +24,14 @@ import os
 import gin
 
 from mesh_tensorflow.transformer import vocabulary
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
 try:
   from tensor2tensor.data_generators import text_encoder   # pylint: disable=g-import-not-at-top
   from tensor2tensor.data_generators.ops import subword_text_encoder_ops   # pylint: disable=g-import-not-at-top
 except ImportError:
   tf.logging.warning("Failed to load tensor2tensor")
+
+tf.disable_v2_behavior()
 
 
 class T2tVocabulary(vocabulary.Vocabulary):

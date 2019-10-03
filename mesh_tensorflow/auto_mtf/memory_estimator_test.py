@@ -21,7 +21,9 @@ from __future__ import print_function
 
 import mesh_tensorflow as mtf
 from mesh_tensorflow.auto_mtf import memory_estimator
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
+
+tf.disable_v2_behavior()
 
 
 class MemoryEstimatorTest(tf.test.TestCase):

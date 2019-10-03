@@ -23,7 +23,9 @@ import mesh_tensorflow as mtf
 from mesh_tensorflow.auto_mtf import layout_optimizer
 from mesh_tensorflow.auto_mtf import memory_estimator
 import six
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
+
+tf.disable_v2_behavior()
 
 
 class VariableNamesTest(tf.test.TestCase):

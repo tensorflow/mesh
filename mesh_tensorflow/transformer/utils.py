@@ -31,12 +31,14 @@ from mesh_tensorflow.transformer import dataset as transformer_dataset
 from mesh_tensorflow.transformer import transformer
 import numpy as np
 import six
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
 import tensorflow_datasets as tfds
 
 from tensorflow.contrib.tpu.python.tpu import tpu_config
 from tensorflow.contrib.tpu.python.tpu import tpu_estimator
 from tensorflow.python.ops import resources  # pylint: disable=g-direct-tensorflow-import
+
+tf.disable_v2_behavior()
 
 tf.flags.DEFINE_multi_string("gin_file", None, "Path to a Gin file.")
 tf.flags.DEFINE_multi_string("gin_param", None, "Gin parameter binding.")
@@ -901,6 +903,9 @@ def export_model(estimator, export_path, vocabulary, sequence_length):
     """Constructs input portion of Graph in serving.
 
     Input is a batch of one serialized tf.Example protos.
+
+    Returns:
+      a ServingInputReceiver
     """
     serialized_example = tf.placeholder(
         dtype=tf.string,
@@ -1088,7 +1093,7 @@ def get_checkpoint_iterator(checkpoint_step, model_dir):
       list of ints, replace each int with the path to the checkpoint with the
       closest global step. If checkpoint_step == "all", return the path of every
       checkpoint in model_dir, starting from the earliest checkpoint. If
-      checkpoint_step is None, return `tf.contrib.training.checkpoints_iterator`
+      checkpoint_step is None, return `tf.train.checkpoints_iterator`
       for `model_dir`.
     model_dir: str, directory to look for checkpoints in.
 
@@ -1127,7 +1132,7 @@ def get_checkpoint_iterator(checkpoint_step, model_dir):
     ckpt_steps = {get_step_from_checkpoint_path(p) for p in ckpt_paths}
     return [_get_checkpoint_path(s) for s in sorted(list(ckpt_steps))]
   elif checkpoint_step is None:
-    return tf.contrib.training.checkpoints_iterator(model_dir)
+    return tf.train.checkpoints_iterator(model_dir)
   elif isinstance(checkpoint_step, int):
     return [_get_checkpoint_path(_get_closest_checkpoint(checkpoint_step))]
   else:
@@ -1203,7 +1208,7 @@ def run(tpu_job_name,
       be run on the checkpoint files in `model_dir` whose global steps are
       closest to the global steps provided. If None and mode="eval", run eval
       continuously waiting for new checkpoints via
-      `tf.contrib.training.checkpoints_iterator`.
+      `tf.train.checkpoints_iterator`.
     export_path: a string, path to export the saved model
     mode: string, train/eval/perplexity_eval/infer
     iterations_per_loop: integer, steps per train loop
@@ -1273,7 +1278,7 @@ def run(tpu_job_name,
   mesh_shape = mtf.convert_to_shape(mesh_shape)
   layout_rules = mtf.convert_to_layout_rules(layout_rules)
 
-  cluster = tf.contrib.cluster_resolver.TPUClusterResolver(
+  cluster = tf.distribute.cluster_resolver.TPUClusterResolver(
       tpu if (tpu) else "", zone=tpu_zone, project=gcp_project)
 
   tf.logging.info(

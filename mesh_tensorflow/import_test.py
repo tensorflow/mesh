@@ -20,7 +20,9 @@ from __future__ import division
 from __future__ import print_function
 
 import mesh_tensorflow as mtf  # pylint: disable=unused-import
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
+
+tf.disable_v2_behavior()
 
 
 class ImportTest(tf.test.TestCase):

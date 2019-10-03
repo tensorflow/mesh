@@ -21,7 +21,9 @@ from __future__ import print_function
 
 import gin
 from mesh_tensorflow import ops_with_redefined_builtins as mtf
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
+
+tf.disable_v2_behavior()
 
 # Assuming EOS_ID is 1
 EOS_ID = 1

@@ -30,7 +30,9 @@ import gin
 import mesh_tensorflow as mtf
 from mesh_tensorflow.transformer import transformer
 
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
+
+tf.disable_v2_behavior()
 
 
 @gin.configurable
@@ -49,7 +51,7 @@ class MoE1D(transformer.TransformerLayer):
                second_policy_eval="random",
                second_threshold_train=0.2,
                second_threshold_eval=0.2):
-    self._hparams = tf.contrib.training.HParams(
+    self._hparams = HParams(
         moe_gating="top_2",
         moe_num_experts=num_experts,
         moe_loss_coef=loss_coef,
@@ -118,7 +120,7 @@ class MoE2D(transformer.TransformerLayer):
                second_policy_eval="random",
                second_threshold_train=0.2,
                second_threshold_eval=0.2):
-    self._hparams = tf.contrib.training.HParams(
+    self._hparams = HParams(
         moe_gating="top_2",
         moe_num_experts=[expert_x, expert_y],
         moe_loss_coef=loss_coef,
@@ -895,3 +897,17 @@ def _split_into_groups(n, max_group_size, mesh_dim_size):
       " = (num_groups=%d group_size=%d)" %
       (n, max_group_size, mesh_dim_size, num_groups, group_size))
   return num_groups, group_size
+
+
+class HParams(object):
+  """Replacement for tf.contrib.training.HParams.
+
+  TODO(noam): remove this class and rewrite the methods in this file.
+  """
+
+  def __init__(self, **kwargs):
+    for k, v in kwargs.items():
+      setattr(self, k, v)
+
+  def add_hparam(self, k, v):
+    setattr(self, k, v)

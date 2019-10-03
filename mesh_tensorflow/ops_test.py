@@ -22,7 +22,11 @@ from __future__ import print_function
 from absl.testing import parameterized
 
 import mesh_tensorflow as mtf
-import tensorflow as tf
+from tensor2tensor.utils import test_utils
+import tensorflow.compat.v1 as tf
+
+tf.disable_v2_behavior()
+tf.enable_eager_execution()
 
 
 class LaidOutTensor(object):
@@ -142,7 +146,7 @@ class MeshTensorFlowTest(parameterized.TestCase, tf.test.TestCase):
     self.assertEqual(graph.unique_name("a"), "a")
     self.assertEqual(graph.unique_name("A"), "A_1")
 
-  @tf.contrib.eager.run_test_in_graph_and_eager_modes()
+  @test_utils.run_in_graph_and_eager_modes()
   def testLowering(self):
     graph = mtf.Graph()
     mesh = mtf.Mesh(graph, "my_mesh")
@@ -484,7 +488,7 @@ class OperationSplittabilityTest(tf.test.TestCase):
 
 class NthSmallestTest(tf.test.TestCase):
 
-  def testNthSmallest(self):
+  def testNthLargest(self):
     graph = mtf.Graph()
     mesh = mtf.Mesh(graph, "my_mesh")
     a_dim = mtf.Dimension("a", 6)
@@ -495,15 +499,14 @@ class NthSmallestTest(tf.test.TestCase):
                           [4, 7],
                           [5, 6],
                           [6, 5]])
-    reverse = True
     n = 1  # find second largest element (since n is zero-indexed)
     reduced_dim = a_dim
     expected_outputs = tf.constant([5, 9])
 
     mtf_inputs = mtf.import_tf_tensor(
         mesh, inputs, shape=mtf.Shape([a_dim, b_dim]))
-    mtf_outputs = mtf.nth_smallest_element(
-        mtf_inputs, n, reduced_dim, reverse, "test_nth_smallest")
+    mtf_outputs = mtf.nth_largest_element(
+        mtf_inputs, n, reduced_dim, "test_nth_largest")
     mesh_impl = mtf.placement_mesh_impl.PlacementMeshImpl(
         shape="all:2", layout="a:all", devices=["", ""])
     lowering = mtf.Lowering(graph, {mesh: mesh_impl})
@@ -522,7 +525,6 @@ class NthSmallestTest(tf.test.TestCase):
                           [4, 7],
                           [5, 6],
                           [6, 5]])
-    reverse = False
     n = 0  # find smallest element (n is zero-indexed)
     reduced_dim = b_dim
     expected_outputs = tf.constant([1, 2, 3, 4, 5, 5])
@@ -530,7 +532,7 @@ class NthSmallestTest(tf.test.TestCase):
     mtf_inputs = mtf.import_tf_tensor(
         mesh, inputs, shape=mtf.Shape([a_dim, b_dim]))
     mtf_outputs = mtf.nth_smallest_element(
-        mtf_inputs, n, reduced_dim, reverse, "test_nth_smallest")
+        mtf_inputs, n, reduced_dim, "test_nth_smallest")
     mesh_impl = mtf.placement_mesh_impl.PlacementMeshImpl(
         shape="all:2", layout="a:all", devices=["", ""])
     lowering = mtf.Lowering(graph, {mesh: mesh_impl})

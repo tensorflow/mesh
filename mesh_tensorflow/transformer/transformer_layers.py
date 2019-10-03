@@ -28,7 +28,9 @@ from mesh_tensorflow import layers
 from mesh_tensorflow.transformer import attention
 from mesh_tensorflow.transformer import transformer
 
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
+
+tf.disable_v2_behavior()
 
 
 @gin.configurable

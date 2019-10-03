@@ -23,7 +23,9 @@ from absl.testing import parameterized
 import mesh_tensorflow as mtf
 from mesh_tensorflow.transformer import utils
 
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
+
+tf.disable_v2_behavior()
 
 
 class UtilsTest(parameterized.TestCase, tf.test.TestCase):

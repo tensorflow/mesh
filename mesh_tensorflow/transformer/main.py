@@ -34,7 +34,9 @@ import importlib
 import os
 import sys
 from mesh_tensorflow.transformer import utils
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
+
+tf.disable_v2_behavior()
 
 tf.flags.DEFINE_string(
     "tpu_job_name", None,

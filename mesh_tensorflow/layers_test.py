@@ -25,8 +25,12 @@ import mesh_tensorflow as mtf
 import numpy as np
 
 from tensor2tensor.layers import common_layers
+from tensor2tensor.utils import test_utils
 
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
+
+tf.disable_v2_behavior()
+tf.enable_eager_execution()
 
 
 class LayersTest(parameterized.TestCase, tf.test.TestCase):
@@ -69,7 +73,7 @@ class LayersTest(parameterized.TestCase, tf.test.TestCase):
 
     self.assertEqual(actual.shape, expected.shape)
 
-  @tf.contrib.eager.run_test_in_graph_and_eager_modes()
+  @test_utils.run_in_graph_and_eager_modes()
   def testLayerNorm(self):
     batch = 2
     channels = 3
@@ -98,7 +102,7 @@ class LayersTest(parameterized.TestCase, tf.test.TestCase):
 
     self.assertEqual(actual.shape, expected.shape)
 
-  @tf.contrib.eager.run_test_in_graph_and_eager_modes()
+  @test_utils.run_in_graph_and_eager_modes()
   def testBatchNorm(self):
     batch = 2
     channels = 3
@@ -138,7 +142,7 @@ class LayersTest(parameterized.TestCase, tf.test.TestCase):
     self.assertAllClose(actual_0, expected)
     self.assertAllClose(actual_1, expected)
 
-  @tf.contrib.eager.run_test_in_graph_and_eager_modes()
+  @test_utils.run_in_graph_and_eager_modes()
   def testWeightsNonzero(self):
     inputs = tf.constant([[3, 1, 0], [1, 0, 0]])
 
@@ -162,7 +166,7 @@ class LayersTest(parameterized.TestCase, tf.test.TestCase):
 
     self.assertAllEqual(actual, expected)
 
-  @tf.contrib.eager.run_test_in_graph_and_eager_modes()
+  @test_utils.run_in_graph_and_eager_modes()
   def testDenseReluDense(self):
     batch = 2
     channels = 3

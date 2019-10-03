@@ -27,9 +27,11 @@ from mesh_tensorflow import tpu_variables
 from mesh_tensorflow import utils
 from six.moves import xrange  # pylint: disable=redefined-builtin
 
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
 
 from tensorflow.contrib.tpu.python.ops import tpu_ops
+
+tf.disable_v2_behavior()
 
 
 class SimdMeshImpl(mtf.MeshImpl):
@@ -49,8 +51,8 @@ class SimdMeshImpl(mtf.MeshImpl):
       shape: an input to mtf.convert_to_shape()
       layout: an input to mtf.convert_to_layout_rules()
       devices: deprecated
-      device_assignment: a tf.contrib.tpu.DeviceAssignment - devices must be
-        asssigned in lexicographic order
+      device_assignment: a tf.tpu.experimental.DeviceAssignment -
+        devices must be asssigned in lexicographic order
       logical_to_physical: an optional permutation representing the mapping
         from logical cores to "physical" cores, where the physical cores are
         listed in lexicographic order in the physical mesh, and the logical

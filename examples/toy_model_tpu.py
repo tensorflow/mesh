@@ -21,7 +21,7 @@ from __future__ import print_function
 
 import mesh_tensorflow as mtf
 import numpy
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
 
 from tensorflow.contrib.tpu.python.tpu import tpu_config
 from tensorflow.contrib.tpu.python.tpu import tpu_estimator
@@ -29,6 +29,8 @@ from tensorflow.python.data.ops.dataset_ops import Dataset
 from tensorflow.python.platform import flags
 from tensorflow.python.platform import tf_logging as logging
 from tensorflow_estimator.python.estimator import estimator as estimator_lib
+
+tf.disable_v2_behavior()
 
 FLAGS = flags.FLAGS
 
@@ -89,7 +91,7 @@ class ToyModelInput(object):
     """Input function which provides a single batch for train or eval."""
     # Retrieves the batch size for the current shard. The # of shards is
     # computed according to the input pipeline deployment. See
-    # `tf.contrib.tpu.RunConfig` for details.
+    # `tf.estimator.tpu.RunConfig` for details.
     batch_size = params['batch_size']
     logging.info('call ToyModelInput() with batch size {}'.format(batch_size))
 
@@ -242,7 +244,7 @@ def model_fn(features, labels, mode, params):
 
 def run_toy_model_tpu():
   """Run a toy model on TPU."""
-  tpu_cluster_resolver = tf.contrib.cluster_resolver.TPUClusterResolver(
+  tpu_cluster_resolver = tf.distribute.cluster_resolver.TPUClusterResolver(
       FLAGS.tpu, zone=FLAGS.tpu_zone, project=FLAGS.gcp_project)
 
   iterations_per_loop = FLAGS.iterations

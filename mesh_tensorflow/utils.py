@@ -22,8 +22,10 @@ from __future__ import print_function
 import contextlib
 import heapq
 
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
 from tensorflow.python.framework import ops  # pylint: disable=g-direct-tensorflow-import
+
+tf.disable_v2_behavior()
 
 
 @contextlib.contextmanager
@@ -112,19 +114,18 @@ def create_host_call(model_dir):
     # any Tensors in the rest of the `model_fn`. To pass Tensors from the
     # model to the `model_fn`, provide as part of the `host_call`.
     global_step = tf.cast(global_step[0], tf.int64)
-    with tf.contrib.summary.create_file_writer(model_dir).as_default():
-      with tf.contrib.summary.always_record_summaries():
-        # We cannot directly use any tensor from summaries, because each
-        # tensor here must be a concat of multiple tensors from all shards.
-        # Therefore, we rely on the assumption that args wil have the same
-        # length as summaries, and all tensors in args will have the same
-        # order of self._tup_summaries.
-        assert len(args) == len(summaries)
-        for i, tensor in enumerate(args):
-          name = summaries[i][0]
-          tf.contrib.summary.scalar(
-              name, tf.reduce_mean(tensor), step=global_step)
-        return tf.contrib.summary.all_summary_ops()
+    with tf.summary.create_file_writer(model_dir).as_default():
+      # We cannot directly use any tensor from summaries, because each
+      # tensor here must be a concat of multiple tensors from all shards.
+      # Therefore, we rely on the assumption that args wil have the same
+      # length as summaries, and all tensors in args will have the same
+      # order of self._tup_summaries.
+      assert len(args) == len(summaries)
+      for i, tensor in enumerate(args):
+        name = summaries[i][0]
+        tf.summary.scalar(
+            name, tf.reduce_mean(tensor), step=global_step)
+      return tf.summary.all_v2_summary_ops()
 
   global_step_t = tf.reshape(tf.to_int32(tf.train.get_global_step()), [1])
   return host_call_fn, [global_step_t] + reshaped_tensors

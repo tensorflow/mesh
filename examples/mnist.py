@@ -24,7 +24,9 @@ from __future__ import print_function
 
 import mesh_tensorflow as mtf
 import mnist_dataset as dataset  # local file import
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
+
+tf.disable_v2_behavior()
 
 
 tf.flags.DEFINE_string("data_dir", "/tmp/mnist_data",

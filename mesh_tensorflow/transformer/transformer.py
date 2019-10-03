@@ -51,7 +51,9 @@ import json
 import gin
 import mesh_tensorflow as mtf
 
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
+
+tf.disable_v2_behavior()
 
 
 class TransformerLayer(object):
@@ -885,8 +887,9 @@ class Unitransformer(object):
       if sampling_keep_top_k != -1:
         if sampling_keep_top_k <= 0:
           raise ValueError("sampling_keep_top_k must either be -1 or positive.")
-        k_largest = mtf.nth_smallest_element(
-            logits, n=sampling_keep_top_k, reverse=True)
+        k_largest = mtf.nth_largest_element(
+            logits, n=sampling_keep_top_k,
+            reduced_dim=self.output_vocab_dim)
         logits = mtf.where(mtf.less_equal(logits, k_largest),
                            mtf.ones_like(logits)*-1e6, logits)
 
