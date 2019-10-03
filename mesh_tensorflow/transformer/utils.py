@@ -13,7 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-r"""Utilities for running training and inference."""
+r"""Utilities for running training and inference.
+
+The `run` function for training the Transformer model is defined in this file.
+
+TODO(katherinelee): add details about gin.
+"""
 
 from __future__ import absolute_import
 from __future__ import division
@@ -56,7 +61,7 @@ _INPUT_FEATURES = [
 
 
 def parse_gin_defaults_and_flags():
-  """Parses all default gin files and those provides via flags."""
+  """Parses all default gin files and those provided via flags."""
   # Register .gin file search paths with gin
   for gin_file_path in FLAGS.gin_location_prefix:
     gin.add_config_file_search_path(gin_file_path)
@@ -93,7 +98,7 @@ def get_variable_dtype(
 
 
 def inputs_vocabulary(vocabulary):
-  """Inputs vocabulary.
+  """Get the inputs vocabulary.
 
   Args:
     vocabulary: Vocabulary or (inputs_vocabulary, targets_vocabulary) tuple.
@@ -107,7 +112,7 @@ def inputs_vocabulary(vocabulary):
 
 
 def targets_vocabulary(vocabulary):
-  """Targets vocabulary.
+  """Get the targets vocabulary.
 
   Args:
     vocabulary: Vocabulary or (inputs_vocabulary, targets_vocabulary) tuple.
@@ -122,10 +127,12 @@ def targets_vocabulary(vocabulary):
 
 @gin.configurable
 def separate_vocabularies(inputs=gin.REQUIRED, targets=gin.REQUIRED):
-  """Gin-configurable helper function."""
+  """Gin-configurable helper function to generate a tuple of vocabularies."""
   return (inputs, targets)
 
 
+# TODO(katherinelee): Update layout_rules string when noam updates the
+# definition in run
 def build_model(model_type="bitransformer",
                 input_vocab_size=gin.REQUIRED,
                 output_vocab_size=gin.REQUIRED,
@@ -136,26 +143,36 @@ def build_model(model_type="bitransformer",
   Currently, four types of models are supported:
 
   "bitransformer": The traditional encoder-decoder architecture from
-     "attention is all you need".  Requires a non-text2self dataset.
+     "Attention is All You Need".  Requires a non-text2self dataset.
 
-  "lm": an autoregressive language model (one layer stack).  This is similar
-     to the decoder part of a bitransformer, but with no attention over an
-     encoder, since there is no encoder.  Requires a text2self dataset,
-     with targets, but no inputs.
+  "lm": an autoregressive language model (one layer stack).  Effectively the
+     decoder of the bitransformer. There is no attention over the encoder, since
+     there is no encoder.  Requires a text2self dataset, with targets, but no
+     inputs.
 
   "aligned": a non-autoregressive single-stack model (like BERT).  Requires
-     a non-text2self dataset with inputs and targets.  The targets are
-     aligned with the inputs.
+     a non-text2self dataset with inputs and targets.  The targets and inputs
+     have the same length and each entry in the inputs is aligned to the
+     corresponding entry in targets, eg:
+      "inputs": "The X sat on X X."
+      'targets": "The cat sat on the mat."
+      (except, inputs are token ID sequences, not strings)
 
   "bi_teacher_student": a teacher-student model where both the student and
     teacher are bitransformers. Requires a non-text2self dataset.
 
+  A text2self dataset has targets that are offset of the inputs. Non-text2self
+  datasets have targets that differ from their inputs, like:
+    input: 'hello'
+    target: 'bonjour'
+
   Args:
-    model_type: a string - "bitransformer", "lm" or "aligned"
+    model_type: a string, one of "bitransformer", "lm", "aligned", or
+      "bi_teacher_student"
     input_vocab_size: an integer
     output_vocab_size: an integer
-    layout_rules: optional - an input to mtf.convert_to_layout_rules
-    mesh_shape: optional - an input to mtf.convert_to_shape
+    layout_rules: optional, input to mtf.convert_to_layout_rules
+    mesh_shape: optional, a function that returns a mtf.Shape
   Returns:
     a Unitransformer or Bitransformer
   """
@@ -191,6 +208,9 @@ def tpu_mesh_shape(tpu_topology=gin.REQUIRED,
 
   Example: tpu_mesh_shape("4x4", 8) -> mtf.Shape(("batch", 4), ("model", 8))
   Since there are 4x4x2=32 total cores, and we want 8-way model paralleism.
+
+  This function is passed through gin to the argument `mesh_shape` inside the
+  function `run`.
 
   Args:
     tpu_topology: a string - e.g. "2x2"
@@ -239,29 +259,32 @@ def tpu_estimator_model_fn(model_type,
   """Create a TPUEstimator model function.
 
   Args:
-    model_type: a string
+    model_type: a string. One of "bitransformer", "lm", "aligned", or
+      "bi_teacher_student"
     transformer_model: a transformer.Unitransformer or transformer.Bitransformer
-    model_dir: a string
+    model_dir: a string, directory to save the model to.
     use_tpu: a boolean
-    mesh_shape: a mtf.Shape
+    mesh_shape: a function that returns a mtf.Shape
     layout_rules: a mtf.LayoutRules
     batch_size: an integer
-    sequence_length: a dict from feature-key to int
+    sequence_length: an integer or a dict from feature-key to integer
+      the (packed) sequence length, e.g. {"inputs": 512, "targets": 128}
     autostack: a boolean
-    keep_checkpoint_max: an integer
-    save_checkpoints_steps: an integer
+    keep_checkpoint_max: an integer, maximum number of checkpoints to keep
+    save_checkpoints_steps: an integer, save a checkpoint every this number of
+      steps
     learning_rate_schedule: an optional function taking the scalar named
       argument `step` and return the scalar learning rate. Alternatively, a
       constant.
     optimizer: a class extending optimize.Optimizer, required for training
     outer_batch_size: outer batch dimension that could be used to enable the mix
-      of data-parallel and model-parallel training of MoE models
-    tpu_summaries: a boolean - if True, then use rewrites to make summaries work
-      on TPU.  This may be slow, since it uses a host call hack.
-    predict_fn: an optional function, see docs for run for more information
-    variable_filter: a string, a variable will only be trained if
-      its name matches this regex. If None (default), train all trainable
-      variables.
+      of data-parallel and model-parallel training of Mixture of Experts (MoE)
+      models
+    tpu_summaries: a boolean, use rewrites to make summaries work on TPU.  This
+      may be slow, since it uses a host call hack.
+    predict_fn: an optional function, see docs for `run` for more information
+    variable_filter: a string regex, train all variables that match this regex.
+      If None (default), train all trainable variables.
     init_checkpoint: a string, if not None then read in variables from this
       checkpoint path when initializing variables. Will only initialize
       variables that appear both in the current graph and the checkpoint.
@@ -277,14 +300,16 @@ def tpu_estimator_model_fn(model_type,
     """Estimator model function.
 
     Args:
-      features: input features dictionary
-      labels: ignored
+      features: dictionary where keys are strings like "inputs" and "targets"
+        and the values are the actual values of "inputs". See TPUEstimator's
+        docs for more information
+      labels: ignored argument
       mode: a tf.estimator.ModeKeys
-      params: something
-      config: something
+      params: dictionary containing the key "context"
+      config: ignored argument
 
     Returns:
-      something
+      a TPUEstimatorSpec
     """
     del labels, config
     global_step = tf.train.get_global_step()
@@ -819,6 +844,7 @@ def get_step_from_checkpoint_path(checkpoint_path):
   return int(match.group(1))
 
 
+# TODO(noam): include more descriptive definitions
 @gin.configurable
 def decode_from_file(estimator,
                      vocabulary,
@@ -836,7 +862,8 @@ def decode_from_file(estimator,
     vocabulary: a mtf.transformer.vocabulary.Vocabulary
     model_type: a string
     batch_size: an integer
-    sequence_length: a dict from feature-key to int
+    sequence_length: an integer or a dict from feature-key to integer
+      the (packed) sequence length, e.g. {"inputs": 512, "targets": 128}
     checkpoint_path: an optional string
     input_filename: a string
     output_filename: a string
@@ -894,7 +921,8 @@ def export_model(estimator, export_path, vocabulary, sequence_length):
       model_fn.
     export_path: str, path to export the model.
     vocabulary: sentencepiece vocab, vocabulary instance to use for encoding.
-    sequence_length: dict from feature-key to int
+    sequence_length: an integer or a dict from feature-key to integer
+      the (packed) sequence length, e.g. {"inputs": 512, "targets": 128}
   Returns:
     None
   """
@@ -902,7 +930,7 @@ def export_model(estimator, export_path, vocabulary, sequence_length):
   def serving_input_fn():
     """Constructs input portion of Graph in serving.
 
-    Input is a batch of one serialized tf.Example protos.
+    Input is a batch of a single serialized tf.Example proto.
 
     Returns:
       a ServingInputReceiver
@@ -982,7 +1010,8 @@ def compute_batch_size(sequence_length,
   data-parallelism
 
   Args:
-    sequence_length: a dict from feature-key to int
+    sequence_length: an integer or a dict from feature-key to integer
+      the (packed) sequence length, e.g. {"inputs": 512, "targets": 128}
     mesh_shape: an input to mtf.convert_to_shape()
     layout_rules: an input to mtf.convert_to_layout_rules()
     method_and_value: a pair
@@ -1028,7 +1057,8 @@ def serialize_num_microbatches(batch_dim,
 
   Args:
     batch_dim: a mtf.Dimension
-    sequence_length: a dict from string to int
+    sequence_length: an integer or a dict from feature-key to integer
+      the (packed) sequence length, e.g. {"inputs": 512, "targets": 128}
     mesh_shape: an input to mtf.convert_to_shape()
     layout_rules: an input to mtf.convert_to_layout_rules()
     tokens_per_microbatch_per_replica: an optional integer, e.g. 2048
@@ -1076,7 +1106,8 @@ def auto_train_steps(batch_size,
 
   Args:
     batch_size: an integer
-    sequence_length: a dict from feature-key to int
+    sequence_length: an integer or a dict from feature-key to integer
+      the (packed) sequence length, e.g. {"inputs": 512, "targets": 128}
     train_tokens: an integer (train_steps * batch_size * sequence_length)
   Returns:
     an integer
@@ -1140,6 +1171,8 @@ def get_checkpoint_iterator(checkpoint_step, model_dir):
     return [_get_checkpoint_path(closest) for closest in closests]
 
 
+# TODO(noam): provide a more informative string for layout_rules:
+# example: "d_ff:model,heads:model,vocab:model"
 @gin.configurable
 def run(tpu_job_name,
         tpu, gcp_project, tpu_zone,
@@ -1168,7 +1201,7 @@ def run(tpu_job_name,
         variable_filter=None,
         perplexity_eval_steps=10,
         ensemble_inputs=None):
-  """Run training/eval/inference.
+  """Run training, eval, or inference depending on `mode`.
 
   Args:
     tpu_job_name: string, name of TPU worker binary
@@ -1182,12 +1215,14 @@ def run(tpu_job_name,
       targets_vocabulary) tuple.
     train_dataset_fn: A function returning a tf.data.Dataset. Must be provided
       for mode="train". Should accept the following arguments:
-        - sequence_length: dict from feature-key to int
+        - sequence_length: an integer or a dict from feature-key to integer
+          the (packed) sequence length, e.g. {"inputs": 512, "targets": 128}
         - vocabulary: Vocabulary instance to use for encoding.
         - dataset_split: str, which dataset split to load.
     eval_dataset_fn: A function returning a list of dataset.EvalDataset tuples.
       Must be provided for mode="eval". Should accept the following arguments:
-        - sequence_length: dict from feature-key to int
+        - sequence_length: an integer or a dict from feature-key to integer
+          the (packed) sequence length, e.g. {"inputs": 512, "targets": 128}
         - vocabulary: Vocabulary instance to use for encoding.
         - dataset_split: str, which dataset split to load.
       dataset.EvalDataset tuples are namedtuples with the following fields:
@@ -1211,9 +1246,10 @@ def run(tpu_job_name,
       `tf.train.checkpoints_iterator`.
     export_path: a string, path to export the saved model
     mode: string, train/eval/perplexity_eval/infer
+      perplexity_eval computes the perplexity of the dev set.
     iterations_per_loop: integer, steps per train loop
     save_checkpoints_steps: integer, steps per checkpoint
-    keep_checkpoint_max: an integer, keep up to this many checkpoints
+    keep_checkpoint_max: an integer, maximum number of checkpoints to keep
     eval_summary_dir: str, path to write TensorBoard events file summaries for
       eval. If None, use model_dir/eval_{split}.
     batch_size: An integer or a (method, value) pair to pass to
@@ -1222,8 +1258,8 @@ def run(tpu_job_name,
     train_steps: An integer or a function with the same signature as
       auto_train_steps().  Total number of training steps.
     sequence_length: an integer or a dict from feature-key to integer
-      the (packed) sequence length.  e.g. {"inputs": 512, "targets": 128}
-    mesh_shape: an input to mtf.convert_to_shape()
+      the (packed) sequence length, e.g. {"inputs": 512, "targets": 128}
+    mesh_shape: a function passed in through gin that returns a mtf.Shape
     layout_rules: an input to mtf.convert_to_layout_rules()
     learning_rate_schedule: an optional function taking the scalar name argument
       `step` and the numeric argument `total_train_steps` and return the scalar
@@ -1337,7 +1373,8 @@ def run(tpu_job_name,
 
   if (mode == "train" or mode == "perplexity_eval"):
     if train_dataset_fn is None:
-      raise ValueError("Must provide train_dataset_fn through gin for train.")
+      raise ValueError("Must provide train_dataset_fn through gin for the "
+                       "modes train and perplexity_eval.")
     def input_fn(params):
       del params
       dataset = train_dataset_fn(sequence_length=sequence_length,
@@ -1358,7 +1395,7 @@ def run(tpu_job_name,
                                steps=perplexity_eval_steps,
                                checkpoint_path=checkpoint_path)
     else:
-      raise ValueError("should not get here")
+      raise ValueError("Should not reach this error.")
   elif mode == "eval":
     if eval_dataset_fn is None:
       raise ValueError("Must provide eval_dataset_fn through gin for eval.")
@@ -1491,4 +1528,5 @@ def run(tpu_job_name,
 
   else:
     raise ValueError(
-        "unknown mode %s - must be train/eval/infer/export" % mode)
+        "unknown mode %s - must be train/perplexity_eval/eval/infer/export"
+        % mode)
