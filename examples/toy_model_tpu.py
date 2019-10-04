@@ -23,11 +23,11 @@ import mesh_tensorflow as mtf
 import numpy
 import tensorflow.compat.v1 as tf
 
-from tensorflow.contrib.tpu.python.tpu import tpu_config
-from tensorflow.contrib.tpu.python.tpu import tpu_estimator
 from tensorflow.python.data.ops.dataset_ops import Dataset
 from tensorflow.python.platform import flags
 from tensorflow.python.platform import tf_logging as logging
+from tensorflow.python.tpu import tpu_config  # pylint: disable=g-direct-tensorflow-import
+from tensorflow.python.tpu import tpu_estimator  # pylint: disable=g-direct-tensorflow-import
 from tensorflow_estimator.python.estimator import estimator as estimator_lib
 
 FLAGS = flags.FLAGS

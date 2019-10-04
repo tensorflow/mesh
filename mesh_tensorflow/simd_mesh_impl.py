@@ -29,7 +29,7 @@ from six.moves import xrange  # pylint: disable=redefined-builtin
 
 import tensorflow.compat.v1 as tf
 
-from tensorflow.contrib.tpu.python.ops import tpu_ops
+from tensorflow.python.tpu.ops import tpu_ops  # pylint: disable=g-direct-tensorflow-import
 
 
 class SimdMeshImpl(mtf.MeshImpl):

@@ -39,9 +39,9 @@ import six
 import tensorflow.compat.v1 as tf
 import tensorflow_datasets as tfds
 
-from tensorflow.contrib.tpu.python.tpu import tpu_config
-from tensorflow.contrib.tpu.python.tpu import tpu_estimator
 from tensorflow.python.ops import resources  # pylint: disable=g-direct-tensorflow-import
+from tensorflow.python.tpu import tpu_config  # pylint: disable=g-direct-tensorflow-import
+from tensorflow.python.tpu import tpu_estimator  # pylint: disable=g-direct-tensorflow-import
 
 tf.flags.DEFINE_multi_string("gin_file", None, "Path to a Gin file.")
 tf.flags.DEFINE_multi_string("gin_param", None, "Gin parameter binding.")
