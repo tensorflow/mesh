@@ -25,8 +25,6 @@ from mesh_tensorflow.transformer import utils
 
 import tensorflow.compat.v1 as tf
 
-tf.disable_v2_behavior()
-
 
 class UtilsTest(parameterized.TestCase, tf.test.TestCase):
 
@@ -83,4 +81,5 @@ class UtilsTest(parameterized.TestCase, tf.test.TestCase):
 
 
 if __name__ == "__main__":
+  tf.disable_v2_behavior()
   tf.test.main()

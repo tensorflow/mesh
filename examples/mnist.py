@@ -26,8 +26,6 @@ import mesh_tensorflow as mtf
 import mnist_dataset as dataset  # local file import
 import tensorflow.compat.v1 as tf
 
-tf.disable_v2_behavior()
-
 
 tf.flags.DEFINE_string("data_dir", "/tmp/mnist_data",
                        "Path to directory containing the MNIST dataset")
@@ -236,5 +234,6 @@ def main(_):
 
 
 if __name__ == "__main__":
+  tf.disable_v2_behavior()
   tf.logging.set_verbosity(tf.logging.INFO)
   tf.app.run()

@@ -31,8 +31,6 @@ try:
 except ImportError:
   tf.logging.warning("Failed to load tensor2tensor")
 
-tf.disable_v2_behavior()
-
 
 class T2tVocabulary(vocabulary.Vocabulary):
   """Wrapper around tensor2tensor SubwordTextEncoder.

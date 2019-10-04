@@ -25,9 +25,6 @@ import mesh_tensorflow as mtf
 from tensor2tensor.utils import test_utils
 import tensorflow.compat.v1 as tf
 
-tf.disable_v2_behavior()
-tf.enable_eager_execution()
-
 
 class LaidOutTensor(object):
   """LaidOutTensor (see placement_mesh_impl.py, simd_mesh_impl.py) for tests."""
@@ -595,4 +592,6 @@ class TopKTest(tf.test.TestCase):
 
 
 if __name__ == "__main__":
+  tf.disable_v2_behavior()
+  tf.enable_eager_execution()
   tf.test.main()

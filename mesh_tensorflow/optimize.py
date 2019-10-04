@@ -25,8 +25,6 @@ import gin
 from mesh_tensorflow import ops_with_redefined_builtins as mtf
 import tensorflow.compat.v1 as tf
 
-tf.disable_v2_behavior()
-
 
 def make_optimizer(hparams, lr):
   if hparams.optimizer == "SGD":

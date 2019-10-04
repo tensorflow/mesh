@@ -22,8 +22,6 @@ from __future__ import print_function
 import mesh_tensorflow as mtf  # pylint: disable=unused-import
 import tensorflow.compat.v1 as tf
 
-tf.disable_v2_behavior()
-
 
 class ImportTest(tf.test.TestCase):
 
@@ -32,4 +30,5 @@ class ImportTest(tf.test.TestCase):
 
 
 if __name__ == '__main__':
+  tf.disable_v2_behavior()
   tf.test.main()

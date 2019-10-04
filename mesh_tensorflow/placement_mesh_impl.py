@@ -27,8 +27,6 @@ from six.moves import xrange  # pylint: disable=redefined-builtin
 
 import tensorflow.compat.v1 as tf
 
-tf.disable_v2_behavior()
-
 
 class PlacementMeshImpl(mtf.MeshImpl):
   """Mesh implemented using explicit device placement."""

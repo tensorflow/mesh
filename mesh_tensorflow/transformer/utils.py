@@ -43,8 +43,6 @@ from tensorflow.contrib.tpu.python.tpu import tpu_config
 from tensorflow.contrib.tpu.python.tpu import tpu_estimator
 from tensorflow.python.ops import resources  # pylint: disable=g-direct-tensorflow-import
 
-tf.disable_v2_behavior()
-
 tf.flags.DEFINE_multi_string("gin_file", None, "Path to a Gin file.")
 tf.flags.DEFINE_multi_string("gin_param", None, "Gin parameter binding.")
 tf.flags.DEFINE_multi_string("gin_location_prefix", [], "Gin file search path.")

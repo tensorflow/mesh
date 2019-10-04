@@ -35,8 +35,6 @@ import tensorflow.compat.v1 as tf
 from tensorflow.python.ops.gen_nn_ops import conv3d_backprop_input_v2
 from tensorflow.python.ops.nn_ops import conv3d_backprop_filter_v2
 
-tf.disable_v2_behavior()
-
 Dimension = collections.namedtuple("Dimension", ["name", "size"])
 
 

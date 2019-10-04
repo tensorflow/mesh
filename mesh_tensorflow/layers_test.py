@@ -29,9 +29,6 @@ from tensor2tensor.utils import test_utils
 
 import tensorflow.compat.v1 as tf
 
-tf.disable_v2_behavior()
-tf.enable_eager_execution()
-
 
 class LayersTest(parameterized.TestCase, tf.test.TestCase):
 
@@ -421,4 +418,6 @@ class LayersTest(parameterized.TestCase, tf.test.TestCase):
       self.assertAllClose(actual, expected)
 
 if __name__ == "__main__":
+  tf.disable_v2_behavior()
+  tf.enable_eager_execution()
   tf.test.main()

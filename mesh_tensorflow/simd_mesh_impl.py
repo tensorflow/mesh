@@ -31,8 +31,6 @@ import tensorflow.compat.v1 as tf
 
 from tensorflow.contrib.tpu.python.ops import tpu_ops
 
-tf.disable_v2_behavior()
-
 
 class SimdMeshImpl(mtf.MeshImpl):
   """Mesh implementation for TPU using SIMD and MPI operations."""

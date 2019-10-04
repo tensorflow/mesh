@@ -24,8 +24,6 @@ from six.moves import xrange  # pylint: disable=redefined-builtin
 
 import tensorflow.compat.v1 as tf
 
-tf.disable_v2_behavior()
-
 
 class UtilsTest(tf.test.TestCase):
 
@@ -52,4 +50,5 @@ class UtilsTest(tf.test.TestCase):
 
 
 if __name__ == '__main__':
+  tf.disable_v2_behavior()
   tf.test.main()

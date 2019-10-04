@@ -30,8 +30,6 @@ from tensorflow.python.platform import flags
 from tensorflow.python.platform import tf_logging as logging
 from tensorflow_estimator.python.estimator import estimator as estimator_lib
 
-tf.disable_v2_behavior()
-
 FLAGS = flags.FLAGS
 
 tf.flags.DEFINE_integer('batch_size', 64, 'Training batch size.')
@@ -289,5 +287,6 @@ def main(_):
 
 
 if __name__ == '__main__':
+  tf.disable_v2_behavior()
   tf.logging.set_verbosity(tf.logging.INFO)
   tf.app.run()

@@ -36,8 +36,6 @@ import sys
 from mesh_tensorflow.transformer import utils
 import tensorflow.compat.v1 as tf
 
-tf.disable_v2_behavior()
-
 tf.flags.DEFINE_string(
     "tpu_job_name", None,
     "Name of TPU worker binary. Only necessary if job name is changed from"
@@ -98,5 +96,6 @@ def main(_):
 
 
 if __name__ == "__main__":
+  tf.disable_v2_behavior()
   tf.logging.set_verbosity(tf.logging.INFO)
   tf.app.run()

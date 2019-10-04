@@ -41,8 +41,6 @@ import numpy as np
 from six.moves import urllib
 import tensorflow.compat.v1 as tf
 
-tf.disable_v2_behavior()
-
 
 def read32(bytestream):
   """Read 4 bytes from bytestream as an unsigned 32-bit integer."""

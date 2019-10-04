@@ -25,8 +25,6 @@ from mesh_tensorflow.auto_mtf import memory_estimator
 import six
 import tensorflow.compat.v1 as tf
 
-tf.disable_v2_behavior()
-
 
 class VariableNamesTest(tf.test.TestCase):
 
@@ -145,4 +143,5 @@ class OptimizeLayoutTest(tf.test.TestCase):
 
 
 if __name__ == "__main__":
+  tf.disable_v2_behavior()
   tf.test.main()

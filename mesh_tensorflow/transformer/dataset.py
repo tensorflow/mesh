@@ -93,8 +93,6 @@ import gin
 import tensorflow.compat.v1 as tf
 import tensorflow_datasets as tfds
 
-tf.disable_v2_behavior()
-
 
 @gin.configurable
 def pack_or_pad(

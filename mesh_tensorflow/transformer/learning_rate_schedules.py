@@ -29,8 +29,6 @@ import math
 import gin
 import tensorflow.compat.v1 as tf
 
-tf.disable_v2_behavior()
-
 
 @gin.configurable
 def constant_learning_rate(step, total_train_steps, learning_rate=gin.REQUIRED):

@@ -32,8 +32,6 @@ import mesh_tensorflow as mtf
 import tensorflow.compat.v1 as tf
 from tensorflow.core.framework import cost_graph_pb2
 
-tf.disable_v2_behavior()
-
 
 class GraphInterface(object):
   """tf.Graph & mtf.Graph common representation which produces a CostGraphDef.

@@ -26,8 +26,6 @@ from tensorflow.core.framework import cost_graph_pb2
 from tensorflow.core.framework import tensor_shape_pb2
 from tensorflow.core.framework import types_pb2
 
-tf.disable_v2_behavior()
-
 
 class GraphInterfaceTest(tf.test.TestCase):
 
@@ -306,4 +304,5 @@ class GraphInterfaceTest(tf.test.TestCase):
 
 
 if __name__ == "__main__":
+  tf.disable_v2_behavior()
   tf.test.main()

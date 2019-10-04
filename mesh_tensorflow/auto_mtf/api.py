@@ -41,8 +41,6 @@ from mesh_tensorflow.auto_mtf import layout_optimizer
 from mesh_tensorflow.auto_mtf import memory_estimator
 import tensorflow.compat.v1 as tf
 
-tf.disable_v2_behavior()
-
 
 def layout(mtf_graph, mesh_shape, mtf_outputs=()):
   """Compute layout rules based on a computational graph and mesh shape.

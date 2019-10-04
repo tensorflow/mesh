@@ -23,8 +23,6 @@ import mesh_tensorflow as mtf
 from mesh_tensorflow.auto_mtf import memory_estimator
 import tensorflow.compat.v1 as tf
 
-tf.disable_v2_behavior()
-
 
 class MemoryEstimatorTest(tf.test.TestCase):
 
@@ -68,4 +66,5 @@ class MemoryEstimatorTest(tf.test.TestCase):
 
 
 if __name__ == '__main__':
+  tf.disable_v2_behavior()
   tf.test.main()

@@ -32,8 +32,6 @@ from mesh_tensorflow.transformer import transformer
 
 import tensorflow.compat.v1 as tf
 
-tf.disable_v2_behavior()
-
 
 @gin.configurable
 class MoE1D(transformer.TransformerLayer):

@@ -23,8 +23,6 @@ from mesh_tensorflow import ops_with_redefined_builtins as mtf
 
 import tensorflow.compat.v1 as tf
 
-tf.disable_v2_behavior()
-
 
 def dense(x, output_dim, reduced_dims=None, expert_dims=None,
           use_bias=True, activation=None,

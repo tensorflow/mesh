@@ -25,8 +25,6 @@ import heapq
 import tensorflow.compat.v1 as tf
 from tensorflow.python.framework import ops  # pylint: disable=g-direct-tensorflow-import
 
-tf.disable_v2_behavior()
-
 
 @contextlib.contextmanager
 def outside_all_rewrites():
