@@ -655,7 +655,7 @@ def _pack_with_tf_ops(dataset, keys, length):
     return packed
   dataset = dataset.map(map_fn,
                         num_parallel_calls=tf.data.experimental.AUTOTUNE)
-  return dataset.unbatch()
+  return dataset.apply(tf.data.experimental.unbatch())
 
 
 def _pack_with_custom_ops(dataset, keys, length):
@@ -703,7 +703,7 @@ def _pack_with_custom_ops(dataset, keys, length):
     return packed
   dataset = dataset.map(map_fn_custom,
                         num_parallel_calls=tf.data.experimental.AUTOTUNE)
-  dataset = dataset.unbatch()
+  dataset = dataset.apply(tf.data.experimental.unbatch())
   return dataset
 
 
