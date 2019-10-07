@@ -390,7 +390,7 @@ PROBLEM=./mesh_tensorflow/transformer/gin/problems/lm1b.gin
 
 # TRAIN
 python -m mesh_tensorflow.transformer.main \
-  --tpu $TPU \
+  --tpu=$TPU \
   --model_dir=$MODEL_DIR \
   --gin_file=$MODEL \
   --gin_file=$LAYOUT \
@@ -400,7 +400,7 @@ python -m mesh_tensorflow.transformer.main \
 
 # EVAL
 python -m mesh_tensorflow.transformer.main \
-  --tpu $TPU \
+  --tpu=$TPU \
   --model_dir=$MODEL_DIR \
   --gin_file=$MODEL \
   --gin_file=$LAYOUT \
