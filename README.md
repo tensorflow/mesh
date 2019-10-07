@@ -374,33 +374,43 @@ DATA_DIR=gs://noam-mtf/data
 MODEL_DIR=gs://noam-mtf/transformer_standalone
 TPU=noam-mtf-donut
 
-# MODEL HPARAMS AND DIRECTORY  (uncomment one)
+# MODEL HPARAMS AND DIRECTORY
 # base model
-MODEL=./transformer/gin/model_base.gin
-# 5B parameters (too big for this dataset, only trains with model-parallelism)
-# MODEL=./transformer/gin/model_5b.gin
+MODEL=./mesh_tensorflow/transformer/gin/models/lm_base.gin
 
 # UNCOMMENT ONE OF THESE
 # Data-parallelism
-LAYOUT=./transformer/gin/layout_data_parallel.gin
+LAYOUT=./mesh_tensorflow/transformer/gin/layouts/2x2_dp.gin
 # Model-parallelism
-# LAYOUT=./transformer/gin/layout_model_parallel.gin
+# LAYOUT=./mesh_tensorflow/transformer/gin/layouts/2x2_mp.gin
 # Data-parallelism and Model-Parallelism
-# LAYOUT=./transformer/gin/layout_data_and_model_parallel.gin
+# LAYOUT=./mesh_tensorflow/transformer/gin/layouts/2x2_dp_mp.gin
+
+PROBLEM=./mesh_tensorflow/transformer/gin/problems/lm1b.gin
 
 # TRAIN
-python examples/transformer_standalone.py \
-  --tpu=$TPU --data_dir=$DATA_DIR --model_dir=$MODEL_DIR --gin_file=$MODEL \
-  --gin_file=$LAYOUT --gin_param="run.mode='train'"
+python -m mesh_tensorflow.transformer.main \
+  --tpu $TPU \
+  --model_dir=$MODEL_DIR \
+  --gin_file=$MODEL \
+  --gin_file=$LAYOUT \
+  --gin_file=$PROBLEM \
+  --gin_param="dataset.pretokenized_tfds_dataset.tfds_data_dir='${DATA_DIR}'" \
+  --gin_param="run.mode='train'"
 
 # EVAL
-python examples/transformer_standalone.py \
-  --tpu=$TPU --data_dir=$DATA_DIR --model_dir=$MODEL_DIR --gin_file=$MODEL \
-  --gin_file=$LAYOUT --gin_param="run.mode='evaluate'"
+python -m mesh_tensorflow.transformer.main \
+  --tpu $TPU \
+  --model_dir=$MODEL_DIR \
+  --gin_file=$MODEL \
+  --gin_file=$LAYOUT \
+  --gin_file=$PROBLEM \
+  --gin_param="dataset.pretokenized_tfds_dataset.tfds_data_dir='${DATA_DIR}'" \
+  --gin_param="run.mode='evaluate'"
 ```
 
 The above code will train on the LM1B language modeling benchmark, as specified
-in `examples/transformer_standalone_defaults.gin`. To train a
+in `transformer/gin/standalone_defaults.gin`. To train a
 sequence-to-sequence model on WMT14 en-de, change `utils.run.dataset` to
 `wmt_translate_ende/ende_subwords8k_t2t` and set `utils.run.mode` to `True`.
 Note that the `wmt_translate_ende/ende_subwords8k_t2t` dataset was removed from
