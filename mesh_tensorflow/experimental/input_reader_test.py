@@ -64,8 +64,7 @@ class MtfInputReaderTest(parameterized.TestCase, tf.test.TestCase):
                              [self.sub_batch_created_times * 2, 0],
                              [2, 4])
         self.sub_batch_created_times += 1
-        return tf.data.Dataset.from_tensors(sub_batch).repeat().apply(
-            tf.data.experimental.unbatch())
+        return tf.data.Dataset.from_tensors(sub_batch).repeat().unbatch()
 
       batch_dim = mtf.Dimension("batch", batch_io_dim)
       io_dim = mtf.Dimension("io", batch_io_dim)

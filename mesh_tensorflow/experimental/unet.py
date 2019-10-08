@@ -268,7 +268,7 @@ def get_dataset_creator(dataset_str):
 
     if dataset_str == 'eval' and FLAGS.sampled_2d_slices:
       # When evaluating on slices, unbatch slices that belong to one CT scan.
-      dataset = dataset.apply(tf.data.experimental.unbatch())
+      dataset = dataset.unbatch()
 
     return dataset
 
