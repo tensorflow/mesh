@@ -15,7 +15,7 @@ function set_status() {
 }
 
 # Run tests
-pytest --ignore=mesh_tensorflow/experimental
+python setup.py test
 set_status
 
 exit $STATUS

@@ -18,20 +18,19 @@ setup(
     },
     scripts=[],
     install_requires=[
+        'absl-py',
         'future',
         'gin-config',
+        'ortools',
         'six',
+        'tensorflow',
+        'tensorflow-datasets',
     ],
-    extras_require={
-        'auto_mtf': ['ortools>=7.0.6546'],
-        'tensorflow': ['tensorflow>=1.9.0'],
-        'tensorflow_gpu': ['tensorflow-gpu>=1.9.0'],
-        'tests': [
-            'absl-py',
-            'pytest',
-            'ortools>=7.0.6546',
-        ],
-    },
+    extras_require={},
+    tests_require=[
+        'pytest'
+    ],
+    setup_requires=['pytest-runner'],
     classifiers=[
         'Development Status :: 4 - Beta',
         'Intended Audience :: Developers',
