@@ -12,7 +12,10 @@ setup(
     url='http://github.com/tensorflow/mesh',
     license='Apache 2.0',
     packages=find_packages(),
-    package_data={},
+    package_data={
+        # Include gin files.
+        '': ['*.gin'],
+    },
     scripts=[],
     install_requires=[
         'future',

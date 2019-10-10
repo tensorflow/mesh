@@ -35,6 +35,7 @@ import mesh_tensorflow as mtf
 from mesh_tensorflow.transformer import dataset as transformer_dataset
 from mesh_tensorflow.transformer import transformer
 import numpy as np
+import pkg_resources
 import six
 import tensorflow.compat.v1 as tf
 import tensorflow_datasets as tfds
@@ -66,7 +67,7 @@ def parse_gin_defaults_and_flags():
   # Set up the default values for the configurable parameters. These values will
   # be overridden by any user provided gin files/parameters.
   gin.parse_config_file(
-      os.path.join(os.path.dirname(__file__), _DEFAULT_CONFIG_FILE))
+      pkg_resources.resource_filename(__name__, _DEFAULT_CONFIG_FILE))
   gin.parse_config_files_and_bindings(FLAGS.gin_file, FLAGS.gin_param)
 
 
