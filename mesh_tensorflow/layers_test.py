@@ -24,10 +24,8 @@ from absl.testing import parameterized
 import mesh_tensorflow as mtf
 import numpy as np
 
-from tensor2tensor.layers import common_layers
-from tensor2tensor.utils import test_utils
-
 import tensorflow.compat.v1 as tf
+from tensorflow.python.framework import test_util  # pylint:disable=g-direct-tensorflow-import
 
 
 class LayersTest(parameterized.TestCase, tf.test.TestCase):
@@ -70,7 +68,7 @@ class LayersTest(parameterized.TestCase, tf.test.TestCase):
 
     self.assertEqual(actual.shape, expected.shape)
 
-  @test_utils.run_in_graph_and_eager_modes()
+  @test_util.run_in_graph_and_eager_modes()
   def testLayerNorm(self):
     batch = 2
     channels = 3
@@ -90,7 +88,7 @@ class LayersTest(parameterized.TestCase, tf.test.TestCase):
     lowering = mtf.Lowering(graph, {mesh: mesh_impl})
     actual_outputs = lowering.export_to_tf_tensor(mtf_outputs)
 
-    expected_outputs = common_layers.layer_norm(inputs)
+    expected_outputs = tf.keras.layers.LayerNormalization()(inputs)
     tf_group = lowering.copy_masters_to_slices()
     init = tf.global_variables_initializer()
     self.evaluate(init)
@@ -99,7 +97,7 @@ class LayersTest(parameterized.TestCase, tf.test.TestCase):
 
     self.assertEqual(actual.shape, expected.shape)
 
-  @test_utils.run_in_graph_and_eager_modes()
+  @test_util.run_in_graph_and_eager_modes()
   def testBatchNorm(self):
     batch = 2
     channels = 3
@@ -139,7 +137,7 @@ class LayersTest(parameterized.TestCase, tf.test.TestCase):
     self.assertAllClose(actual_0, expected)
     self.assertAllClose(actual_1, expected)
 
-  @test_utils.run_in_graph_and_eager_modes()
+  @test_util.run_in_graph_and_eager_modes()
   def testWeightsNonzero(self):
     inputs = tf.constant([[3, 1, 0], [1, 0, 0]])
 
@@ -156,14 +154,14 @@ class LayersTest(parameterized.TestCase, tf.test.TestCase):
     lowering = mtf.Lowering(graph, {mesh: mesh_impl})
     actual_outputs = lowering.export_to_tf_tensor(mtf_outputs)
 
-    expected_outputs = common_layers.weights_nonzero(inputs)
+    expected_outputs = tf.cast(tf.not_equal(inputs, 0), tf.float32)
     tf_group = lowering.copy_masters_to_slices()
     self.evaluate(tf_group)
     actual, expected = self.evaluate([actual_outputs, expected_outputs])
 
     self.assertAllEqual(actual, expected)
 
-  @test_utils.run_in_graph_and_eager_modes()
+  @test_util.run_in_graph_and_eager_modes()
   def testDenseReluDense(self):
     batch = 2
     channels = 3

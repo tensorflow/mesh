@@ -5,7 +5,7 @@ from setuptools import setup
 
 setup(
     name='mesh-tensorflow',
-    version='0.0.5',
+    version='0.1.0',
     description='Mesh TensorFlow',
     author='Google Inc.',
     author_email='no-reply@google.com',
@@ -30,7 +30,6 @@ setup(
             'absl-py',
             'pytest',
             'ortools>=7.0.6546',
-            'tensor2tensor>=1.9.0',  # TODO(trandustin): rm dependence
         ],
     },
     classifiers=[

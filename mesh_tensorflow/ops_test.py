@@ -22,8 +22,8 @@ from __future__ import print_function
 from absl.testing import parameterized
 
 import mesh_tensorflow as mtf
-from tensor2tensor.utils import test_utils
 import tensorflow.compat.v1 as tf
+from tensorflow.python.framework import test_util  # pylint:disable=g-direct-tensorflow-import
 
 
 class LaidOutTensor(object):
@@ -143,7 +143,7 @@ class MeshTensorFlowTest(parameterized.TestCase, tf.test.TestCase):
     self.assertEqual(graph.unique_name("a"), "a")
     self.assertEqual(graph.unique_name("A"), "A_1")
 
-  @test_utils.run_in_graph_and_eager_modes()
+  @test_util.run_in_graph_and_eager_modes()
   def testLowering(self):
     graph = mtf.Graph()
     mesh = mtf.Mesh(graph, "my_mesh")
