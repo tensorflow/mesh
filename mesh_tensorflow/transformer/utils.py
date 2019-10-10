@@ -1429,6 +1429,7 @@ def run(tpu_job_name,
 
     # Pre-load in all of the targets once before entering continuous eval loop
     cached_targets = {}
+    cached_examples = {}
     # Need to create a separate graph for loading in plaintext targets
     # or else TF will complain that we modified the graph
     with tf.Graph().as_default():
@@ -1436,15 +1437,18 @@ def run(tpu_job_name,
         if eval_dataset.metric_fns:
           ds = eval_dataset.dataset_fn()
           # Create list of postprocessed text targets
-          ds = tfds.as_numpy(ds)
+          examples = list(tfds.as_numpy(ds))
           targets = [
-              eval_dataset.postprocess_fn(d["targets_plaintext"], example=d)
-              for d in ds]
+              eval_dataset.postprocess_fn(
+                  ex["targets_plaintext"], example=ex, is_target=True)
+              for ex in examples
+          ]
           targets_filename = os.path.join(
               eval_summary_dir, "{}_targets".format(eval_dataset.name),
           )
           write_lines_to_file(targets, targets_filename)
           cached_targets[eval_dataset.name] = targets
+          cached_examples[eval_dataset.name] = examples
 
     def input_fn(params):
       """Eval input function for estimator."""
@@ -1476,10 +1480,12 @@ def run(tpu_job_name,
       decodes = decode(estimator, input_fn, vocabulary, checkpoint_path)
       for eval_dataset in eval_datasets:
         # Extract the portion of decodes corresponding to this dataset
-        dataset_size = len(cached_targets[eval_dataset.name])
+        examples = cached_examples[eval_dataset.name]
+        dataset_size = len(examples)
         predictions = [
-            eval_dataset.postprocess_fn(d, example=None)
-            for d in decodes[:dataset_size]]
+            eval_dataset.postprocess_fn(d, example=ex)
+            for d, ex in zip(decodes[:dataset_size], examples)
+        ]
         # Remove the used decodes.
         del decodes[:dataset_size]
 
