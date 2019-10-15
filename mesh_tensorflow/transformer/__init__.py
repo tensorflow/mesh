@@ -15,6 +15,10 @@
 
 """Mesh Tensorflow Transformer."""
 
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+
 import mesh_tensorflow.transformer.attention
 import mesh_tensorflow.transformer.dataset
 import mesh_tensorflow.transformer.learning_rate_schedules
