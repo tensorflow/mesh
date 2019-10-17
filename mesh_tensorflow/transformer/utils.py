@@ -1153,7 +1153,7 @@ def eval_model(estimator, vocabulary, sequence_length, batch_size,
       if eval_dataset.metric_fns:
         ds = eval_dataset.dataset_fn()
         # Create list of postprocessed text targets
-        examples = tfds.as_numpy(ds)
+        examples = [ex for ex in tfds.as_numpy(ds)]
         targets = [
             eval_dataset.postprocess_fn(
                 ex["targets_plaintext"], example=ex, is_target=True)
