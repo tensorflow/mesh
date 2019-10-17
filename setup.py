@@ -5,7 +5,7 @@ from setuptools import setup
 
 setup(
     name='mesh-tensorflow',
-    version='0.1.1',
+    version='0.1.2',
     description='Mesh TensorFlow',
     author='Google Inc.',
     author_email='no-reply@google.com',
@@ -23,10 +23,11 @@ setup(
         'gin-config',
         'ortools',
         'six',
-        'tensorflow',
         'tensorflow-datasets',
     ],
-    extras_require={},
+    extras_require={
+        'tensorflow': ['tensorflow>=1.15.0'],
+    },
     tests_require=[
         'pytest'
     ],

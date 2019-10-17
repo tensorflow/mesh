@@ -14,6 +14,9 @@ function set_status() {
     STATUS=$(($last_status || $STATUS))
 }
 
+# Install TF dependency.
+pip install -q "tensorflow"
+
 # Run tests
 python setup.py test
 set_status
