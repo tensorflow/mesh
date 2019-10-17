@@ -265,7 +265,7 @@ class SimdMeshImplInputReader(object):
           2. The batch dimension is consistent across all input shapes in
              mtf_input_shapes.
       ds_prefetch_size: The buffer size for prefetching
-        (default tf.contrib.data.AUTOTUNE).
+        (default tf.data.experimental.AUTOTUNE).
       external_worker: Whether you have an external tpu_worker or not. Set it to
         False if you run the program locally, for example, during local unit
         test.
