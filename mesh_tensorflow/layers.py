@@ -24,18 +24,22 @@ from mesh_tensorflow import ops_with_redefined_builtins as mtf
 import tensorflow.compat.v1 as tf
 
 
-def dense(x, output_dim, reduced_dims=None, expert_dims=None,
-          use_bias=True, activation=None,
+def dense(x,
+          new_dims,
+          reduced_dims=None,
+          expert_dims=None,
+          use_bias=True,
+          activation=None,
           master_dtype=tf.float32,
           slice_dtype=tf.float32,
           variable_dtype=None,
+          kernel_initializer=None,
           name=None):
   """Dense layer doing (kernel*x + bias) computation.
 
   Args:
     x: a mtf.Tensor of shape [..., reduced_dims].
-    output_dim: a mtf.Dimension
-      alternatively, a list of mtf.Dimension
+    new_dims: a list of mtf.Dimension.
     reduced_dims: an optional list of mtf.Dimensions of x to be reduced. If
       omitted, we reduce the last dimension.
     expert_dims: an optional list of mtf.Dimension which represent different
@@ -45,32 +49,35 @@ def dense(x, output_dim, reduced_dims=None, expert_dims=None,
     master_dtype: a tf.dtype (deprecated - use variable_dtype)
     slice_dtype: a tf.dtype (deprecated - use variable_dtype)
     variable_dtype: a mtf.VariableDType
+    kernel_initializer: an initializer for kernel variable.
     name: a string used for tf.variable_scope.
 
   Returns:
-    a mtf.Tensor of shape [..., output_dim].
+    a mtf.Tensor of shape [..., new_dims].
   """
-  if isinstance(output_dim, list):
-    output_dims = output_dim
-  else:
-    output_dims = [output_dim]
+  if not isinstance(new_dims, list):
+    new_dims = [new_dims]
+
   if variable_dtype is None:
     variable_dtype = mtf.VariableDType(master_dtype, slice_dtype, x.dtype)
   if expert_dims is None:
     expert_dims = []
   if reduced_dims is None:
     reduced_dims = x.shape.dims[-1:]
-  w_shape = mtf.Shape(expert_dims + reduced_dims + output_dims)
-  output_shape = mtf.Shape(
-      [d for d in x.shape.dims if d not in reduced_dims] + output_dims)
+  w_shape = mtf.Shape(expert_dims + reduced_dims + new_dims)
+  output_shape = mtf.Shape([d for d in x.shape.dims if d not in reduced_dims] +
+                           new_dims)
 
   with tf.variable_scope(name, default_name="dense"):
-    stddev = mtf.list_product(d.size for d in reduced_dims) ** -0.5
+    if kernel_initializer is None:
+      stddev = mtf.list_product(d.size for d in reduced_dims)**-0.5
+      kernel_initializer = tf.random_normal_initializer(stddev=stddev)
+
     w = mtf.get_variable(
         x.mesh,
         "kernel",
         w_shape,
-        initializer=tf.random_normal_initializer(stddev=stddev),
+        initializer=kernel_initializer,
         dtype=variable_dtype)
     w = mtf.cast(w, x.dtype)
     y = mtf.einsum([x, w], output_shape)
@@ -78,7 +85,7 @@ def dense(x, output_dim, reduced_dims=None, expert_dims=None,
       b = mtf.get_variable(
           x.mesh,
           "bias",
-          mtf.Shape(expert_dims + output_dims),
+          mtf.Shape(expert_dims + new_dims),
           initializer=tf.zeros_initializer(),
           dtype=variable_dtype)
       y += b
@@ -1576,14 +1583,20 @@ def compress_mean(x, dim, compression_factor):
   return x
 
 
-def embedding_weights(
-    mesh, vocab_dim, output_dim, variable_dtype, name="embedding",
-    ensemble_dim=None):
+def embedding_weights(mesh,
+                      vocab_dim,
+                      output_dim,
+                      variable_dtype,
+                      name="embedding",
+                      ensemble_dim=None,
+                      initializer=None):
+  """Embedding weights."""
   shape = mtf.Shape(
       [ensemble_dim] if ensemble_dim else []) + [vocab_dim, output_dim]
+  if initializer is None:
+    initializer = tf.random_normal_initializer()
   ret = mtf.get_variable(
-      mesh, name, shape,
-      dtype=variable_dtype, initializer=tf.random_normal_initializer())
+      mesh, name, shape, dtype=variable_dtype, initializer=initializer)
   return ret
 
 

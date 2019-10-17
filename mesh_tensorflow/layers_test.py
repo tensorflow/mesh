@@ -47,11 +47,12 @@ class LayersTest(parameterized.TestCase, tf.test.TestCase):
 
     mtf_inputs = mtf.import_tf_tensor(
         mesh, inputs, shape=mtf.Shape([batch_dim, channels_dim]))
-    mtf_outputs = mtf.layers.dense(mtf_inputs,
-                                   output_dim=depth_dim,
-                                   reduced_dims=[channels_dim],
-                                   activation=mtf.relu,
-                                   use_bias=use_bias)
+    mtf_outputs = mtf.layers.dense(
+        mtf_inputs,
+        new_dims=depth_dim,
+        reduced_dims=[channels_dim],
+        activation=mtf.relu,
+        use_bias=use_bias)
     mesh_impl = mtf.placement_mesh_impl.PlacementMeshImpl(
         shape=[], layout={}, devices=[""])
     lowering = mtf.Lowering(graph, {mesh: mesh_impl})
