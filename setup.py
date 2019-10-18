@@ -29,7 +29,10 @@ setup(
         'transformer': ['tensorflow-datasets'],
     },
     tests_require=[
-        'pytest'
+        'ortools',
+        'pytest',
+        'tensorflow',
+        'tensorflow-datasets',
     ],
     setup_requires=['pytest-runner'],
     classifiers=[
