@@ -5,7 +5,7 @@ from setuptools import setup
 
 setup(
     name='mesh-tensorflow',
-    version='0.1.2',
+    version='0.1.3',
     description='Mesh TensorFlow',
     author='Google Inc.',
     author_email='no-reply@google.com',
@@ -14,19 +14,19 @@ setup(
     packages=find_packages(),
     package_data={
         # Include gin files.
-        '': ['*.gin'],
+        'transformer': ['transformer/gin/*.gin'],
     },
     scripts=[],
     install_requires=[
         'absl-py',
         'future',
         'gin-config',
-        'ortools',
         'six',
-        'tensorflow-datasets',
     ],
     extras_require={
+        'auto_mtf': ['ortools'],
         'tensorflow': ['tensorflow>=1.15.0'],
+        'transformer': ['tensorflow-datasets'],
     },
     tests_require=[
         'pytest'
