@@ -46,7 +46,7 @@ from tensorflow.python.tpu import tpu_estimator  # pylint: disable=g-direct-tens
 
 tf.flags.DEFINE_multi_string("gin_file", None, "Path to a Gin file.")
 tf.flags.DEFINE_multi_string("gin_param", None, "Gin parameter binding.")
-tf.flags.DEFINE_multi_string("gin_location_prefix", [], "Gin file search path.")
+tf.flags.DEFINE_list("gin_location_prefix", [], "Gin file search path.")
 
 FLAGS = tf.flags.FLAGS
 
