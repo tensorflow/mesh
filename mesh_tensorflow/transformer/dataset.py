@@ -265,8 +265,10 @@ def packed_parallel_tsv_dataset(dataset=gin.REQUIRED,
       targets_enc = tf.concat([tf.to_int64(targets_enc), [eos_id]], 0)
     return {"inputs": inputs_enc, "targets": targets_enc}
 
-  dataset = dataset.map(_parse_fn)
-  dataset = dataset.map(_encode_fn, num_parallel_calls=16)
+  dataset = dataset.map(
+      _parse_fn, num_parallel_calls=tf.data.experimental.AUTOTUNE)
+  dataset = dataset.map(
+      _encode_fn, num_parallel_calls=tf.data.experimental.AUTOTUNE)
 
   def _filter_fn(features):  # pylint: disable=missing-docstring
     return tf.less_equal(
@@ -541,7 +543,7 @@ def pack_dataset(dataset, length, keys=None, use_custom_ops=False):
   # Set the Tensor shapes correctly since they get lost in the process.
   def my_fn(x):
     return {k: tf.reshape(v, [length[k]]) for k, v in x.items()}
-  return dataset.map(my_fn)
+  return dataset.map(my_fn, num_parallel_calls=tf.data.experimental.AUTOTUNE)
 
 
 def _pack_with_tf_ops(dataset, keys, length):
