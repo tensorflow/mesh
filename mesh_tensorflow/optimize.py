@@ -178,7 +178,7 @@ class AdamWeightDecayOptimizer(Optimizer):
     # with the m/v parameters. This is equivalent to adding the square
     # of the weights to the loss with plain (non-momentum) SGD.
     if self._do_use_weight_decay(var.name):
-      update += self.weight_decay_rate * var
+      update += self.weight_decay_rate * mtf.read_variable(var)
 
     update_with_lr = self.learning_rate * update
 
