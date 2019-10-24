@@ -173,7 +173,7 @@ class SimdMeshImpl(mtf.MeshImpl):
         slices.append(
             tf.Variable(
                 initial_value=zero_tensor,
-                trainable=True,
+                trainable=self._variable.trainable,
                 collections=["TPU_VAR"],
                 dtype=variable.slice_dtype,
                 name=slice_var_name,

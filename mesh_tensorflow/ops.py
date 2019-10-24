@@ -3823,8 +3823,12 @@ class Variable(Operation):
     if not isinstance(self, StackedVariable):
       with tf.device(mesh.variable_placer_fn), utils.outside_all_rewrites():
         self._master = tf.get_variable(
-            name, shape.to_integer_list, dtype=self.master_dtype,
-            initializer=initializer, **kwargs)
+            name,
+            shape.to_integer_list,
+            dtype=self.master_dtype,
+            initializer=initializer,
+            trainable=trainable,
+            **kwargs)
       self._name = self._master.name[:self._master.name.find(":")]
     self._outputs = [Tensor(self, shape, dtype.activation_dtype)]
 
