@@ -31,10 +31,10 @@ from tensorflow.python.framework import test_util  # pylint:disable=g-direct-ten
 class LayersTest(parameterized.TestCase, tf.test.TestCase):
 
   @parameterized.parameters(
-      (4, True),
-      (8, False),
+      (4, True, "not_channels"),
+      (8, False, "channels"),
   )
-  def testDense(self, units, use_bias):
+  def testDense(self, units, use_bias, new_dim_name):
     batch = 2
     channels = 3
     inputs = tf.random_normal([batch, channels])
@@ -43,13 +43,13 @@ class LayersTest(parameterized.TestCase, tf.test.TestCase):
     mesh = mtf.Mesh(graph, "my_mesh")
     batch_dim = mtf.Dimension("batch", batch)
     channels_dim = mtf.Dimension("channels", channels)
-    depth_dim = mtf.Dimension("depth", units)
+    new_dim = mtf.Dimension(new_dim_name, units)
 
     mtf_inputs = mtf.import_tf_tensor(
         mesh, inputs, shape=mtf.Shape([batch_dim, channels_dim]))
     mtf_outputs = mtf.layers.dense(
         mtf_inputs,
-        new_dims=depth_dim,
+        new_dims=new_dim,
         reduced_dims=[channels_dim],
         activation=mtf.relu,
         use_bias=use_bias)

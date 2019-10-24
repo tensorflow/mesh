@@ -40,8 +40,8 @@ def dense(x,
   Args:
     x: a mtf.Tensor of shape [..., reduced_dims].
     new_dims: a list of mtf.Dimension.
-    reduced_dims: an optional list of mtf.Dimensions of x to be reduced. If
-      omitted, we reduce the last dimension.
+    reduced_dims: a list of mtf.Dimensions of x to be reduced.
+      If omitted (deprecated interface), we reduce the last dimension.
     expert_dims: an optional list of mtf.Dimension which represent different
       experts. Different experts get different weights.
     use_bias: a boolean, whether to add bias.
@@ -63,7 +63,23 @@ def dense(x,
   if expert_dims is None:
     expert_dims = []
   if reduced_dims is None:
+    tf.logging.warning(
+        "Deprecation warning - it is recommended to pass reduced_dims "
+        "explicitly to mtf.layers.dense() so as not to depend on dimension "
+        "order. To silence this warning, explicitly pass "
+        "reduced_dims=x.shape.dims[-1:] (in scope %s)"
+        %  tf.get_variable_scope().name)
     reduced_dims = x.shape.dims[-1:]
+  # if any reduced dims have the same names as new dims, first change these
+  #  dimension names in the input so as to avoid name conflict in the weight
+  #  matrix.
+  reduced_dims = reduced_dims[:]
+  for i in range(len(reduced_dims)):
+    if reduced_dims[i] in new_dims:
+      original_name = reduced_dims[i].name
+      tmp_name = "_" + original_name
+      reduced_dims[i] = mtf.Dimension(tmp_name, reduced_dims[i].size)
+      x = mtf.rename_dimension(x, original_name, tmp_name)
   w_shape = mtf.Shape(expert_dims + reduced_dims + new_dims)
   output_shape = mtf.Shape([d for d in x.shape.dims if d not in reduced_dims] +
                            new_dims)
@@ -634,6 +650,19 @@ def batch_norm(x, is_training, momentum, epsilon=1e-9,
 def softmax_cross_entropy_with_logits(logits, targets, vocab_dim, z_loss=0.0):
   """Per-example softmax loss.
 
+  `logits` is a Tensor with floating-point dtype, containing the predicted
+  relative log probabilities of the classes.
+
+  Either hard targets or soft targets are supported.
+
+  In the case of hard targets, `targets` is a Tensor with integer dtype whose
+  values are in the range [0, vocab_dim.size).  `targets` should have the same
+  set of dimensions as `logits`, but without `vocab_dim`.
+
+  In the case of soft targets, `targets` is a Tensor with floating point dtype
+  and the same dimensions as `logits.  Reducing `targets` along `vocab_dim`
+  should result in all ones.
+
   if z_loss is nonzero, we add a loss equal to z_loss*log(z)^2, where z is the
   partition function.  Example value: z_loss=1e-4.  Two uses of z_loss are:
   - To keep the logits from drifting too far from zero, which can cause
@@ -642,7 +671,7 @@ def softmax_cross_entropy_with_logits(logits, targets, vocab_dim, z_loss=0.0):
 
   Args:
     logits: a mtf.Tensor whose shape contains vocab_dim
-    targets: a mtf.Tensor with the same shape as logits
+    targets: a mtf.Tensor representing hard or soft targets (see comments)
     vocab_dim: a mtf.Dimension
     z_loss: a float
 
@@ -652,10 +681,19 @@ def softmax_cross_entropy_with_logits(logits, targets, vocab_dim, z_loss=0.0):
   Raises:
     ValueError: if the shapes do not match.
   """
-  if logits.shape != targets.shape:
+  if targets.dtype.is_integer:
+    # hard targets
+    if (set(targets.shape.dims)
+        != set(logits.shape.dims).difference([vocab_dim])):
+      raise ValueError(
+          "softmax_cross_entropy_with_logits with hard targets "
+          "dims in targets=%s should be dims in logits=%s other than "
+          "vocab_dim=%s" % (targets, logits, vocab_dim))
+    targets = mtf.one_hot(targets, vocab_dim, dtype=logits.dtype)
+  elif set(targets.shape.dims) != set(logits.shape.dims):
     raise ValueError(
-        "logits shape must equal targets shape"
-        "logits=%s targets=%s" % (logits.to_string, targets.to_string))
+        "softmax_cross_entropy_with_logits with soft targets "
+        "dims in targets=%s should be dims in logits=%s"% (targets, logits))
   if vocab_dim not in logits.shape.dims:
     raise ValueError("vocab_dim must be in logits.shape.dims")
   log_z = mtf.reduce_logsumexp(logits, vocab_dim)
