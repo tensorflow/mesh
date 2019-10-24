@@ -26,6 +26,7 @@ import os
 import re
 
 from mesh_tensorflow import utils
+import numpy as np
 import six
 from six.moves import xrange  # pylint: disable=redefined-builtin
 
@@ -1717,6 +1718,21 @@ def negative(x, name="negative"):
 
 def logical_not(x, name="logical_not"):
   return cwise(tf.logical_not, [x], name=name)
+
+
+def gelu(x):
+  """Gaussian Error Linear Unit.
+
+  This is a smoother version of the RELU.
+  Original paper: https://arxiv.org/abs/1606.08415
+  Args:
+    x: float Tensor to perform activation.
+
+  Returns:
+    `x` with the GELU activation applied.
+  """
+  cdf = 0.5 * (1.0 + tanh((np.sqrt(2 / np.pi) * (x + 0.044715 * x * x * x))))
+  return x * cdf
 
 
 def reciprocal(x, name="reciprocal"):
