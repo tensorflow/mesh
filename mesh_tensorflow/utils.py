@@ -23,6 +23,7 @@ import contextlib
 import heapq
 
 import tensorflow.compat.v1 as tf
+import tensorflow.compat.v2 as tf2
 from tensorflow.python.framework import ops  # pylint: disable=g-direct-tensorflow-import
 
 
@@ -112,7 +113,7 @@ def create_host_call(model_dir):
     # any Tensors in the rest of the `model_fn`. To pass Tensors from the
     # model to the `model_fn`, provide as part of the `host_call`.
     global_step = tf.cast(global_step[0], tf.int64)
-    with tf.summary.create_file_writer(model_dir).as_default():
+    with tf2.summary.create_file_writer(model_dir).as_default():
       # We cannot directly use any tensor from summaries, because each
       # tensor here must be a concat of multiple tensors from all shards.
       # Therefore, we rely on the assumption that args wil have the same
