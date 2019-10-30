@@ -722,13 +722,17 @@ def _dynamic_text2self(mtf_features):
   return mtf_features
 
 
-def get_inputs_from_file(input_filename):
+def get_inputs_from_file(input_filename, ignore_comments=True):
   """Read data from file and strip new lines."""
   inputs = [line.rstrip() for line in tf.io.gfile.GFile(input_filename)]
 
   # Strip the last empty line.
   if not inputs[-1]:
     inputs.pop()
+
+  if ignore_comments:
+    inputs = [l for l in inputs if not l.startswith("#")]
+
   return inputs
 
 
@@ -853,7 +857,8 @@ def decode_from_file(estimator,
                      checkpoint_path=None,
                      input_filename=gin.REQUIRED,
                      output_filename=gin.REQUIRED,
-                     eos_id=1):
+                     eos_id=1,
+                     repeats=1):
   """Decode from a text file and write to output_filename.
 
   Args:
@@ -867,6 +872,7 @@ def decode_from_file(estimator,
     input_filename: a string
     output_filename: a string
     eos_id: EOS id
+    repeats: an integer, the number of times to repeat each input.
   """
   inputs = get_inputs_from_file(input_filename)
 
@@ -875,6 +881,8 @@ def decode_from_file(estimator,
   def input_fn(params):
     del params
     dataset = tf.data.Dataset.from_tensor_slices({"inputs": all_input_ids})
+    dataset = dataset.flat_map(
+        lambda x: tf.data.Dataset.from_tensors(x).repeat(repeats))
     dataset = dataset.batch(batch_size, drop_remainder=True)
     dataset = dataset.prefetch(tf.data.experimental.AUTOTUNE)
     return dataset
@@ -884,7 +892,7 @@ def decode_from_file(estimator,
       estimator, input_fn, vocabulary, checkpoint_path=checkpoint_path
   )
   # Remove any padded examples
-  dataset_size = len(inputs)
+  dataset_size = len(inputs) * repeats
   decodes = decodes[:dataset_size]
   output_filename = "{}-{}".format(output_filename, checkpoint_step)
   write_lines_to_file(decodes, output_filename)
