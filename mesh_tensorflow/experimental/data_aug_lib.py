@@ -25,6 +25,7 @@ from __future__ import print_function
 
 import tensorflow as tf
 import tensorflow_probability as tfp
+from tensorflow.contrib import image as contrib_image
 
 
 def _truncated_normal(mean, stddev):
@@ -64,17 +65,14 @@ def projective_transform(
   def _projective_transform(data, proj_matrix, static_axis, interpolation):
     """Apply projective transformation."""
     if static_axis == 2:
-      data = tf.contrib.image.transform(
-          data, proj_matrix, interpolation)
+      data = contrib_image.transform(data, proj_matrix, interpolation)
     elif static_axis == 1:
       data = tf.transpose(data, [0, 2, 1])
-      data = tf.contrib.image.transform(
-          data, proj_matrix, interpolation)
+      data = contrib_image.transform(data, proj_matrix, interpolation)
       data = tf.transpose(data, [0, 2, 1])
     else:
       data = tf.transpose(data, [2, 1, 0])
-      data = tf.contrib.image.transform(
-          data, proj_matrix, interpolation)
+      data = contrib_image.transform(data, proj_matrix, interpolation)
       data = tf.transpose(data, [2, 1, 0])
     return data
 

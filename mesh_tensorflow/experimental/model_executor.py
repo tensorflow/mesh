@@ -31,6 +31,7 @@ import tensorflow as tf
 # pylint: disable=g-direct-third-party-import
 from mesh_tensorflow.experimental import input_reader
 from mesh_tensorflow.experimental import unet
+from tensorflow.contrib import summary as contrib_summary
 from tensorflow.contrib import tpu
 from tensorflow.contrib.tpu.python.tpu import device_assignment
 from tensorflow.python.framework import ops
@@ -124,7 +125,7 @@ class MeshContext(object):
 
     if self._use_tpu:
       topology = sess.run(tpu.initialize_system())
-      topo_object = tf.contrib.tpu.Topology(serialized=topology)
+      topo_object = tpu.Topology(serialized=topology)
       self._num_cores = int(np.prod(topo_object.mesh_shape))
       self._num_hosts = int(topo_object.num_tasks)
       num_cores_per_host = int(self._num_cores // self._num_hosts)
@@ -248,11 +249,11 @@ def _get_model_fn(train_or_eval, mesh_context):
       def _host_loss_summary(global_step, tf_loss, **scalars):
         """Add summary.scalar in host side."""
         gs = tf.cast(global_step, tf.int64)
-        sum_loss = tf.contrib.summary.scalar(
+        sum_loss = contrib_summary.scalar(
             '{}_loss'.format(train_or_eval), tf_loss, step=gs)
         sum_ops = [sum_loss.op]
         for description, tf_metric in scalars.iteritems():
-          sum_metric = tf.contrib.summary.scalar(
+          sum_metric = contrib_summary.scalar(
               '{}_{}'.format(train_or_eval, description), tf_metric, step=gs)
           sum_ops.append(sum_metric)
         with tf.control_dependencies(sum_ops):
@@ -410,7 +411,7 @@ def _train_phase(mesh_context):
                  slice_to_master_hook, step_counter_hook]
 
     if FLAGS.write_summary:
-      flush_summary = tf.contrib.summary.flush()
+      flush_summary = contrib_summary.flush()
 
     with tf.train.MonitoredTrainingSession(
         master=FLAGS.master,
@@ -419,7 +420,7 @@ def _train_phase(mesh_context):
         config=tf.ConfigProto(allow_soft_placement=True)) as sess:
 
       if FLAGS.write_summary:
-        tf.contrib.summary.initialize(session=sess)
+        contrib_summary.initialize(session=sess)
 
       if FLAGS.use_tpu:
         simd_input_reader.start_infeed_thread(
@@ -435,9 +436,9 @@ def _train_phase(mesh_context):
 
   with tf.Graph().as_default():
     if FLAGS.write_summary:
-      summary_writer = tf.contrib.summary.create_file_writer(FLAGS.summary_dir)
+      summary_writer = contrib_summary.create_file_writer(FLAGS.summary_dir)
       with summary_writer.as_default(), (
-          tf.contrib.summary.always_record_summaries()):
+          contrib_summary.always_record_summaries()):
         _run_train_phase()
     else:
       _run_train_phase()
@@ -501,7 +502,7 @@ def _eval_phase(mesh_context):
     all_hooks = [ckpt_loader_hook, master_to_slice_hook]
 
     if FLAGS.write_summary:
-      flush_summary = tf.contrib.summary.flush()
+      flush_summary = contrib_summary.flush()
 
     with tf.train.MonitoredSession(
         session_creator=tf.train.ChiefSessionCreator(
@@ -510,7 +511,7 @@ def _eval_phase(mesh_context):
         hooks=all_hooks) as sess:
 
       if FLAGS.write_summary:
-        tf.contrib.summary.initialize(session=sess)
+        contrib_summary.initialize(session=sess)
 
       if FLAGS.use_tpu:
         simd_input_reader.start_infeed_thread(
@@ -535,9 +536,9 @@ def _eval_phase(mesh_context):
 
   with tf.Graph().as_default():
     if FLAGS.write_summary:
-      summary_writer = tf.contrib.summary.create_file_writer(FLAGS.summary_dir)
+      summary_writer = contrib_summary.create_file_writer(FLAGS.summary_dir)
       with summary_writer.as_default(), (
-          tf.contrib.summary.always_record_summaries()):
+          contrib_summary.always_record_summaries()):
         _run_eval_phase()
     else:
       _run_eval_phase()
