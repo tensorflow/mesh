@@ -22,7 +22,6 @@ from __future__ import print_function
 import mesh_tensorflow.transformer.attention
 import mesh_tensorflow.transformer.dataset
 import mesh_tensorflow.transformer.learning_rate_schedules
-import mesh_tensorflow.transformer.model_builder
 import mesh_tensorflow.transformer.moe
 import mesh_tensorflow.transformer.t2t_vocabulary
 import mesh_tensorflow.transformer.transformer
