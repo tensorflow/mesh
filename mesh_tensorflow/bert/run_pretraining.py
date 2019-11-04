@@ -142,9 +142,15 @@ def model_fn_builder(bert_config, init_checkpoint, learning_rate,
     var_placer = mtf.utils.BalancedVariablePlacer(device_list,
                                                   devices_memeory_usage)
     mesh_devices = [""] * mesh_shape.size
-    mesh_impl = mtf.simd_mesh_impl.SimdMeshImpl(mesh_shape, layout_rules,
-                                                mesh_devices,
-                                                ctx.device_assignment)
+    physical_shape = list(ctx.device_assignment.topology.mesh_shape)
+    logical_to_physical = mtf.simd_mesh_impl.auto_logical_to_physical_tpu(
+        mesh_shape.to_integer_list, physical_shape)
+    mesh_impl = mtf.simd_mesh_impl.SimdMeshImpl(
+        mesh_shape,
+        layout_rules,
+        mesh_devices,
+        ctx.device_assignment,
+        logical_to_physical=logical_to_physical)
     mesh = mtf.Mesh(graph, "bert_mesh", var_placer)
 
     input_ids = features["input_ids"]
