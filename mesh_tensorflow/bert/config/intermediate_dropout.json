@@ -1,0 +1,19 @@
+{
+  "vocab_size": 30522,
+  "d_model": 768,
+  "position_signal": "embedding",
+  "max_position_embeddings": 512,
+  "num_blocks": 12,
+  "block_layers": ["attention", "feedforward"],
+  "layer_output_dropout_prob": 0.1,
+  "residual_structure": "original",
+  "use_bias": true,
+  "attention_num_heads": 12,
+  "attention_head_size": 64,
+  "attention_probs_dropout_prob": 0.1,
+  "feedforward_intermediate_size": 3072,
+  "feedforward_intermediate_act": "gelu",
+  "feedforward_intermediate_dropout_prob": 0.1,
+  "type_vocab_size": 2,
+  "initializer_range": 0.02
+}

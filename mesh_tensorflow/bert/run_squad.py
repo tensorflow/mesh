@@ -61,10 +61,17 @@ flags.DEFINE_string(
     "init_checkpoint", None,
     "Initial checkpoint (usually from a pre-trained BERT model).")
 
+flags.DEFINE_string(
+    "cached_train_file", None, "Prepared training file.")
+
 flags.DEFINE_bool(
     "do_lower_case", True,
     "Whether to lower case the input text. Should be True for uncased "
     "models and False for cased models.")
+
+flags.DEFINE_float(
+    "max_optimized_variable_size", 1e7,
+    "Do not optimize variables larger than this.")
 
 flags.DEFINE_integer(
     "max_seq_length", 384,
@@ -122,7 +129,8 @@ flags.DEFINE_bool("use_tpu", False, "Whether to use TPU or GPU/CPU.")
 tf.flags.DEFINE_string("mesh_shape", "batch:8", "mesh shape")
 
 tf.flags.DEFINE_string(
-    "layout", "batch:batch,vocab:model,intermediate:model,num_heads:model",
+    "layout",
+    "batch:batch,vocab:model,intermediate:model,num_heads:model,experts:batch",
     "layout rules")
 
 tf.flags.DEFINE_string(
@@ -560,7 +568,9 @@ def create_model(bert_config, is_training, input_ids, input_mask, segment_ids):
       is_training=is_training,
       input_ids=input_ids,
       input_mask=input_mask,
-      token_type_ids=segment_ids)
+      token_type_ids=segment_ids,
+      mesh_shape=FLAGS.mesh_shape,
+      layout=FLAGS.layout)
 
   final_hidden = model.get_sequence_output()
 
@@ -658,10 +668,12 @@ def model_fn_builder(bert_config, init_checkpoint, learning_rate,
       end_loss = compute_loss(end_logits, mtf_end_positions)
 
       total_loss = (start_loss + end_loss) / 2.0
-      _, update_ops = optimization_lib.create_optimizer(total_loss,
-                                                        learning_rate,
-                                                        num_train_steps,
-                                                        num_warmup_steps)
+      _, update_ops = optimization_lib.create_optimizer(
+          total_loss,
+          learning_rate,
+          num_train_steps,
+          num_warmup_steps,
+          max_optimized_variable_size=FLAGS.max_optimized_variable_size)
     elif mode == tf.estimator.ModeKeys.PREDICT:
       start_logits = mtf.anonymize(start_logits)
       end_logits = mtf.anonymize(end_logits)
@@ -1246,28 +1258,32 @@ def main(_):
   if FLAGS.do_train:
     # We write to a temporary file to avoid storing very large constant tensors
     # in memory.
-    train_writer = FeatureWriter(
-        filename=os.path.join(FLAGS.output_dir, "train.tf_record"),
-        is_training=True)
-    convert_examples_to_features(
-        examples=train_examples,
-        tokenizer=tokenizer,
-        max_seq_length=FLAGS.max_seq_length,
-        doc_stride=FLAGS.doc_stride,
-        max_query_length=FLAGS.max_query_length,
-        is_training=True,
-        output_fn=train_writer.process_feature)
-    train_writer.close()
+    if FLAGS.cached_train_file:
+      train_tfrecords_file = FLAGS.cached_train_file
+    else:
+      train_writer = FeatureWriter(
+          filename=os.path.join(FLAGS.output_dir, "train.tf_record"),
+          is_training=True)
+      convert_examples_to_features(
+          examples=train_examples,
+          tokenizer=tokenizer,
+          max_seq_length=FLAGS.max_seq_length,
+          doc_stride=FLAGS.doc_stride,
+          max_query_length=FLAGS.max_query_length,
+          is_training=True,
+          output_fn=train_writer.process_feature)
+      train_writer.close()
+      train_tfrecords_file = train_writer.filename
 
-    tf.logging.info("***** Running training *****")
-    tf.logging.info("  Num orig examples = %d", len(train_examples))
-    tf.logging.info("  Num split examples = %d", train_writer.num_features)
-    tf.logging.info("  Batch size = %d", FLAGS.train_batch_size)
-    tf.logging.info("  Num steps = %d", num_train_steps)
+      tf.logging.info("***** Running training *****")
+      tf.logging.info("  Num orig examples = %d", len(train_examples))
+      tf.logging.info("  Num split examples = %d", train_writer.num_features)
+      tf.logging.info("  Batch size = %d", FLAGS.train_batch_size)
+      tf.logging.info("  Num steps = %d", num_train_steps)
     del train_examples
 
     train_input_fn = input_fn_builder(
-        input_file=train_writer.filename,
+        input_file=train_tfrecords_file,
         seq_length=FLAGS.max_seq_length,
         is_training=True,
         drop_remainder=True)

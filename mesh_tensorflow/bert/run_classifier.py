@@ -59,10 +59,17 @@ flags.DEFINE_string(
     "init_checkpoint", None,
     "Initial checkpoint (usually from a pre-trained BERT model).")
 
+flags.DEFINE_string(
+    "cached_train_file", None, "Prepared training file.")
+
 flags.DEFINE_bool(
     "do_lower_case", True,
     "Whether to lower case the input text. Should be True for uncased "
     "models and False for cased models.")
+
+flags.DEFINE_float(
+    "max_optimized_variable_size", 1e7,
+    "Do not optimize variables larger than this.")
 
 flags.DEFINE_integer(
     "max_seq_length", 128,
@@ -80,11 +87,15 @@ flags.DEFINE_bool(
 
 flags.DEFINE_integer("train_batch_size", 32, "Total batch size for training.")
 
-flags.DEFINE_integer("eval_batch_size", 8, "Total batch size for eval.")
+flags.DEFINE_integer("eval_batch_size", 32, "Total batch size for eval.")
 
 flags.DEFINE_integer("predict_batch_size", 8, "Total batch size for predict.")
 
 flags.DEFINE_float("learning_rate", 5e-5, "The initial learning rate for Adam.")
+
+flags.DEFINE_bool("clip_gradients", True, "Apply gradient clipping.")
+
+flags.DEFINE_string("optimizer", "adam", "adam/adafactor")
 
 flags.DEFINE_float("num_train_epochs", 3.0,
                    "Total number of training epochs to perform.")
@@ -104,7 +115,8 @@ flags.DEFINE_bool("use_tpu", False, "Whether to use TPU or GPU/CPU.")
 
 tf.flags.DEFINE_string("mesh_shape", "batch:8", "mesh shape")
 tf.flags.DEFINE_string(
-    "layout", "batch:batch,vocab:model,intermediate:model,num_heads:model",
+    "layout",
+    "batch:batch,vocab:model,intermediate:model,num_heads:model,experts:batch",
     "layout rules")
 
 tf.flags.DEFINE_string(
@@ -485,7 +497,8 @@ def file_based_convert_examples_to_features(examples, label_list,
                                             output_file):
   """Convert a set of `InputExample`s to a TFRecord file."""
 
-  writer = tf.python_io.TFRecordWriter(output_file)
+  writer = tf.python_io.TFRecordWriter(
+      output_file, tf.python_io.TFRecordOptions(output_buffer_size=2 ** 24))
 
   for (ex_index, example) in enumerate(examples):
     if ex_index % 10000 == 0:
@@ -577,14 +590,16 @@ def _truncate_seq_pair(tokens_a, tokens_b, max_length):
 
 
 def create_model(bert_config, is_training, input_ids, input_mask, segment_ids,
-                 labels, num_labels_dim):
+                 labels, num_labels_dim, layout, mesh_shape):
   """Creates a classification model."""
   model = bert_lib.BertModel(
       config=bert_config,
       is_training=is_training,
       input_ids=input_ids,
       input_mask=input_mask,
-      token_type_ids=segment_ids)
+      token_type_ids=segment_ids,
+      layout=layout,
+      mesh_shape=mesh_shape)
 
   # In the demo, we are doing a simple classification task on the entire
   # segment.
@@ -619,7 +634,7 @@ def create_model(bert_config, is_training, input_ids, input_mask, segment_ids,
 
     per_example_loss = mtf.layers.softmax_cross_entropy_with_logits(
         logits, labels, vocab_dim=num_labels_dim)
-    loss = mtf.reduce_mean(per_example_loss)
+    loss = mtf.reduce_mean(per_example_loss) + model.get_extra_loss()
 
     return (loss, per_example_loss, logits, probabilities)
 
@@ -684,16 +699,21 @@ def model_fn_builder(bert_config, num_labels, init_checkpoint, learning_rate,
     (total_loss, per_example_loss, logits,
      probabilities) = create_model(bert_config, is_training, mtf_input_ids,
                                    mtf_input_mask, mtf_segment_ids,
-                                   mtf_label_ids, num_labels_dim)
+                                   mtf_label_ids, num_labels_dim,
+                                   layout_rules, mesh_shape)
     total_loss = mtf.anonymize(total_loss)
     per_example_loss = mtf.anonymize(per_example_loss)
     logits = mtf.anonymize(logits)
 
     if mode == tf.estimator.ModeKeys.TRAIN:
-      _, update_ops = optimization_lib.create_optimizer(total_loss,
-                                                        learning_rate,
-                                                        num_train_steps,
-                                                        num_warmup_steps)
+      _, update_ops = optimization_lib.create_optimizer(
+          total_loss,
+          learning_rate,
+          num_train_steps,
+          num_warmup_steps,
+          max_optimized_variable_size=FLAGS.max_optimized_variable_size,
+          optimizer=FLAGS.optimizer,
+          clip_gradients=FLAGS.clip_gradients)
 
     lowering = mtf.Lowering(graph, {mesh: mesh_impl})
     tf_loss = tf.to_float(lowering.export_to_tf_tensor(total_loss))
@@ -945,14 +965,17 @@ def main(_):
       predict_batch_size=FLAGS.predict_batch_size)
 
   if FLAGS.do_train:
-    train_file = os.path.join(FLAGS.output_dir, "train.tf_record")
-    file_based_convert_examples_to_features(train_examples, label_list,
-                                            FLAGS.max_seq_length, tokenizer,
-                                            train_file)
-    tf.logging.info("***** Running training *****")
-    tf.logging.info("  Num examples = %d", len(train_examples))
-    tf.logging.info("  Batch size = %d", FLAGS.train_batch_size)
-    tf.logging.info("  Num steps = %d", num_train_steps)
+    if FLAGS.cached_train_file:
+      train_file = FLAGS.cached_train_file
+    else:
+      train_file = os.path.join(FLAGS.output_dir, "train.tf_record")
+      file_based_convert_examples_to_features(train_examples, label_list,
+                                              FLAGS.max_seq_length, tokenizer,
+                                              train_file)
+      tf.logging.info("***** Running training *****")
+      tf.logging.info("  Num examples = %d", len(train_examples))
+      tf.logging.info("  Batch size = %d", FLAGS.train_batch_size)
+      tf.logging.info("  Num steps = %d", num_train_steps)
     train_input_fn = file_based_input_fn_builder(
         input_file=train_file,
         seq_length=FLAGS.max_seq_length,

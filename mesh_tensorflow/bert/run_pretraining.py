@@ -72,6 +72,10 @@ flags.DEFINE_integer("eval_batch_size", 8, "Total batch size for eval.")
 
 flags.DEFINE_float("learning_rate", 5e-5, "The initial learning rate for Adam.")
 
+flags.DEFINE_bool("clip_gradients", True, "Apply gradient clipping.")
+
+flags.DEFINE_string("optimizer", "adam", "adam/adafactor")
+
 flags.DEFINE_integer("num_train_steps", 100000, "Number of training steps.")
 
 flags.DEFINE_integer("num_warmup_steps", 10000, "Number of warmup steps.")
@@ -89,7 +93,7 @@ flags.DEFINE_bool("use_tpu", False, "Whether to use TPU or GPU/CPU.")
 tf.flags.DEFINE_string("mesh_shape", "batch:8", "mesh shape")
 tf.flags.DEFINE_string(
     "layout",
-    "batch:batch,vocab:model,intermediate:model,num_heads:model",
+    "batch:batch,vocab:model,intermediate:model,num_heads:model,experts:batch",
     "layout rules")
 
 tf.flags.DEFINE_string(
@@ -192,7 +196,9 @@ def model_fn_builder(bert_config, init_checkpoint, learning_rate,
         is_training=is_training,
         input_ids=mtf_input_ids,
         input_mask=mtf_input_mask,
-        token_type_ids=mtf_segment_ids)
+        token_type_ids=mtf_segment_ids,
+        layout=layout_rules,
+        mesh_shape=mesh_shape)
 
     (masked_lm_loss, masked_lm_example_loss,
      masked_lm_logits) = model.get_masked_lm_output(
@@ -201,6 +207,8 @@ def model_fn_builder(bert_config, init_checkpoint, learning_rate,
     (next_sentence_loss, next_sentence_example_loss,
      next_sentence_logits) = model.get_next_sentence_output(
          mtf_next_sentence_labels)
+
+    extra_loss = model.get_extra_loss()
 
     total_loss = masked_lm_loss + next_sentence_loss
     total_loss = mtf.anonymize(total_loss)
@@ -211,10 +219,13 @@ def model_fn_builder(bert_config, init_checkpoint, learning_rate,
 
     # TRAIN mode
     if mode == tf.estimator.ModeKeys.TRAIN:
-      _, update_ops = optimization_lib.create_optimizer(total_loss,
-                                                        learning_rate,
-                                                        num_train_steps,
-                                                        num_warmup_steps)
+      _, update_ops = optimization_lib.create_optimizer(
+          total_loss + extra_loss,
+          learning_rate,
+          num_train_steps,
+          num_warmup_steps,
+          optimizer=FLAGS.optimizer,
+          clip_gradients=FLAGS.clip_gradients)
 
     lowering = mtf.Lowering(graph, {mesh: mesh_impl})
 

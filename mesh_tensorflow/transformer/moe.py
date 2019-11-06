@@ -896,7 +896,7 @@ def set_default_moe_hparams(hparams):
 
 
 def _split_into_groups(n, max_group_size, mesh_dim_size):
-  """Helper function for figuring out how to split a dimensino into groups.
+  """Helper function for figuring out how to split a dimension into groups.
 
   We have a dimension with size n and we want to split it into
   two dimensions: n = num_groups * group_size

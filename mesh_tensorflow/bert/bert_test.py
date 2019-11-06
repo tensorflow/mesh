@@ -33,20 +33,20 @@ class BertTest(tf.test.TestCase):
   def test_bert_forward(self):
 
     def create_computation_fn(device_assignment):
-      hidden_size = 128
-      num_hidden_layers = 2
+      d_model = 128
+      num_blocks = 2
       seq_length = 128
       batch_size = 2
       vocab_size = 30522
 
       bert_config = bert_lib.BertConfig(
           vocab_size=vocab_size,
-          hidden_size=int(hidden_size),
-          num_hidden_layers=int(num_hidden_layers),
-          num_attention_heads=int(hidden_size / 64),
-          intermediate_size=int(hidden_size * 4),
-          hidden_act='relu',
-          hidden_dropout_prob=0.1,
+          d_model=int(d_model),
+          num_blocks=int(num_blocks),
+          attention_num_heads=int(d_model / 64),
+          feedforward_intermediate_size=int(d_model * 4),
+          feedforward_intermediate_act='relu',
+          feedforward_intermediate_dropout_prob=0.1,
           attention_probs_dropout_prob=0.1,
           max_position_embeddings=seq_length,
           type_vocab_size=2,
