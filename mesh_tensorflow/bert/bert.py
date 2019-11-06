@@ -332,7 +332,7 @@ class BertModel(object):
       logits = mtf.einsum([input_tensor, output_weights],
                           reduced_dims=[self.hidden_dim]) + output_bias
       per_example_loss = mtf.layers.softmax_cross_entropy_with_logits(
-          logits, label_ids, self.vocab_dim)
+          logits, label_ids, self.vocab_dim, z_loss=1e-4)
       # The `positions` tensor might be zero-padded (if the sequence is too
       # short to have the maximum number of predictions). The `label_weights`
       # tensor has a value of 1.0 for every real prediction and 0.0 for the
@@ -356,7 +356,7 @@ class BertModel(object):
         kernel_initializer=self.initializer,
         name="cls/seq_relationship")
     per_example_loss = mtf.layers.softmax_cross_entropy_with_logits(
-        logits, labels, class_dim)
+        logits, labels, class_dim, z_loss=1e-4)
     loss = mtf.reduce_mean(per_example_loss)
     return (loss, per_example_loss, logits)
 
