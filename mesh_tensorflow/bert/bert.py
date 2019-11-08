@@ -246,7 +246,8 @@ class BertModel(object):
               num_buckets=buckets_dim.size)
           bias_var = mtf.get_variable(
               mesh, "relative_attention_bias",
-              [self.num_heads_dim, buckets_dim])
+              [self.num_heads_dim, buckets_dim],
+              initializer=tf.zeros_initializer())
           attention_biases.append(mtf.gather(bias_var, rp_bucket, buckets_dim))
         attention_bias = mtf.add_n(attention_biases)
         prev_layer_output = self.embedding_output
@@ -296,7 +297,7 @@ class BertModel(object):
             reduced_dims=[self.model_dim],
             new_dims=[self.model_dim],
             activation=mtf.tanh,
-            kernel_initializer=self.initializer,
+            kernel_initializer=self.dense_initializer,
             use_bias=self.config.use_bias)
 
   def self_attention(self, x, attention_bias):
@@ -317,21 +318,21 @@ class BertModel(object):
         x,
         reduced_dims=[self.model_dim],
         new_dims=[self.num_heads_dim, self.size_per_head_dim],
-        kernel_initializer=self.initializer,
+        kernel_initializer=self.dense_initializer,
         name="query",
         use_bias=self.config.use_bias)
     keys = mtf.layers.dense(
         mtf.replace_dimensions(x, self.seq_dim, self.memory_seq_dim),
         reduced_dims=[self.model_dim],
         new_dims=[self.num_heads_dim, self.size_per_head_dim],
-        kernel_initializer=self.initializer,
+        kernel_initializer=self.dense_initializer,
         name="key",
         use_bias=self.config.use_bias)
     values = mtf.layers.dense(
         mtf.replace_dimensions(x, self.seq_dim, self.memory_seq_dim),
         reduced_dims=[self.model_dim],
         new_dims=[self.num_heads_dim, self.size_per_head_dim],
-        kernel_initializer=self.initializer,
+        kernel_initializer=self.dense_initializer,
         name="value",
         use_bias=self.config.use_bias)
 
@@ -361,7 +362,7 @@ class BertModel(object):
         output,
         reduced_dims=[self.num_heads_dim, self.size_per_head_dim],
         new_dims=[self.model_dim],
-        kernel_initializer=self.initializer,
+        kernel_initializer=self.dense_initializer,
         name="output",
         use_bias=self.config.use_bias)
     output = mtf.transpose(output, x.shape)
@@ -372,13 +373,13 @@ class BertModel(object):
         x, reduced_dims=[self.model_dim],
         new_dims=[self.feedforward_intermediate_dim],
         activation=get_activation(self.config.feedforward_intermediate_act),
-        kernel_initializer=self.initializer,
+        kernel_initializer=self.dense_initializer,
         name="dense_1", use_bias=self.config.use_bias)
     return mtf.layers.dense(
         intermediate,
         reduced_dims=[self.feedforward_intermediate_dim],
         new_dims=[self.model_dim],
-        kernel_initializer=self.initializer,
+        kernel_initializer=self.dense_initializer,
         name="dense_2", use_bias=self.config.use_bias)
 
   def moe(self, x, layout, mesh_shape, input_mask, is_training):
@@ -397,9 +398,9 @@ class BertModel(object):
     """
     hparams = moe.HParams(
         moe_gating="top_2",
-        moe_num_experts=self.config.num_experts,
+        moe_num_experts=self.config.moe_num_experts,
         moe_loss_coef=1e-3,
-        moe_hidden_size=self.config.expert_hidden_size,
+        moe_hidden_size=self.config.moe_intermediate_size,
         moe_group_size=2048,
         moe_capacity_factor_train=1.25,
         moe_capacity_factor_eval=8.0,
@@ -416,7 +417,8 @@ class BertModel(object):
         variable_dtype=tf.float32,
         layout=layout,
         mesh_shape=mesh_shape,
-        nonpadding=(mtf.cast(input_mask, tf.float32) if input_mask else None))
+        nonpadding=(mtf.cast(input_mask, tf.float32) if input_mask else None),
+        activation=get_activation(self.config.feedforward_intermediate_act))
     self._extra_losses.append(loss)
     return layer_output
 
@@ -436,7 +438,7 @@ class BertModel(object):
             reduced_dims=[self.model_dim],
             new_dims=[self.model_dim],
             activation=get_activation(self.config.feedforward_intermediate_act),
-            kernel_initializer=self.initializer,
+            kernel_initializer=self.dense_initializer,
             use_bias=self.config.use_bias)
         input_tensor = self.normalize(input_tensor)
       # The output weights are the same as the input embeddings, but there is
@@ -470,7 +472,7 @@ class BertModel(object):
         input_tensor,
         reduced_dims=[self.model_dim],
         new_dims=[class_dim],
-        kernel_initializer=self.initializer,
+        kernel_initializer=self.dense_initializer,
         name="cls/seq_relationship",
         use_bias=self.config.use_bias)
     per_example_loss = mtf.layers.softmax_cross_entropy_with_logits(
@@ -565,20 +567,23 @@ class BertModel(object):
     return self._memory_seq_dim
 
   @property
-  def initializer(self):
+  def dense_initializer(self):
     if self.config.initializer_range:
       return tf.truncated_normal_initializer(
           stddev=self.config.initializer_range)
     else:
-      return None
+      return mtf.layers.VarianceScalingInitializer(scale=0.4)
 
   @property
   def embedding_initializer(self):
-    if self.config.initializer_range:
-      return self.initializer
+    initializer = self.dense_initializer
+    if isinstance(initializer, mtf.layers.DenseInitializer):
+      # embedding matrix is also used as classifier weight matrix.
+      # scale it appropriately.
+      return initializer(
+          reduced_dims=[self.model_dim], new_dims=[self.vocab_dim])
     else:
-      return tf.truncated_normal_initializer(
-          stddev=self.model_dim.size ** -0.5)
+      return initializer
 
   @property
   def size_per_head_dim(self):

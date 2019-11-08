@@ -42,12 +42,12 @@ def create_optimizer(loss, init_lr, num_train_steps, num_warmup_steps,
                      optimizer="adam",
                      clip_gradients=True):
   """Creates an optimizer training op."""
-  learning_rate = tf.constant(value=init_lr, shape=[], dtype=tf.float32)
   global_step = tf.train.get_or_create_global_step()
   mesh = loss.mesh
 
   if init_lr:
     # Implements linear decay of the learning rate.
+    learning_rate = tf.constant(value=init_lr, shape=[], dtype=tf.float32)
     learning_rate = tf.train.polynomial_decay(
         learning_rate,
         global_step,

@@ -152,7 +152,7 @@ class MoE2D(transformer.TransformerLayer):
 
 def transformer_moe_layer_v1(
     inputs, output_dim, hparams, train, variable_dtype,
-    layout=None, mesh_shape=None, nonpadding=None):
+    layout=None, mesh_shape=None, nonpadding=None, activation=mtf.relu):
   """Local mixture of experts that works well on TPU.
 
   Adapted from the paper https://arxiv.org/abs/1701.06538
@@ -225,6 +225,7 @@ def transformer_moe_layer_v1(
     nonpadding: an optional Tensor with shape [batch_dim(s), length_dim]
       and the same dtype as inputs, consisting of ones(nonpadding)
       and zeros(padding).
+    activation: a function.
 
   Returns:
     outputs: a Tensor with shape [batch_dim(s), length_dim, output_dim]
@@ -367,7 +368,7 @@ def transformer_moe_layer_v1(
   # Now feed the expert inputs through the experts.
   h = mtf.layers.dense(
       expert_inputs, hidden_dim, expert_dims=[experts_dim],
-      activation=mtf.relu, use_bias=False,
+      activation=activation, use_bias=False,
       variable_dtype=variable_dtype, name="wi")
 
   expert_output = mtf.layers.dense(

@@ -4011,6 +4011,11 @@ def get_variable(mesh, name, shape, dtype=tf.float32,
     full_name = scope_name + "/" + name
   else:
     full_name = name
+  if initializer is None:
+    tf.logging.warning(
+        "Using default tf glorot_uniform_initializer for variable %s "
+        " The initialzer will guess the input and output dimensions "
+        " based on dimension order."  % full_name)
   if full_name in mesh.graph.name_to_variable:
     var = mesh.graph.name_to_variable[full_name]
   else:

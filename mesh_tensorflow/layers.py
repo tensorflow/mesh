@@ -83,12 +83,11 @@ def dense(x,
   w_shape = mtf.Shape(expert_dims + reduced_dims + new_dims)
   output_shape = mtf.Shape([d for d in x.shape.dims if d not in reduced_dims] +
                            new_dims)
-
   with tf.variable_scope(name, default_name="dense"):
     if kernel_initializer is None:
-      stddev = mtf.list_product(d.size for d in reduced_dims)**-0.5
-      kernel_initializer = tf.random_normal_initializer(stddev=stddev)
-
+      kernel_initializer = VarianceScalingInitializer()
+    if isinstance(kernel_initializer, DenseInitializer):
+      kernel_initializer = kernel_initializer(reduced_dims, new_dims)
     w = mtf.get_variable(
         x.mesh,
         "kernel",
@@ -108,6 +107,80 @@ def dense(x,
     if activation is not None:
       y = activation(y)
     return y
+
+
+class DenseInitializer(object):
+  """Initializer that can be passed to dense().
+
+  The __call__ function takes reduced_dims and new_dims and returns a
+  tf initializer class.
+  """
+
+  def __call__(self, reduced_dims, new_dims):
+    raise NotImplementedError("not implemented")
+
+
+class VarianceScalingInitializer(DenseInitializer):
+  """Initializer capable of adapting its scale to the shape of weights.
+
+  With `distribution="normal"`, samples are drawn from a truncated normal
+  distribution centered on zero, with `stddev = sqrt(scale / n)` where n is:
+
+      - number of input units in the weight tensor, if mode = "fan_in"
+      - number of output units, if mode = "fan_out"
+      - average of the numbers of input and output units, if mode = "fan_avg"
+
+  With `distribution="uniform"`,
+  samples are drawn from a uniform distribution
+  within [-limit, limit], with `limit = sqrt(3 * scale / n)`.
+
+  # Arguments
+      scale: Scaling factor (positive float).
+      mode: One of "fan_in", "fan_out", "fan_avg".
+      distribution: Random distribution to use. One of "normal", "uniform".
+      seed: A Python integer. Used to seed the random generator.
+
+  # Raises
+      ValueError: In case of an invalid value for the "scale", mode" or
+        "distribution" arguments.
+  """
+
+  def __init__(self, scale=1.0,
+               mode="fan_in",
+               distribution="normal"):
+    if scale <= 0.:
+      raise ValueError("`scale` must be a positive float. Got:", scale)
+    mode = mode.lower()
+    if mode not in {"fan_in", "fan_out", "fan_avg"}:
+      raise ValueError(
+          "Invalid `mode` argument: "
+          "expected on of {\"fan_in\", \"fan_out\", \"fan_avg\"} "
+          "but got %s" % (mode,))
+    distribution = distribution.lower()
+    if distribution not in {"normal", "uniform"}:
+      raise ValueError("Invalid `distribution` argument: "
+                       "expected one of {\"normal\", \"uniform\"} "
+                       "but got %s" % (distribution,))
+    self.scale = scale
+    self.mode = mode
+    self.distribution = distribution
+
+  def __call__(self, reduced_dims, new_dims):
+    fan_in = mtf.list_product(d.size for d in reduced_dims)
+    fan_out = mtf.list_product(d.size for d in new_dims)
+    scale = self.scale
+    if self.mode == "fan_in":
+      scale /= max(1., fan_in)
+    elif self.mode == "fan_out":
+      scale /= max(1., fan_out)
+    else:
+      scale /= max(1., float(fan_in + fan_out) / 2)
+    stddev = scale ** 0.5
+    if self.distribution == "truncated_normal":
+      return tf.truncated_normal_initializer(stddev=stddev)
+    else:
+      limit = stddev * 3. ** 0.5
+      return tf.random_uniform_initializer(minval=-limit, maxval=limit)
 
 
 def conv2d(x, output_dim, filter_size=(3, 3),

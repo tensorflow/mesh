@@ -100,6 +100,10 @@ flags.DEFINE_integer("predict_batch_size", 8,
 
 flags.DEFINE_float("learning_rate", 5e-5, "The initial learning rate for Adam.")
 
+flags.DEFINE_bool("clip_gradients", True, "Apply gradient clipping.")
+
+flags.DEFINE_string("optimizer", "adam", "adam/adafactor")
+
 flags.DEFINE_float("num_train_epochs", 3.0,
                    "Total number of training epochs to perform.")
 
@@ -574,12 +578,12 @@ def create_model(bert_config, is_training, input_ids, input_mask, segment_ids):
 
   final_hidden = model.get_sequence_output()
 
-  hidden_dim = model.hidden_dim
+  model_dim = model.model_dim
   class_dim = mtf.Dimension("class", 2)
 
   logits = mtf.layers.dense(
       final_hidden,
-      reduced_dims=[hidden_dim],
+      reduced_dims=[model_dim],
       new_dims=[class_dim],
       kernel_initializer=tf.truncated_normal_initializer(stddev=0.02),
       name="cls/squad/output")
@@ -673,7 +677,9 @@ def model_fn_builder(bert_config, init_checkpoint, learning_rate,
           learning_rate,
           num_train_steps,
           num_warmup_steps,
-          max_optimized_variable_size=FLAGS.max_optimized_variable_size)
+          max_optimized_variable_size=FLAGS.max_optimized_variable_size,
+          optimizer=FLAGS.optimizer,
+          clip_gradients=FLAGS.clip_gradients)
     elif mode == tf.estimator.ModeKeys.PREDICT:
       start_logits = mtf.anonymize(start_logits)
       end_logits = mtf.anonymize(end_logits)
