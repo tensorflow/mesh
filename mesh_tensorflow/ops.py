@@ -1046,7 +1046,7 @@ class MeshImpl(object):
     Returns:
       a LaidOutTensor
     """
-    raise NotImplementedError("Alltoall not implemented")
+    raise NotImplementedError("Receive not implemented")
 
   def shift_by_n_processors(self, x, mesh_axis, offset, wrap):
     """Receive the slice from processor pcoord - offset.
