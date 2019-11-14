@@ -925,7 +925,7 @@ def get_estimator(model_type, input_vocab_size, output_vocab_size, mesh_shape,
                   autostack, learning_rate_schedule, keep_checkpoint_max,
                   save_checkpoints_steps, optimizer, predict_fn,
                   variable_filter, ensemble_inputs, use_tpu, tpu_job_name,
-                  iterations_per_loop, cluster):
+                  iterations_per_loop, cluster, init_checkpoint=None):
   """Create TPU estimator for the transfomer Mesh-TF model.
 
   Args:
@@ -960,7 +960,9 @@ def get_estimator(model_type, input_vocab_size, output_vocab_size, mesh_shape,
     tpu_job_name: string, name of TPU worker binary
     iterations_per_loop: integer, steps per train loop
     cluster: a TPUClsuterResolver object
-
+    init_checkpoint: a string, if not None then read in variables from this
+      checkpoint path when initializing variables. Will only initialize
+      variables that appear both in the current graph and the checkpoint.
   Returns:
     an Estimator object.
   """
@@ -1003,7 +1005,8 @@ def get_estimator(model_type, input_vocab_size, output_vocab_size, mesh_shape,
       optimizer=optimizer,
       predict_fn=predict_fn,
       variable_filter=variable_filter,
-      ensemble_inputs=ensemble_inputs)
+      ensemble_inputs=ensemble_inputs,
+      init_checkpoint=init_checkpoint)
 
   estimator = tpu_estimator.TPUEstimator(
       model_fn=model_fn,
@@ -1057,7 +1060,8 @@ def train_model(estimator, vocabulary, sequence_length, batch_size,
 
 
 def infer_model(estimator, vocabulary, sequence_length, batch_size, model_type,
-                model_dir, eval_checkpoint_step):
+                model_dir, eval_checkpoint_step,
+                input_filename=None, output_filename=None):
   """Infer a Mesh-TF model.
 
   Args:
@@ -1072,6 +1076,8 @@ def infer_model(estimator, vocabulary, sequence_length, batch_size, model_type,
     model_dir: string, estimator model_dir
     eval_checkpoint_step: int, list of ints, or None, see `eval_model`
       docstring.
+    input_filename: a string, input file with examples
+    output_filename: a string, output file to save decodes
   """
   checkpoint_paths = get_checkpoint_iterator(eval_checkpoint_step, model_dir)
   for checkpoint_path in checkpoint_paths:
@@ -1081,7 +1087,9 @@ def infer_model(estimator, vocabulary, sequence_length, batch_size, model_type,
         model_type=model_type,
         batch_size=batch_size,
         sequence_length=sequence_length,
-        checkpoint_path=checkpoint_path)
+        checkpoint_path=checkpoint_path,
+        input_filename=input_filename,
+        output_filename=output_filename)
 
 
 def eval_model(estimator, vocabulary, sequence_length, batch_size,
@@ -1527,6 +1535,7 @@ def run(tpu_job_name,
         predict_fn=None,
         variable_filter=None,
         perplexity_eval_steps=10,
+        init_checkpoint=None,
         ensemble_inputs=None):
   """Run training, eval, or inference depending on `mode`.
 
@@ -1568,6 +1577,7 @@ def run(tpu_job_name,
     predict_fn: an optional function, see `get_estimator` docstring for details.
     variable_filter: a string, see `get_estimator` docstring for details.
     perplexity_eval_steps: an integer - number of steps for perplexity eval
+    init_checkpoint: a string, see `get_estimator` docstring for details.
     ensemble_inputs: an integer, see `train_model` docstring for details.
   """
   if isinstance(sequence_length, int):
@@ -1625,6 +1635,7 @@ def run(tpu_job_name,
       optimizer=optimizer,
       predict_fn=predict_fn,
       variable_filter=variable_filter,
+      init_checkpoint=init_checkpoint,
       ensemble_inputs=ensemble_inputs,
       use_tpu=tpu,
       tpu_job_name=tpu_job_name,
