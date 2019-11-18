@@ -1034,6 +1034,33 @@ class Unitransformer(object):
 
 
 @gin.configurable
+def shift_targets(targets, bos_id=0, eos_id=1):
+  """Transforms decoder labels to decoder inputs.
+
+  Args:
+    targets: decoder labels
+    bos_id: begin of sequence id, defaults to 0
+    eos_id: end of sequence id, defaults to 1
+
+  Returns:
+    Decoder inputs.
+  """
+  length_dim = targets.shape.dims[-1]
+  shifted_targets = mtf.shift(targets, offset=1, dim=length_dim, wrap=False)
+  # We should have a 0 at the beginning of each sequence rather than the
+  # shifted EOS (e.g. 1) from the previous sequence.
+  shifted_targets -= mtf.to_int32(mtf.equal(shifted_targets, eos_id))
+
+  if bos_id:
+    shifted_targets += mtf.to_int32(
+        mtf.logical_and(
+            mtf.equal(shifted_targets, 0),
+            mtf.not_equal(targets, 0))) * bos_id
+
+  return shifted_targets
+
+
+@gin.configurable
 class Bitransformer(object):
   """A Transformer sequence-to-sequence model with two layer stacks."""
 
@@ -1140,13 +1167,9 @@ class Bitransformer(object):
     if encoder_sequence_id is not None:
       encoder_sequence_id = mtf.layers.rename_length_to_memory_length(
           encoder_sequence_id)
-    length_dim = targets.shape.dims[-1]
-    shifted_targets = mtf.shift(targets, offset=1, dim=length_dim, wrap=False)
-    # We should have a 0 at the beginning of each sequence rather than the
-    # shifted EOS (1) from the previous sequence.
-    shifted_targets -= mtf.to_int32(mtf.equal(shifted_targets, 1))
+
     logits, loss = self.decoder.call_simple(
-        shifted_targets,
+        shift_targets(targets),
         targets,
         compute_loss,
         mode=mode,
