@@ -56,12 +56,14 @@ class DenseReluDense(transformer.TransformerLayer):
     h = mtf.layers.dense(x, hidden_channels,
                          use_bias=False, activation=mtf.relu,
                          variable_dtype=context.variable_dtype,
+                         reduced_dims=x.shape.dims[-1:],
                          name="wi", expert_dims=expert_dims)
     if context.train and self.dropout_rate != 0.0:
       h = mtf.dropout(h, 1.0 - self.dropout_rate,
                       noise_shape=h.shape - context.length_dim)
     return mtf.layers.dense(h, io_channels, use_bias=False, activation=None,
                             variable_dtype=context.variable_dtype,
+                            reduced_dims=h.shape.dims[-1:],
                             name="wo", expert_dims=expert_dims)
 
 

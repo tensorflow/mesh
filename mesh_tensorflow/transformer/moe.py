@@ -368,12 +368,13 @@ def transformer_moe_layer_v1(
   # Now feed the expert inputs through the experts.
   h = mtf.layers.dense(
       expert_inputs, hidden_dim, expert_dims=[experts_dim],
+      reduced_dims=expert_inputs.shape.dims[-1:],
       activation=activation, use_bias=False,
       variable_dtype=variable_dtype, name="wi")
 
   expert_output = mtf.layers.dense(
       h, output_dim, expert_dims=[experts_dim], use_bias=False,
-      variable_dtype=variable_dtype,
+      reduced_dims=h.shape.dims[-1:], variable_dtype=variable_dtype,
       name="wo")
 
   expert_output = mtf.reshape(
@@ -630,10 +631,12 @@ def transformer_moe_layer_v2(
 
   hidden_output = mtf.layers.dense(
       expert_inputs_y, hidden_dim, expert_dims=[y0, x1],
+      reduced_dims=expert_inputs_y.shape.dims[-1:],
       activation=mtf.relu, use_bias=False, variable_dtype=variable_dtype,
       name="wi")
   expert_output = mtf.layers.dense(
       hidden_output, output_dim, expert_dims=[y0, x1],
+      reduced_dims=hidden_output.shape.dims[-1:],
       use_bias=False, variable_dtype=variable_dtype,
       name="wo")
 

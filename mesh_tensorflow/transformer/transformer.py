@@ -591,6 +591,7 @@ class Unitransformer(object):
       logits = mtf.layers.dense(
           x, self.output_vocab_dim, use_bias=False,
           variable_dtype=context.variable_dtype,
+          reduced_dims=x.shape.dims[-1:],
           name="logits")
     if targets is not None and context.losses is not None:
       context.losses.append(
