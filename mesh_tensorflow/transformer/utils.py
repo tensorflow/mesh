@@ -1059,9 +1059,18 @@ def train_model(estimator, vocabulary, sequence_length, batch_size,
   estimator.train(input_fn=input_fn, max_steps=train_steps)
 
 
-def infer_model(estimator, vocabulary, sequence_length, batch_size, model_type,
-                model_dir, eval_checkpoint_step,
-                input_filename=None, output_filename=None):
+@gin.configurable
+def infer_model(estimator,
+                vocabulary,
+                sequence_length,
+                batch_size,
+                model_type,
+                model_dir,
+                eval_checkpoint_step,
+                input_filename=None,
+                output_filename=None,
+                checkpoint_paths=None,
+                decode_from_file_fn=decode_from_file):
   """Infer a Mesh-TF model.
 
   Args:
@@ -1078,10 +1087,14 @@ def infer_model(estimator, vocabulary, sequence_length, batch_size, model_type,
       docstring.
     input_filename: a string, input file with examples
     output_filename: a string, output file to save decodes
+    checkpoint_paths: optional list of checkpoints to run inference for
+    decode_from_file_fn: decoding function, defaults to decode_from_file
   """
-  checkpoint_paths = get_checkpoint_iterator(eval_checkpoint_step, model_dir)
+  if checkpoint_paths is None:
+    checkpoint_paths = get_checkpoint_iterator(eval_checkpoint_step, model_dir)
+
   for checkpoint_path in checkpoint_paths:
-    decode_from_file(
+    decode_from_file_fn(
         estimator,
         vocabulary=vocabulary,
         model_type=model_type,
