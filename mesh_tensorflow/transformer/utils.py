@@ -1185,7 +1185,7 @@ def eval_model(estimator, vocabulary, sequence_length, batch_size,
         examples = [ex for ex in tfds.as_numpy(ds)]
         targets = [
             eval_dataset.postprocess_fn(  # pylint:disable=g-complex-comprehension
-                tf.compat.as_string(ex["targets_plaintext"]),
+                tf.compat.as_text(ex["targets_plaintext"]),
                 example=ex, is_target=True)
             for ex in examples
         ]
@@ -1229,7 +1229,7 @@ def eval_model(estimator, vocabulary, sequence_length, batch_size,
       examples = cached_examples[eval_dataset.name]
       dataset_size = len(examples)
       predictions = [
-          eval_dataset.postprocess_fn(tf.compat.as_string(d), example=ex)
+          eval_dataset.postprocess_fn(tf.compat.as_text(d), example=ex)
           for d, ex in zip(decodes[:dataset_size], examples)
       ]
       # Remove the used decodes.
