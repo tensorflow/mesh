@@ -164,20 +164,30 @@ class SimdMeshImpl(mtf.MeshImpl):
       for physical_pnum in xrange(mesh_impl.size):
         slice_var_name = base_name + "_slice_%d" % physical_pnum
         # Use tf.Variable instead of tf.get_variable since latter adds lots of
-        # useless operations to the TF graph.
+        # useless operations to the TF graph. Use tf.get_variable only if
+        # in a AUTO_REUSE scope.
         # Note: Repeatedly 'with tf.device():' slows down the graph
         # construction. Therefore we directly use the cached device_stack here.
         tf.get_default_graph()._device_function_stack = (
             mesh_impl.graph_device_function_stacks[physical_pnum])
 
-        slices.append(
-            tf.Variable(
-                initial_value=zero_tensor,
-                trainable=self._variable.trainable,
-                collections=["TPU_VAR"],
-                dtype=variable.slice_dtype,
-                name=slice_var_name,
-                expected_shape=slice_shape))
+        if tf.get_variable_scope().reuse == tf.AUTO_REUSE:
+          slice_var = tf.get_variable(
+              initializer=zero_tensor,
+              trainable=self._variable.trainable,
+              collections=["TPU_VAR"],
+              dtype=variable.slice_dtype,
+              name=slice_var_name)
+        else:
+          slice_var = tf.Variable(
+              initial_value=zero_tensor,
+              trainable=self._variable.trainable,
+              collections=["TPU_VAR"],
+              dtype=variable.slice_dtype,
+              name=slice_var_name,
+              expected_shape=slice_shape)
+
+        slices.append(slice_var)
 
       # Restore the initial stack
       tf.get_default_graph()._device_function_stack = init_device_stack
