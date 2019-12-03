@@ -5628,7 +5628,7 @@ def log_variable_sizes(var_list, tag, verbose=True, mesh_to_impl=None):
       slice_size = 0
     total_slice_size += slice_size
     if verbose:
-      tf.logging.info(
+      tf.logging.debug(
           "Variable %s size %s slice_size %s %s",
           v.name.ljust(60),
           str(v_size).ljust(12),
@@ -5636,7 +5636,7 @@ def log_variable_sizes(var_list, tag, verbose=True, mesh_to_impl=None):
           str(v.shape).ljust(60))
       if isinstance(v, StackedVariable):
         for n in v.original_names:
-          tf.logging.info("    " + n)
+          tf.logging.debug("    " + n)
     total_size += v_size
   tf.logging.info("%s count: %s  Total size: %s  Total slice_size: %s",
                   tag.ljust(30), str(len(var_list)).ljust(6),
