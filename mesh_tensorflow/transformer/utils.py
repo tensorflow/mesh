@@ -356,7 +356,7 @@ def tpu_estimator_model_fn(model_type,
                        if ensemble_inputs else [])
       feature_shape = mtf.Shape(
           ensemble_dims + [outer_batch_dim, batch_dim, length_dim])
-      x = tf.to_int32(features[key])
+      x = tf.cast(features[key], tf.int32)
       x = tf.reshape(x, feature_shape.to_integer_list)
       if not use_tpu:
         tf.logging.info("feature %s : %s" % (key, x))
