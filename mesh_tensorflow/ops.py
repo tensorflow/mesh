@@ -4111,8 +4111,9 @@ class Depend(Operation):
   def __init__(self, x, dependencies, name=None):
     super(Depend, self).__init__([x], x.mesh, name=name or "depend")
     for d in dependencies:
-      if not isinstance(d, Operation):
-        raise ValueError("dependencies must be mtf.Operations. got %s" % d)
+      if not isinstance(d, Operation) and not isinstance(d, Tensor):
+        raise ValueError("dependencies must be mtf.Operations or mtf.Tensor."
+                         "got %s" % d)
     self._dependencies = dependencies
     self._outputs = [Tensor(self, x.shape, x.dtype)]
 
@@ -4120,8 +4121,15 @@ class Depend(Operation):
     mesh_impl = lowering.mesh_impl(self)
     if not mesh_impl.supports_control_dependencies:
       raise ValueError("Mesh does not suppport control dependencies.")
-    with tf.control_dependencies(
-        [lowering.operations[d] for d in self._dependencies]):
+
+    control_inputs = []
+    for d in self._dependencies:
+      if isinstance(d, Operation):
+        control_inputs.append(lowering.operations[d])
+      else:
+        control_inputs.append(lowering.tensors[d].tensor_list)
+
+    with tf.control_dependencies(tf.nest.flatten(control_inputs)):
       lowering.set_tensor_lowering(
           self.outputs[0],
           mesh_impl.slicewise(tf.identity,
@@ -4136,7 +4144,7 @@ def depend(x, dependencies):
 
   Args:
     x: a Tensor
-    dependencies: a list of Operations
+    dependencies: a list of Operations or Tensors
   Returns:
     an tensor
   """
