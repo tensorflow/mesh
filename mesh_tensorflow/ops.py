@@ -662,7 +662,7 @@ class Lowering(object):
     log_variable_sizes(
         graph.all_variables, "All Variables", verbose=False,
         mesh_to_impl=self.mesh_to_impl)
-    tf.logging.info("Counters:\n" + pretty_print_counters(self._counters))
+    tf.logging.debug("Counters:\n" + pretty_print_counters(self._counters))
 
   def mesh_impl(self, m):
     if not isinstance(m, Mesh):
