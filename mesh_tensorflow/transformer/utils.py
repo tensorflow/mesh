@@ -530,7 +530,7 @@ def tpu_estimator_model_fn(model_type,
       lowering = mtf.Lowering(graph, {mesh: mesh_impl}, autostack=autostack)
 
       tf_loss = lowering.export_to_tf_tensor(loss)
-      tf_loss = tf.to_float(tf_loss)
+      tf_loss = tf.cast(tf_loss, tf.float32)
       if not use_tpu:
         tf_loss = tf.Print(tf_loss, [tf_loss, tf.train.get_global_step()],
                            "step, tf_loss")
@@ -611,12 +611,12 @@ def tpu_estimator_model_fn(model_type,
       logits, loss = logits_and_loss(mtf_features)
       anon_logits = mtf.anonymize(logits)
       lowering = mtf.Lowering(graph, {mesh: mesh_impl}, autostack=autostack)
-      tf_loss = tf.to_float(lowering.export_to_tf_tensor(loss))
-      tf_loss = tf.to_float(tf_loss)
-      tf_logits = tf.to_float(lowering.export_to_tf_tensor(anon_logits))
+      tf_loss = tf.cast(lowering.export_to_tf_tensor(loss), tf.float32)
+      tf_loss = tf.cast(tf_loss, tf.float32)
+      tf_logits = tf.cast(lowering.export_to_tf_tensor(anon_logits), tf.float32)
 
       def padded_neg_log_perplexity(logits, labels):
-        weights = tf.to_float(tf.not_equal(labels, 0))
+        weights = tf.cast(tf.not_equal(labels, 0), tf.float32)
         xent = tf.nn.sparse_softmax_cross_entropy_with_logits(
             labels=labels, logits=logits)
         return {"neg_log_perplexity": tf.metrics.mean(-xent, weights)}
