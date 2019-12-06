@@ -237,6 +237,11 @@ def tpu_mesh_shape(tpu_topology=gin.REQUIRED,
 
 
 @gin.configurable
+def variable_filter_max_size(v, max_size=1e7):
+  return v.size <= max_size
+
+
+@gin.configurable
 def tpu_estimator_model_fn(model_type,
                            transformer_model,
                            model_dir,
@@ -283,8 +288,11 @@ def tpu_estimator_model_fn(model_type,
     tpu_summaries: a boolean, use rewrites to make summaries work on TPU.  This
       may be slow, since it uses a host call hack.
     predict_fn: an optional function, see docs for `run` for more information
-    variable_filter: a string regex, train all variables that match this regex.
+    variable_filter: controls which variables are trained.
       If None (default), train all trainable variables.
+      If a string regex, train all variables that match this regex.
+      If a function (mtf.Variable -> boolean), then train variables for which
+        the function returns True.
     init_checkpoint: a string, if not None then read in variables from this
       checkpoint path when initializing variables. Will only initialize
       variables that appear both in the current graph and the checkpoint.
@@ -514,18 +522,30 @@ def tpu_estimator_model_fn(model_type,
       else:
         learning_rate = learning_rate_schedule
 
-      pattern = re.compile(variable_filter or "")
-      train_vars = graph.trainable_variables
-      filtered_vars = [v for v in train_vars if pattern.search(v.name)]
-      filtered_grads = [
-          g for g, v in zip(var_grads, train_vars) if pattern.findall(v.name)
-      ]
-      if variable_filter:
+      if isinstance(variable_filter, str):
+        pattern = re.compile(variable_filter)
+        variable_filter_fn = lambda v: pattern.search(v.name)
+      elif variable_filter is None:
+        variable_filter_fn = lambda v: True
+      elif callable(variable_filter):
+        variable_filter_fn = variable_filter
+      else:
+        raise ValueError(
+            "variable_filter must be None, a string, or a callable function")
+      trainable_vars = [
+          v for v in graph.trainable_variables if variable_filter_fn(v)]
+      trainable_var_grads = [
+          g for g, v in zip(var_grads, graph.trainable_variables)
+          if variable_filter_fn(v)]
+      if len(trainable_vars) != len(graph.trainable_variables):
         tf.logging.info("Variables being trained:")
-        tf.logging.info([v.name for v in filtered_vars])
+        tf.logging.info([v.name for v in trainable_vars])
+        tf.logging.info("Variables not being trained:")
+        tf.logging.info([v.name for v in graph.trainable_variables
+                         if not variable_filter_fn(v)])
 
       update_ops = optimizer(learning_rate=learning_rate).apply_grads(
-          filtered_grads, filtered_vars
+          trainable_var_grads, trainable_vars
       )
 
       lowering = mtf.Lowering(graph, {mesh: mesh_impl}, autostack=autostack)

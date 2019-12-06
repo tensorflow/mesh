@@ -3884,6 +3884,10 @@ class Variable(Operation):
     return self.value.shape
 
   @property
+  def size(self):
+    return self.shape.size
+
+  @property
   def dtype(self):
     return self._dtype
 
