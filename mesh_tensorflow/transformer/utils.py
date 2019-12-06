@@ -26,6 +26,7 @@ from __future__ import print_function
 
 import functools
 import os
+import random
 import re
 
 import gin
@@ -615,14 +616,26 @@ def tpu_estimator_model_fn(model_type,
       tf_loss = tf.cast(tf_loss, tf.float32)
       tf_logits = tf.cast(lowering.export_to_tf_tensor(anon_logits), tf.float32)
 
-      def padded_neg_log_perplexity(logits, labels):
+      def simple_metrics(logits, labels):
+        """Simple metrics for teacher-forced eval."""
         weights = tf.cast(tf.not_equal(labels, 0), tf.float32)
         xent = tf.nn.sparse_softmax_cross_entropy_with_logits(
             labels=labels, logits=logits)
-        return {"neg_log_perplexity": tf.metrics.mean(-xent, weights)}
+        predictions = tf.cast(tf.argmax(logits, axis=-1), labels.dtype)
+        token_correct = tf.cast(
+            tf.equal(predictions, labels), tf.float32) * weights
+        sequence_correct = tf.to_float(tf.equal(
+            tf.reduce_sum(token_correct, -1),
+            tf.reduce_sum(weights, -1)))
+        sequence_weights = tf.to_float(
+            tf.not_equal(tf.reduce_sum(weights, -1), 0))
+        return {"neg_log_perplexity": tf.metrics.mean(-xent, weights),
+                "token_accuracy": tf.metrics.mean(token_correct, weights),
+                "sequence_accuracy": tf.metrics.mean(
+                    sequence_correct, sequence_weights)}
 
       labels = lowering.export_to_tf_tensor(anon_targets)
-      eval_metrics = (padded_neg_log_perplexity, [tf_logits, labels])
+      eval_metrics = (simple_metrics, [tf_logits, labels])
       with mtf.utils.outside_all_rewrites():
         restore_hook = mtf.MtfRestoreHook(lowering)
       return tpu_estimator.TPUEstimatorSpec(
@@ -1656,33 +1669,35 @@ def run(tpu_job_name,
       iterations_per_loop=iterations_per_loop,
       cluster=cluster)
 
-  if mode == "train" or mode == "perplexity_eval":
-    if train_dataset_fn is None:
-      raise ValueError("Must provide train_dataset_fn through gin for the "
-                       "modes: train or perplexity_eval.")
-
   if mode == "train":
+    if train_dataset_fn is None:
+      raise ValueError("Must provide train_dataset_fn through gin")
     train_model(estimator, vocabulary, sequence_length, batch_size,
                 train_dataset_fn, train_steps, ensemble_inputs)
-
   elif mode == "perplexity_eval":
-
-    def input_fn(params):
+    if eval_dataset_fn is None:
+      raise ValueError("Must provide eval_dataset_fn through gin")
+    eval_datasets = eval_dataset_fn(
+        sequence_length=sequence_length,
+        vocabulary=vocabulary,
+        dataset_split=dataset_split,
+    )
+    def _input_fn(params, eval_dataset):
       del params
-      dataset = train_dataset_fn(sequence_length=sequence_length,
-                                 vocabulary=vocabulary,
-                                 dataset_split=dataset_split)
-      dataset = dataset.repeat().batch(
-          batch_size * (ensemble_inputs or 1), drop_remainder=True)
-      dataset = dataset.prefetch(tf.data.experimental.AUTOTUNE)
-      return dataset
-
+      return (eval_dataset.dataset_fn().repeat()
+              .batch(batch_size * (ensemble_inputs or 1),
+                     drop_remainder=True)
+              .prefetch(tf.data.experimental.AUTOTUNE))
     checkpoint_paths = get_checkpoint_iterator(eval_checkpoint_step, model_dir)
     for checkpoint_path in checkpoint_paths:
-      _ = estimator.evaluate(
-          input_fn=input_fn,
-          steps=perplexity_eval_steps,
-          checkpoint_path=checkpoint_path)
+      for eval_dataset in eval_datasets:
+        tf.random.set_random_seed(12345)
+        random.seed(12345)
+        _ = estimator.evaluate(
+            input_fn=functools.partial(_input_fn, eval_dataset=eval_dataset),
+            steps=perplexity_eval_steps,
+            checkpoint_path=checkpoint_path,
+            name=eval_dataset.name)
   elif mode == "eval":
     eval_model(estimator, vocabulary, sequence_length, batch_size,
                dataset_split, model_dir, eval_dataset_fn, eval_summary_dir,
