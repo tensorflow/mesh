@@ -48,6 +48,7 @@ from __future__ import division
 from __future__ import print_function
 
 import json
+
 import gin
 import mesh_tensorflow as mtf
 
@@ -543,12 +544,16 @@ class Unitransformer(object):
         targets = mtf.broadcast(
             targets, [self.ensemble_dim] + targets.shape.dims)
     if "embedding" in context.shared_params:
-      embedding_weights = context.shared_params["embedding"]
+      vocab_embedding = context.shared_params["embedding"]
     else:
-      embedding_weights = mtf.layers.embedding_weights(
-          mesh, self.input_vocab_dim, self.model_dim, context.variable_dtype,
-          name="embedding", ensemble_dim=self.ensemble_dim)
-    x = mtf.gather(embedding_weights, inputs, self.input_vocab_dim)
+      vocab_embedding = VocabEmbedding(
+          mesh,
+          self.input_vocab_dim,
+          self.model_dim,
+          context.variable_dtype,
+          name="embedding",
+          ensemble_dim=self.ensemble_dim)
+    x = vocab_embedding.ids_to_embedding(inputs)
     if self.positional_embedding:
       if "positional_embedding" in context.shared_params:
         pos_emb_var = context.shared_params["positional_embedding"]
@@ -584,9 +589,7 @@ class Unitransformer(object):
     if self.output_vocab_dim is None:
       return x
     if self.shared_embedding_and_softmax_weights:
-      logits = mtf.einsum(
-          [x * (self.model_dim.size ** -0.5), embedding_weights],
-          reduced_dims=[self.model_dim])
+      logits = vocab_embedding.hidden_to_logits(x)
     else:
       logits = mtf.layers.dense(
           x, self.output_vocab_dim, use_bias=False,
@@ -1105,7 +1108,7 @@ class Bitransformer(object):
           raise ValueError(
               "shared_embedding requires encoder and decoder to have identical"
               " d_model and vocabulary sizes")
-        shared_params["embedding"] = mtf.layers.embedding_weights(
+        shared_params["embedding"] = VocabEmbedding(
             mesh,
             self.encoder.input_vocab_dim,
             self.encoder.model_dim,
@@ -1630,5 +1633,82 @@ def reduce_ensemble_logits(logits, ensemble_dim, vocab_dim,
     a mtf.Tensor with shape logits.shape - ensemble_dim
   """
   return reduce_fn(logits, ensemble_dim, vocab_dim)
+
+
+@gin.configurable
+class VocabEmbedding(object):
+  """A class to go from vocab ids to model states and model states to logits."""
+
+  def __init__(self,
+               mesh,
+               vocab_dim,
+               output_dim,
+               variable_dtype,
+               name,
+               ensemble_dim,
+               inner_dimension_size=None):
+    """Configurable embedding for the vocabulary.
+
+    Most of the arguments get passed to `mtf.layers.embedding_weights` with an
+    option to factorize the embedding matrix.
+
+    Args:
+      mesh: a mtf.Mesh
+      vocab_dim: a mtf.Dimension
+      output_dim: a mtf.Dimension
+      variable_dtype: a mtf.VariableDType
+      name: a string
+      ensemble_dim: a mtf.Dimension
+      inner_dimension_size: None or a postive integer. If None, then the
+        embedding matrix is not factorized. If an integer, then it is the size
+        of the inner dimension of the embedding matrix
+    """
+    self._vocab_dim = vocab_dim
+    self._output_dim = output_dim
+    self._is_factorized = inner_dimension_size is not None
+    if self._is_factorized:
+      self._inner_dim = mtf.Dimension("inner_vocab", inner_dimension_size)
+      self._factor1 = mtf.layers.embedding_weights(
+          mesh=mesh,
+          vocab_dim=vocab_dim,
+          output_dim=self._inner_dim,
+          variable_dtype=variable_dtype,
+          name="{}1".format(name),
+          ensemble_dim=ensemble_dim,
+          initializer=tf.random_normal_initializer(
+              stddev=inner_dimension_size**-0.25))
+      self._factor2 = mtf.layers.embedding_weights(
+          mesh=mesh,
+          vocab_dim=self._inner_dim,
+          output_dim=output_dim,
+          variable_dtype=variable_dtype,
+          name="{}2".format(name),
+          ensemble_dim=ensemble_dim,
+          initializer=tf.random_normal_initializer(
+              stddev=inner_dimension_size**-0.25))
+    else:
+      self._embedding_weights = mtf.layers.embedding_weights(
+          mesh=mesh,
+          vocab_dim=vocab_dim,
+          output_dim=output_dim,
+          variable_dtype=variable_dtype,
+          name=name,
+          ensemble_dim=ensemble_dim)
+
+  def ids_to_embedding(self, ids):
+    if self._is_factorized:
+      tmp = mtf.gather(self._factor1, ids, self._vocab_dim)
+      return mtf.einsum([tmp, self._factor2], reduced_dims=[self._inner_dim])
+    else:
+      return mtf.gather(self._embedding_weights, ids, self._vocab_dim)
+
+  def hidden_to_logits(self, hidden):
+    hidden *= self._output_dim.size**-0.5
+    if self._is_factorized:
+      tmp = mtf.einsum([hidden, self._factor2], reduced_dims=[self._output_dim])
+      return mtf.einsum([tmp, self._factor1], reduced_dims=[self._inner_dim])
+    else:
+      return mtf.einsum([hidden, self._embedding_weights],
+                        reduced_dims=[self._output_dim])
 
 
