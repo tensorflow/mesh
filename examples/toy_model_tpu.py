@@ -112,7 +112,7 @@ def toy_model(features, mesh):
   x = mtf.import_tf_tensor(mesh, features, mtf.Shape([batch_dim, io_dim]))
   x = mtf.cast(x, activation_dtype)
   h = x
-  for lnum in xrange(1, FLAGS.num_hidden_layers + 2):
+  for lnum in range(1, FLAGS.num_hidden_layers + 2):
     if lnum + 1 == FLAGS.num_hidden_layers + 2:
       # output layer
       dim = io_dim
