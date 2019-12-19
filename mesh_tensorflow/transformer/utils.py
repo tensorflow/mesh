@@ -321,7 +321,7 @@ def tpu_estimator_model_fn(model_type,
     """
     del labels, config
     global_step = tf.train.get_global_step()
-    if use_tpu:
+    if use_tpu and "context" in params:
       ctx = params["context"]
       num_hosts = ctx.num_hosts
       host_placement_fn = ctx.tpu_host_placement_function
