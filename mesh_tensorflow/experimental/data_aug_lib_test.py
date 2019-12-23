@@ -20,7 +20,7 @@ from __future__ import division
 from __future__ import print_function
 
 import mesh_tensorflow.experimental.data_aug_lib as data_aug_lib
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
 
 
 class MtfUnetDataAugTest(tf.test.TestCase):

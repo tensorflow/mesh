@@ -25,7 +25,7 @@ import os
 from absl import app
 from absl import flags
 
-import tensorflow as tf  # tf
+import tensorflow.compat.v1 as tf  # tf
 
 # pylint: disable=g-direct-tensorflow-import,g-direct-third-party-import
 from mesh_tensorflow.experimental import data_aug_lib

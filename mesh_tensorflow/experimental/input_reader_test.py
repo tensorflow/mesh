@@ -23,7 +23,7 @@ from absl.testing import parameterized
 import mesh_tensorflow as mtf
 import mesh_tensorflow.experimental.input_reader as input_reader
 import numpy as np
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
 
 # pylint: disable=g-direct-tensorflow-import
 from tensorflow.core.protobuf.tpu import topology_pb2

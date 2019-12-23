@@ -25,7 +25,7 @@ from __future__ import print_function
 import re
 import mesh_tensorflow as mtf
 import numpy as np
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
 
 # pylint: disable=g-direct-tensorflow-import
 # pylint: disable=g-direct-third-party-import
