@@ -32,8 +32,7 @@ for more sophisticated parallel computation are:
 5-billion-parameter language model.
 
 * An example is so large that the activations do not fit on one device. - e.g.
-large images.  TODO(noam): we still need to implement spatially-partitioned
-convolutions
+large 3D image model([`experimental/unet.py`](https://github.com/tensorflow/mesh/blob/master/mesh_tensorflow/experimental/unet.py)).
 
 * Lower-latency parallel inference (at batch size 1).
 
