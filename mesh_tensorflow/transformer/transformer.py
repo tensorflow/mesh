@@ -546,7 +546,7 @@ class Unitransformer(object):
     if "embedding" in context.shared_params:
       vocab_embedding = context.shared_params["embedding"]
     else:
-      vocab_embedding = VocabEmbedding(
+      vocab_embedding = get_vocab_embedding_cls()(
           mesh,
           self.input_vocab_dim,
           self.model_dim,
@@ -1108,7 +1108,7 @@ class Bitransformer(object):
           raise ValueError(
               "shared_embedding requires encoder and decoder to have identical"
               " d_model and vocabulary sizes")
-        shared_params["embedding"] = VocabEmbedding(
+        shared_params["embedding"] = get_vocab_embedding_cls()(
             mesh,
             self.encoder.input_vocab_dim,
             self.encoder.model_dim,
@@ -1639,18 +1639,11 @@ def reduce_ensemble_logits(logits, ensemble_dim, vocab_dim,
 class VocabEmbedding(object):
   """A class to go from vocab ids to model states and model states to logits."""
 
-  def __init__(self,
-               mesh,
-               vocab_dim,
-               output_dim,
-               variable_dtype,
-               name,
-               ensemble_dim,
-               inner_dimension_size=None):
-    """Configurable embedding for the vocabulary.
+  def __init__(self, mesh, vocab_dim, output_dim, variable_dtype, name,
+               ensemble_dim):
+    """Embedding for the vocabulary.
 
-    Most of the arguments get passed to `mtf.layers.embedding_weights` with an
-    option to factorize the embedding matrix.
+    Most of the arguments get passed to `mtf.layers.embedding_weights`.
 
     Args:
       mesh: a mtf.Mesh
@@ -1659,56 +1652,35 @@ class VocabEmbedding(object):
       variable_dtype: a mtf.VariableDType
       name: a string
       ensemble_dim: a mtf.Dimension
-      inner_dimension_size: None or a postive integer. If None, then the
-        embedding matrix is not factorized. If an integer, then it is the size
-        of the inner dimension of the embedding matrix
     """
     self._vocab_dim = vocab_dim
     self._output_dim = output_dim
-    self._is_factorized = inner_dimension_size is not None
-    if self._is_factorized:
-      self._inner_dim = mtf.Dimension("inner_vocab", inner_dimension_size)
-      self._factor1 = mtf.layers.embedding_weights(
-          mesh=mesh,
-          vocab_dim=vocab_dim,
-          output_dim=self._inner_dim,
-          variable_dtype=variable_dtype,
-          name="{}1".format(name),
-          ensemble_dim=ensemble_dim,
-          initializer=tf.random_normal_initializer(
-              stddev=inner_dimension_size**-0.25))
-      self._factor2 = mtf.layers.embedding_weights(
-          mesh=mesh,
-          vocab_dim=self._inner_dim,
-          output_dim=output_dim,
-          variable_dtype=variable_dtype,
-          name="{}2".format(name),
-          ensemble_dim=ensemble_dim,
-          initializer=tf.random_normal_initializer(
-              stddev=inner_dimension_size**-0.25))
-    else:
-      self._embedding_weights = mtf.layers.embedding_weights(
-          mesh=mesh,
-          vocab_dim=vocab_dim,
-          output_dim=output_dim,
-          variable_dtype=variable_dtype,
-          name=name,
-          ensemble_dim=ensemble_dim)
+    self._embedding_weights = mtf.layers.embedding_weights(
+        mesh=mesh,
+        vocab_dim=vocab_dim,
+        output_dim=output_dim,
+        variable_dtype=variable_dtype,
+        name=name,
+        ensemble_dim=ensemble_dim)
 
   def ids_to_embedding(self, ids):
-    if self._is_factorized:
-      tmp = mtf.gather(self._factor1, ids, self._vocab_dim)
-      return mtf.einsum([tmp, self._factor2], reduced_dims=[self._inner_dim])
-    else:
-      return mtf.gather(self._embedding_weights, ids, self._vocab_dim)
+    return mtf.gather(self._embedding_weights, ids, self._vocab_dim)
 
   def hidden_to_logits(self, hidden):
     hidden *= self._output_dim.size**-0.5
-    if self._is_factorized:
-      tmp = mtf.einsum([hidden, self._factor2], reduced_dims=[self._output_dim])
-      return mtf.einsum([tmp, self._factor1], reduced_dims=[self._inner_dim])
-    else:
-      return mtf.einsum([hidden, self._embedding_weights],
-                        reduced_dims=[self._output_dim])
+    return mtf.einsum([hidden, self._embedding_weights],
+                      reduced_dims=[self._output_dim])
 
+
+@gin.configurable
+def get_vocab_embedding_cls(cls=VocabEmbedding):
+  """Configurable function to get the class to use for vocab embeddings.
+
+  Args:
+    cls: a class implementing the interface of mtf.transformer VocabEmbedding
+
+  Returns:
+    the class
+  """
+  return cls
 
