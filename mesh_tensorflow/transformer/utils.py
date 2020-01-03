@@ -1294,16 +1294,20 @@ def eval_model(estimator, vocabulary, sequence_length, batch_size,
           len(decodes), expected_pad))
 
 
-def export_model(estimator, export_path, vocabulary, sequence_length):
+def export_model(estimator, export_dir, vocabulary, sequence_length,
+                 checkpoint_path=None):
   """Export a model in TF SavedModel format to be used for inference on CPUs.
 
   Args:
     estimator: Estimator object, estimator created with the appropriate
       model_fn.
-    export_path: str, path to export the model.
+    export_dir: str, a directory in which to create timestamped subdirectories
+      containing exported SavedModels.
     vocabulary: sentencepiece vocab, vocabulary instance to use for encoding.
     sequence_length: an integer or a dict from feature-key to integer
       the (packed) sequence length, e.g. {"inputs": 512, "targets": 128}
+    checkpoint_path: str, path to checkpoint. If None (default), use the most
+      recent in the model directory.
 
   Returns:
     None
@@ -1357,9 +1361,10 @@ def export_model(estimator, export_path, vocabulary, sequence_length):
 
   tpu_estimator.export_estimator_savedmodel(
       estimator=estimator,
-      export_dir_base=export_path,
+      export_dir_base=export_dir,
       serving_input_receiver_fn=serving_input_fn,
-      as_text=True
+      as_text=True,
+      checkpoint_path=checkpoint_path,
   )
 
 
