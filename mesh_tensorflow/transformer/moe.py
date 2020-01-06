@@ -49,7 +49,8 @@ class MoE1D(transformer.TransformerLayer):
                second_policy_eval="random",
                second_threshold_train=0.2,
                second_threshold_eval=0.2,
-               dropout_rate=0.0):
+               dropout_rate=0.0,
+               activation="relu"):
     self._hparams = HParams(
         moe_gating="top_2",
         moe_num_experts=num_experts,
@@ -64,6 +65,7 @@ class MoE1D(transformer.TransformerLayer):
         moe_second_threshold_train=second_threshold_train,
         moe_second_threshold_eval=second_threshold_eval,
         moe_dropout_rate=dropout_rate)
+    self._activation = activation
 
   def call(self, context, x, losses=None):
     """Call the layer."""
@@ -85,7 +87,8 @@ class MoE1D(transformer.TransformerLayer):
         context.variable_dtype,
         layout=context.model.layout,
         mesh_shape=context.model.mesh_shape,
-        nonpadding=context.nonpadding)
+        nonpadding=context.nonpadding,
+        activation=self._activation)
     if context.losses is not None:
       context.losses.append(loss)
     if not has_length_dim:
@@ -368,10 +371,12 @@ def transformer_moe_layer_v1(
       ]))
 
   # Now feed the expert inputs through the experts.
-  h = mtf.layers.dense(
-      expert_inputs, hidden_dim, expert_dims=[experts_dim],
+  h = mtf.layers.dense_product(
+      expert_inputs,
       reduced_dims=expert_inputs.shape.dims[-1:],
-      activation=activation, use_bias=False,
+      new_dims=[hidden_dim],
+      expert_dims=[experts_dim],
+      activation_functions=activation, use_bias=False,
       variable_dtype=variable_dtype, name="wi")
 
   if train and hparams.moe_dropout_rate != 0.0:

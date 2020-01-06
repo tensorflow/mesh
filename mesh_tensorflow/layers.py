@@ -19,6 +19,8 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import functools
+
 from mesh_tensorflow import ops_with_redefined_builtins as mtf
 
 import tensorflow.compat.v1 as tf
@@ -107,6 +109,48 @@ def dense(x,
     if activation is not None:
       y = activation(y)
     return y
+
+
+def dense_product(x,
+                  reduced_dims,
+                  new_dims,
+                  activation_functions=None,
+                  name="dense_product",
+                  **kwargs):
+  """Component-wise product of multiple dense layers.
+
+  e.g. if activation_functions=["linear", "sigmoid"], then this implements
+  Gated Linear Units https://arxiv.org/pdf/1612.08083.pdf
+
+  Args:
+    x: a Tensor
+    reduced_dims: a list of Dimensions.
+    new_dims: a list of Dimensions.
+    activation_functions: a list of activation functions (or a singleton)
+      Each can be a either:
+        - a callable function from Tensor to Tensor
+        - a string function name from namespace mtf)
+        - None or "linear", meaning no activation function
+    name: an optional string
+    **kwargs: additional kwargs for mtf.layers.dense()
+  """
+  if not isinstance(activation_functions, list):
+    activation_functions = [activation_functions]
+  num_factors = len(activation_functions)
+  factors = []
+  for i, activation in enumerate(activation_functions):
+    if activation == "linear":
+      activation = None
+    elif isinstance(activation, str):
+      activation = getattr(mtf, activation)
+    factors.append(
+        dense(x,
+              reduced_dims=reduced_dims,
+              new_dims=new_dims,
+              activation=activation,
+              name="%s_%d" % (name, i) if num_factors > 1 else name,
+              **kwargs))
+  return functools.reduce(mtf.multiply, factors)
 
 
 class DenseInitializer(object):
