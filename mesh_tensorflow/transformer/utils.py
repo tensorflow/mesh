@@ -1254,8 +1254,6 @@ def eval_model(estimator, vocabulary, sequence_length, batch_size,
   for checkpoint_path in checkpoint_paths:
     tf.logging.info("Checkpoint path %s" % checkpoint_path)
     global_step = int(get_step_from_checkpoint_path(checkpoint_path))
-    if global_step == 0:
-      continue
     decodes = decode(estimator, input_fn, vocabulary, checkpoint_path)
     for eval_dataset in eval_datasets:
       # Extract the portion of decodes corresponding to this dataset
@@ -1502,7 +1500,8 @@ def auto_train_steps(batch_size,
   return train_tokens // (batch_size * max(sequence_length.values()))
 
 
-def get_checkpoint_iterator(checkpoint_step, model_dir):
+@gin.configurable
+def get_checkpoint_iterator(checkpoint_step, model_dir, skip_until=0):
   """Get an iterable of checkpoint paths from a provided checkpoint step(s).
 
   Args:
@@ -1514,6 +1513,8 @@ def get_checkpoint_iterator(checkpoint_step, model_dir):
       checkpoint_step is None, return `tf.train.checkpoints_iterator`
       for `model_dir`.
     model_dir: str, directory to look for checkpoints in.
+    skip_until: an integer - for "all" or "None" behavior, filter out
+      checkpoint numbers that are <= skip_until.
 
   Returns:
     An iterable which yields checkpoint paths.
@@ -1544,13 +1545,17 @@ def get_checkpoint_iterator(checkpoint_step, model_dir):
   def _get_checkpoint_path(step):
     return os.path.join(model_dir, "model.ckpt-{}".format(step))
 
+  def _filter_fn(p):
+    return get_step_from_checkpoint_path(p) > skip_until
+
   if checkpoint_step == "all":
     ckpt_paths = tf.gfile.Glob(os.path.join(model_dir, "model.ckpt*"))
     # Use set for deduplication; glob will find multiple files for each ckpt
     ckpt_steps = {get_step_from_checkpoint_path(p) for p in ckpt_paths}
-    return [_get_checkpoint_path(s) for s in sorted(list(ckpt_steps))]
+    return filter(_filter_fn,
+                  [_get_checkpoint_path(s) for s in sorted(list(ckpt_steps))])
   elif checkpoint_step is None:
-    return tf.train.checkpoints_iterator(model_dir)
+    return filter(_filter_fn, tf.train.checkpoints_iterator(model_dir))
   elif isinstance(checkpoint_step, int):
     return [_get_checkpoint_path(_get_closest_checkpoint(checkpoint_step))]
   else:
