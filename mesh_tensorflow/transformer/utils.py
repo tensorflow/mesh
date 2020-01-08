@@ -172,7 +172,7 @@ def build_model(model_type="bitransformer",
     input_vocab_size: an integer
     output_vocab_size: an integer
     layout_rules: optional, input to mtf.convert_to_layout_rules
-    mesh_shape: optional, a function that returns a mtf.Shape
+    mesh_shape: optional, an input to mtf.convert_to_shape()
   Returns:
     a Unitransformer or Bitransformer
   """
@@ -260,7 +260,8 @@ def tpu_estimator_model_fn(model_type,
                            predict_fn=None,
                            variable_filter=None,
                            init_checkpoint=None,
-                           ensemble_inputs=None):
+                           ensemble_inputs=None,
+                           mesh_devices=None):
   """Create a TPUEstimator model function.
 
   Args:
@@ -269,7 +270,7 @@ def tpu_estimator_model_fn(model_type,
     transformer_model: a transformer.Unitransformer or transformer.Bitransformer
     model_dir: a string, directory to save the model to.
     use_tpu: a boolean
-    mesh_shape: a function that returns a mtf.Shape
+    mesh_shape: a mtf.Shape
     layout_rules: a mtf.LayoutRules
     batch_size: an integer
     sequence_length: an integer or a dict from feature-key to integer
@@ -300,10 +301,14 @@ def tpu_estimator_model_fn(model_type,
       train an ensemble where each model gets different inputs.
       You also need to configure Unitransformer.ensemble  to the right size.
       If None, then all models are trained on the same inputs.
+    mesh_devices: a list of strings, the device names to use for each mesh
+      slice. Only required for GPU.
 
   Returns:
     a function to be passed to TPUEstimator
   """
+  mesh_devices = mesh_devices or [""] * mesh_shape.size
+
   def my_model_fn(features, labels, mode, params=None, config=None):
     """Estimator model function.
 
@@ -333,7 +338,6 @@ def tpu_estimator_model_fn(model_type,
       devices_memeory_usage = [worker0_mem] + [0] * (num_hosts - 1)
       var_placer = mtf.utils.BalancedVariablePlacer(device_list,
                                                     devices_memeory_usage)
-      mesh_devices = [""] * mesh_shape.size
       physical_shape = list(
           params["context"].device_assignment.topology.mesh_shape)
       logical_to_physical = mtf.simd_mesh_impl.auto_logical_to_physical_tpu(
@@ -343,7 +347,6 @@ def tpu_estimator_model_fn(model_type,
           logical_to_physical=logical_to_physical)
     else:
       var_placer = None
-      mesh_devices = [""] * mesh_shape.size
       mesh_impl = mtf.placement_mesh_impl.PlacementMeshImpl(
           mesh_shape, layout_rules, mesh_devices)
 
@@ -958,7 +961,8 @@ def get_estimator(model_type, input_vocab_size, output_vocab_size, mesh_shape,
                   autostack, learning_rate_schedule, keep_checkpoint_max,
                   save_checkpoints_steps, optimizer, predict_fn,
                   variable_filter, ensemble_inputs, use_tpu, tpu_job_name,
-                  iterations_per_loop, cluster, init_checkpoint=None):
+                  iterations_per_loop, cluster, init_checkpoint=None,
+                  mesh_devices=None):
   """Create TPU estimator for the transfomer Mesh-TF model.
 
   Args:
@@ -996,6 +1000,8 @@ def get_estimator(model_type, input_vocab_size, output_vocab_size, mesh_shape,
     init_checkpoint: a string, if not None then read in variables from this
       checkpoint path when initializing variables. Will only initialize
       variables that appear both in the current graph and the checkpoint.
+    mesh_devices: a list of strings, the device names to use for each mesh
+      slice. Only required for GPU.
   Returns:
     an Estimator object.
   """
@@ -1039,7 +1045,8 @@ def get_estimator(model_type, input_vocab_size, output_vocab_size, mesh_shape,
       predict_fn=predict_fn,
       variable_filter=variable_filter,
       ensemble_inputs=ensemble_inputs,
-      init_checkpoint=init_checkpoint)
+      init_checkpoint=init_checkpoint,
+      mesh_devices=mesh_devices)
 
   estimator = tpu_estimator.TPUEstimator(
       model_fn=model_fn,
@@ -1586,6 +1593,7 @@ def run(tpu_job_name,
         train_steps=auto_train_steps,
         sequence_length=gin.REQUIRED,
         mesh_shape=gin.REQUIRED,
+        mesh_devices=None,
         layout_rules=gin.REQUIRED,
         learning_rate_schedule=None,
         optimizer=None,
@@ -1627,7 +1635,8 @@ def run(tpu_job_name,
       auto_train_steps().  Total number of training steps.
     sequence_length: an integer or a dict from feature-key to integer
       the (packed) sequence length, e.g. {"inputs": 512, "targets": 128}
-    mesh_shape: a function, see `get_estimator` docstring for details.
+    mesh_shape: an input to mtf.convert_to_shape()
+    mesh_devices: a list of strings, see `get_estimator` docstring.
     layout_rules: an input to mtf.convert_to_layout_rules()
     learning_rate_schedule: an optional function, see `get_estimator` docstring.
     optimizer: a class extending optimize.Optimizer, required for training
@@ -1670,7 +1679,7 @@ def run(tpu_job_name,
   layout_rules = mtf.convert_to_layout_rules(layout_rules)
 
   cluster = tf.distribute.cluster_resolver.TPUClusterResolver(
-      tpu if (tpu) else "", zone=tpu_zone, project=gcp_project)
+      tpu, zone=tpu_zone, project=gcp_project) if tpu else None
 
   tf.logging.info(
       "Building TPUConfig with tpu_job_name={}".format(tpu_job_name)
@@ -1697,7 +1706,8 @@ def run(tpu_job_name,
       use_tpu=tpu,
       tpu_job_name=tpu_job_name,
       iterations_per_loop=iterations_per_loop,
-      cluster=cluster)
+      cluster=cluster,
+      mesh_devices=mesh_devices)
 
   if mode == "train":
     if train_dataset_fn is None:
