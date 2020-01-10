@@ -558,8 +558,15 @@ def train_and_eval():
 
   mesh_context = None
   tf.logging.info('FLAGS.master: {}'.format(FLAGS.master))
-  with tf.Session(target=FLAGS.master,
-                  config=tf.ConfigProto(allow_soft_placement=True)) as sess:
+  resolver = tf.distribute.cluster_resolver.TPUClusterResolver(FLAGS.master)
+  tf.config.experimental_connect_to_cluster(resolver)
+  config = tf.ConfigProto()
+  config.allow_soft_placement = True
+  cluster_spec = resolver.cluster_spec()
+  if cluster_spec:
+    config.cluster_def.CopyFrom(cluster_spec.as_cluster_def())
+  with tf.Session(target=resolver.master(), config=config) as sess:
+    tf.tpu.experimental.initialize_tpu_system(resolver)
     mesh_context = MeshContext(
         sess, FLAGS.use_tpu, FLAGS.mesh_shape, unet.get_layout())
 
