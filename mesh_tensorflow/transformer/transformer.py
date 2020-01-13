@@ -347,7 +347,7 @@ class LayerStack(TransformerLayer):
   def _dropout(self, context, x):
     if context.train and self._dropout_rate > 0:
       return mtf.dropout(
-          x, keep_prob=1.0 - self._dropout_rate,
+          x, rate=self._dropout_rate,
           noise_shape=mtf.Shape(context.batch_dims + [context.model.model_dim]))
     else:
       return x
@@ -410,7 +410,8 @@ class Unitransformer(object):
                positional_embedding=True,
                input_full_attention=False,
                loss_on_targets_only=False,
-               loss_denominator=None):
+               loss_denominator=None,
+               token_dropout_rate=0.0):
     """Create a Unitransformer.
 
     Args:
@@ -451,6 +452,7 @@ class Unitransformer(object):
         batch size than the original training batch, one might want to use the
         same denominator as was used for the pretraining.  This complication
         might be avoided by always using loss_denominator = 1.0.
+      token_dropout_rate: an optional floating point value
     """
     self.layer_stack = layer_stack
     self.model_dim = mtf.Dimension("d_model", d_model)
@@ -486,6 +488,7 @@ class Unitransformer(object):
     if self.input_full_attention and not self.autoregressive:
       raise ValueError(
           "input_full_attention only makes sense with autoregressive")
+    self.token_dropout_rate = token_dropout_rate
 
   @property
   def fully_autoregressive(self):
@@ -553,6 +556,8 @@ class Unitransformer(object):
           context.variable_dtype,
           name="embedding",
           ensemble_dim=self.ensemble_dim)
+    if context.train:
+      inputs = mtf.dropout(inputs, rate=self.token_dropout_rate)
     x = vocab_embedding.ids_to_embedding(inputs)
     if self.positional_embedding:
       if "positional_embedding" in context.shared_params:

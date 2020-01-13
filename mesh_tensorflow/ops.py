@@ -5578,18 +5578,31 @@ def random_uniform(mesh, shape, **kwargs):
   return RandomOperation(mesh, shape, tf.random.uniform, **kwargs).outputs[0]
 
 
-def dropout(x, keep_prob, noise_shape=None, name=None):
-  """Dropout layer.
+def dropout(x, keep_prob=None, rate=None, noise_shape=None, name=None):
+  """Randomly set some elements to 0 and scale up the rest.
+
+  Dropout rate should be specified in exactly one of two ways:
+    rate - the fraction to drop
+    keep_prob - the fraction to keep
+
+  If x has floating-point type, then kept values are scaled up by
+  a factor of (1.0 / keep_prob).  If x is has integer type, the kept values
+  are not scaled up.
 
   Args:
     x: a Tensor
     keep_prob: a float between 0.0 and 1.0
+    rate: a float between 0.0 and 1.0
     noise_shape: an optional Shape (a subset of x.shape)
     name: an optional string
 
   Returns:
     a Tensor
   """
+  if (keep_prob is None) == (rate is None):
+    raise ValueError("exactly one of keep_prob and rate should be set")
+  if keep_prob is None:
+    keep_prob = 1.0 - rate
   noise_shape = convert_to_shape(noise_shape)
   if noise_shape is None:
     noise_shape = x.shape
@@ -5597,8 +5610,11 @@ def dropout(x, keep_prob, noise_shape=None, name=None):
     if keep_prob == 1.0:
       return x
     noise = cast(less(random_uniform(
-        x.mesh, noise_shape, dtype=x.dtype), keep_prob), x.dtype)
-    noise /= keep_prob
+        x.mesh, noise_shape,
+        dtype=(x.dtype if x.dtype.is_floating else tf.float32)),
+                      keep_prob), x.dtype)
+    if x.dtype.is_floating:
+      noise /= keep_prob
     return x * noise
 
 
