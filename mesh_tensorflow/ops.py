@@ -662,7 +662,7 @@ class Lowering(object):
     log_variable_sizes(
         graph.all_variables, "All Variables", verbose=False,
         mesh_to_impl=self.mesh_to_impl)
-    tf.logging.debug("Counters:\n" + pretty_print_counters(self._counters))
+    tf.logging.info("Counters:\n" + pretty_print_counters(self._counters))
 
   def mesh_impl(self, m):
     if not isinstance(m, Mesh):
@@ -1718,6 +1718,11 @@ def negative(x, name="negative"):
 
 def logical_not(x, name="logical_not"):
   return cwise(tf.logical_not, [x], name=name)
+
+
+def swish(x):
+  """Swish activation from https://arxiv.org/abs/1710.05941 ."""
+  return x * sigmoid(x)
 
 
 def gelu(x):
@@ -5656,7 +5661,7 @@ def log_variable_sizes(var_list, tag, verbose=True, mesh_to_impl=None):
       slice_size = 0
     total_slice_size += slice_size
     if verbose:
-      tf.logging.debug(
+      tf.logging.info(
           "Variable %s size %s slice_size %s %s",
           v.name.ljust(60),
           str(v_size).ljust(12),
@@ -5664,7 +5669,7 @@ def log_variable_sizes(var_list, tag, verbose=True, mesh_to_impl=None):
           str(v.shape).ljust(60))
       if isinstance(v, StackedVariable):
         for n in v.original_names:
-          tf.logging.debug("    " + n)
+          tf.logging.info("    " + n)
     total_size += v_size
   tf.logging.info("%s count: %s  Total size: %s  Total slice_size: %s",
                   tag.ljust(30), str(len(var_list)).ljust(6),
