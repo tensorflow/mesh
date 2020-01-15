@@ -1601,7 +1601,8 @@ def run(tpu_job_name,
         variable_filter=None,
         perplexity_eval_steps=10,
         init_checkpoint=None,
-        ensemble_inputs=None):
+        ensemble_inputs=None,
+        train_model_fn=train_model):
   """Run training, eval, or inference depending on `mode`.
 
   Args:
@@ -1645,6 +1646,7 @@ def run(tpu_job_name,
     perplexity_eval_steps: an integer - number of steps for perplexity eval
     init_checkpoint: a string, see `get_estimator` docstring for details.
     ensemble_inputs: an integer, see `train_model` docstring for details.
+    train_model_fn: an optional train function, is `train_model` by default.
   """
   if isinstance(sequence_length, int):
     sequence_length = {"inputs": sequence_length,
@@ -1710,10 +1712,12 @@ def run(tpu_job_name,
       mesh_devices=mesh_devices)
 
   if mode == "train":
+    # train_dataset_fn could be None if train_model_fn is not equal to
+    # train_model
     if train_dataset_fn is None:
       raise ValueError("Must provide train_dataset_fn through gin")
-    train_model(estimator, vocabulary, sequence_length, batch_size,
-                train_dataset_fn, train_steps, ensemble_inputs)
+    train_model_fn(estimator, vocabulary, sequence_length, batch_size,
+                   train_dataset_fn, train_steps, ensemble_inputs)
   elif mode == "perplexity_eval":
     if eval_dataset_fn is None:
       raise ValueError("Must provide eval_dataset_fn through gin")
