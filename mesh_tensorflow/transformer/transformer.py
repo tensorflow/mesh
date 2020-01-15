@@ -749,7 +749,8 @@ class Unitransformer(object):
                             encoder_layer_outputs=None,
                             never_end=False,
                             remove_partial_sequences=False,
-                            sampling_keep_top_k=-1):
+                            sampling_keep_top_k=-1,
+                            bos_id=0):
     """Sample randomly one token at a time.
 
     The partial_sequences represent partial sequences to be continued.  The
@@ -780,6 +781,7 @@ class Unitransformer(object):
         sequences from the output
       sampling_keep_top_k: an integer - if not -1, only sample from the top k
         logits.
+      bos_id: beginning of sequence id
 
     Returns:
       a Tensor with shape [<batch_dims>, length_dim]
@@ -858,6 +860,10 @@ class Unitransformer(object):
     def body_fn(position, ids, *states):
       """One step in the decode loop."""
       inputs_this_step = mtf.gather(ids, position - 1, length_dim)
+      # Setting proper bos_id for position == 0. No-op otherwise.
+      if bos_id:
+        inputs_this_step += bos_id * mtf.ones_like(inputs_this_step) * mtf.cast(
+            mtf.equal(position, 0), tf.int32)
       context_incremental = Context(
           model=self,
           mesh=inputs.mesh,
@@ -928,7 +934,8 @@ class Unitransformer(object):
                   encoder_inputs=None,
                   alpha=0.6,
                   shared_params=None,
-                  encoder_layer_outputs=None):
+                  encoder_layer_outputs=None,
+                  bos_id=0):
     """Beam search.
 
     Args:
@@ -943,6 +950,7 @@ class Unitransformer(object):
       shared_params: an optional dictionary
       encoder_layer_outputs: optional - readonly list of tensor activations when
         decoding, one per each input layer + the embedding layer
+      bos_id: beginning of sequence id
 
     Returns:
       a Tensor with shape [<batch_dims>, beam_dim, length_dim]
@@ -1004,6 +1012,10 @@ class Unitransformer(object):
     def logits_fn(step_num, ids, states):
       """logits_fn for mtf.beam_search.beam_search()."""
       inputs_this_step = mtf.gather(ids, step_num - 1, length_dim)
+      # Setting proper bos_id for step_num == 0. No-op otherwise.
+      if bos_id:
+        inputs_this_step += bos_id * mtf.ones_like(inputs_this_step) * mtf.cast(
+            mtf.equal(step_num, 0), tf.int32)
       context_incremental = Context(
           model=self,
           mesh=inputs.mesh,
