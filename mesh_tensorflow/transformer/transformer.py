@@ -1058,7 +1058,7 @@ def shift_targets(targets, bos_id=0, eos_id=1):
   shifted_targets = mtf.shift(targets, offset=1, dim=length_dim, wrap=False)
   # We should have a 0 at the beginning of each sequence rather than the
   # shifted EOS (e.g. 1) from the previous sequence.
-  shifted_targets -= mtf.to_int32(mtf.equal(shifted_targets, eos_id))
+  shifted_targets *= mtf.to_int32(mtf.not_equal(shifted_targets, eos_id))
 
   if bos_id:
     shifted_targets += mtf.to_int32(
