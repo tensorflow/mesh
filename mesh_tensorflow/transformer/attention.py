@@ -76,6 +76,8 @@ def attention(q,
   return outputs
 
 
+
+
 class AttentionParams(object):
   """A set of parameters used for (multihead) attention."""
 
