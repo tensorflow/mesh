@@ -1,5 +1,5 @@
 # coding=utf-8
-# Copyright 2019 The Mesh TensorFlow Authors.
+# Copyright 2020 The Mesh TensorFlow Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -1234,6 +1234,13 @@ def eval_model(estimator, vocabulary, sequence_length, batch_size,
             "{}_targets".format(eval_dataset.name),
         )
         write_lines_to_file(targets, targets_filename)
+
+        inputs_filename = os.path.join(
+            eval_summary_dir,
+            "{}_inputs".format(eval_dataset.name))
+        inputs = [ex["inputs_plaintext"] for ex in examples]
+        write_lines_to_file(inputs, inputs_filename)
+
         cached_targets[eval_dataset.name] = targets
         cached_examples[eval_dataset.name] = examples
 
