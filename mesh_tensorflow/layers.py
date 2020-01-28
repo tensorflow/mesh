@@ -20,6 +20,7 @@ from __future__ import division
 from __future__ import print_function
 
 import functools
+import gin
 
 from mesh_tensorflow import ops_with_redefined_builtins as mtf
 
@@ -164,6 +165,7 @@ class DenseInitializer(object):
     raise NotImplementedError("not implemented")
 
 
+@gin.configurable
 class VarianceScalingInitializer(DenseInitializer):
   """Initializer capable of adapting its scale to the shape of weights.
 
@@ -183,31 +185,14 @@ class VarianceScalingInitializer(DenseInitializer):
       mode: One of "fan_in", "fan_out", "fan_avg".
       distribution: Random distribution to use. One of "normal", "uniform".
       seed: A Python integer. Used to seed the random generator.
-
-  # Raises
-      ValueError: In case of an invalid value for the "scale", mode" or
-        "distribution" arguments.
   """
 
   def __init__(self, scale=1.0,
                mode="fan_in",
                distribution="normal"):
-    if scale <= 0.:
-      raise ValueError("`scale` must be a positive float. Got:", scale)
-    mode = mode.lower()
-    if mode not in {"fan_in", "fan_out", "fan_avg"}:
-      raise ValueError(
-          "Invalid `mode` argument: "
-          "expected on of {\"fan_in\", \"fan_out\", \"fan_avg\"} "
-          "but got %s" % (mode,))
-    distribution = distribution.lower()
-    if distribution not in {"normal", "uniform"}:
-      raise ValueError("Invalid `distribution` argument: "
-                       "expected one of {\"normal\", \"uniform\"} "
-                       "but got %s" % (distribution,))
     self.scale = scale
-    self.mode = mode
-    self.distribution = distribution
+    self.mode = mode.lower()
+    self.distribution = distribution.lower()
 
   def __call__(self, reduced_dims, new_dims):
     fan_in = mtf.list_product(d.size for d in reduced_dims)
@@ -217,14 +202,23 @@ class VarianceScalingInitializer(DenseInitializer):
       scale /= max(1., fan_in)
     elif self.mode == "fan_out":
       scale /= max(1., fan_out)
-    else:
+    elif self.mode == "fan_avg":
       scale /= max(1., float(fan_in + fan_out) / 2)
-    stddev = scale ** 0.5
-    if self.distribution == "truncated_normal":
-      return tf.truncated_normal_initializer(stddev=stddev)
     else:
+      raise ValueError(
+          "Invalid `mode` argument: "
+          "expected on of {\"fan_in\", \"fan_out\", \"fan_avg\"} "
+          "but got %s" % (self.mode,))
+    stddev = scale ** 0.5
+    if self.distribution == "normal":
+      return tf.truncated_normal_initializer(stddev=stddev)
+    elif self.distribution == "uniform":
       limit = stddev * 3. ** 0.5
       return tf.random_uniform_initializer(minval=-limit, maxval=limit)
+    else:
+      raise ValueError("Invalid `distribution` argument: "
+                       "expected one of {\"normal\", \"uniform\"} "
+                       "but got %s" % (self.distribution,))
 
 
 def conv2d(x, output_dim, filter_size=(3, 3),
