@@ -52,24 +52,22 @@ class DenseReluDense(transformer.TransformerLayer):
     """Call the layer."""
     io_channels = x.shape.dims[-1]
     hidden_channels = mtf.Dimension("d_ff", self.hidden_size)
-    if context.model.ensemble_dim:
-      expert_dims = [context.model.ensemble_dim]
-    else:
-      expert_dims = None
     h = mtf.layers.dense_product(x,
                                  reduced_dims=x.shape.dims[-1:],
                                  new_dims=hidden_channels,
                                  activation_functions=self.activation,
                                  use_bias=False,
                                  variable_dtype=context.variable_dtype,
-                                 name="wi", expert_dims=expert_dims)
+                                 name="wi",
+                                 expert_dims=context.model.ensemble_dims)
     if context.train and self.dropout_rate != 0.0:
       h = mtf.dropout(h, 1.0 - self.dropout_rate,
                       noise_shape=h.shape - context.length_dim)
     return mtf.layers.dense(h, io_channels, use_bias=False, activation=None,
                             variable_dtype=context.variable_dtype,
                             reduced_dims=h.shape.dims[-1:],
-                            name="wo", expert_dims=expert_dims)
+                            name="wo",
+                            expert_dims=context.model.ensemble_dims)
 
 
 def attention_params(context,
@@ -218,17 +216,18 @@ class SelfAttention(transformer.TransformerLayer):
         memory_length,
         self.kv_dim,
         self.kv_dim,
-        self.compute_bias(context, memory_position, x),
+        self.compute_bias(context, memory_position, x, params.query_heads_dims),
         **self.attention_kwargs_from_context(context))
     return params.compute_output(o, output_shape=x.shape)
 
-  def compute_bias(self, context, memory_position, x):
+  def compute_bias(self, context, memory_position, x, heads_dims):
     """Compute attention bias.
 
     Args:
       context: a transformer.Context
       memory_position: an int32 tensor containing memory_length dimension.
       x: a Tensor - the query antecedent - required for relative attention
+      heads_dims: a list of dimensions
     Returns:
       a Tensor or None
     """
@@ -243,7 +242,7 @@ class SelfAttention(transformer.TransformerLayer):
                    min_relative_position,
                    max_relative_position,
                    self.relative_attention_type,
-                   self.num_heads)
+                   tuple(heads_dims))
       if cache_key in context.cache:
         return context.cache[cache_key]
     biases = []
@@ -280,7 +279,6 @@ class SelfAttention(transformer.TransformerLayer):
     if self.relative_attention_type is not None:
       buckets_dim = mtf.Dimension(
           "buckets", self.relative_attention_num_buckets)
-      heads_dim = mtf.Dimension("heads", self.num_heads)
       bidirectional = not context.model.fully_autoregressive
       rp_bucket = _relative_position_bucket(
           relative_position,
@@ -288,22 +286,16 @@ class SelfAttention(transformer.TransformerLayer):
           num_buckets=buckets_dim.size)
       if (self.relative_attention_type == "bias" or
           self.relative_attention_type == "bias_shared"):
-        bias_shape = [heads_dim, buckets_dim]
-        if context.model.ensemble_dim:
-          bias_shape = [context.model.ensemble_dim] + bias_shape
+        bias_shape = context.model.ensemble_dims + heads_dims + [buckets_dim]
         values = mtf.get_variable(
             context.mesh, "relative_attention_bias",
             bias_shape, dtype=context.variable_dtype)
       elif self.relative_attention_type == "contextual":
-        if context.model.ensemble_dim:
-          expert_dims = [context.model.ensemble_dim]
-        else:
-          expert_dims = None
         values = layers.dense(
-            x, [buckets_dim, heads_dim],
+            x, [buckets_dim] + heads_dims,
             variable_dtype=context.variable_dtype,
             name="relative_attention_contextual",
-            expert_dims=expert_dims)
+            expert_dims=context.model.ensemble_dims)
       else:
         raise ValueError("unrecognized relative_attention_type \"%s\"" %
                          self.relative_attention_type)
@@ -545,7 +537,7 @@ class LocalSelfAttention(SelfAttention):
           self.memory_length(context),
           self.kv_dim,
           self.kv_dim,
-          self.compute_bias(context, memory_length, x),
+          self.compute_bias(context, memory_length, x, params.query_heads_dims),
           **self.attention_kwargs_from_context(context))
     else:
       # fancy local attention algorithm
@@ -640,3 +632,5 @@ def _relative_position_bucket(relative_position,
   val_if_large = mtf.minimum(val_if_large, num_buckets - 1)
   ret += mtf.where(is_small, n, val_if_large)
   return ret
+
+

@@ -479,6 +479,7 @@ class Unitransformer(object):
     self.mesh_shape = mesh_shape
     self.ensemble_dim = (
         mtf.Dimension("ensemble", ensemble) if ensemble else None)
+    self.ensemble_dims = [self.ensemble_dim] if ensemble else []
     if loss_fn:
       self._compute_loss = loss_fn
     self.positional_embedding = positional_embedding
