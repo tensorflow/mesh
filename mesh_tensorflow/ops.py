@@ -1472,8 +1472,8 @@ class Operation(object):
   @property
   def has_gradient(self):
     return (
-        [t for t in self.inputs if t.dtype.is_floating] and
-        [t for t in self.outputs if t.dtype.is_floating])
+        [t for t in self.inputs if t.dtype.is_floating or t.dtype.is_complex] and
+        [t for t in self.outputs if t.dtype.is_floating or t.dtype.is_complex])
 
   def gradient(self, unused_grad_ys):
     raise NotImplementedError("Gradient not implemented")
@@ -5581,6 +5581,21 @@ def random_uniform(mesh, shape, **kwargs):
   """
   shape = convert_to_shape(shape)
   return RandomOperation(mesh, shape, tf.random.uniform, **kwargs).outputs[0]
+
+
+def random_normal(mesh, shape, **kwargs):
+  """Random normal.
+
+  Args:
+    mesh: a Mesh
+    shape: a Shape
+    **kwargs: keyword args for tf.random.normal, except seed
+
+  Returns:
+    a Tensor
+  """
+  shape = mtf.convert_to_shape(shape)
+  return mtf.RandomOperation(mesh, shape, tf.random.normal, **kwargs).outputs[0]
 
 
 def dropout(x, keep_prob=None, rate=None, noise_shape=None, name=None):
