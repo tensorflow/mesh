@@ -325,7 +325,7 @@ class LayerStack(TransformerLayer):
     if context.layer_outputs is not None:
       context.layer_outputs.append(x)
     for lnum, layer in enumerate(self._layers):
-      with tf.variable_scope(layer.name or ""):
+      with tf.variable_scope(layer.name or "", reuse=tf.AUTO_REUSE):
         norm_x = self._layer_norm(context, (x * mask) if mask else x)
         with tf.variable_scope(layer.__class__.__name__):
           y = layer.call(context, norm_x)
@@ -1440,7 +1440,8 @@ class StudentTeacher(object):
 
 # gin-configurable constructors
 @gin.configurable
-def make_layer_stack(layers=gin.REQUIRED, num_layers=6, block_scope=True):
+def make_layer_stack(layers=gin.REQUIRED, num_layers=6, block_scope=True,
+                     block_sharing=False):
   """Configurable layer stack.
 
   The "layers" argument specifies the layers in each block.  It is a list
@@ -1475,6 +1476,8 @@ def make_layer_stack(layers=gin.REQUIRED, num_layers=6, block_scope=True):
       layer_002/...
       ...
       ```
+    block_sharing: a bool, if True, then the blocks are sharing the same set of
+      parameters. If False, then the blocks use different parameters.
   Returns:
     a LayerStack
   """
@@ -1492,10 +1495,17 @@ def make_layer_stack(layers=gin.REQUIRED, num_layers=6, block_scope=True):
             kwargs = x
           else:
             cls = x
-      if block_scope:
-        name = "block_{:03d}/{}".format(block, name or "layer_{:03d}".format(n))
+      if block_sharing:
+        if block_scope:
+          name = "block_000/{}".format(name or "layer_{:03d}".format(n))
+        else:
+          name = name or "layer_{:03d}".format(len(layer_stack) % len(layers))
       else:
-        name = name or "layer_{:03d}".format(len(layer_stack))
+        if block_scope:
+          name = "block_{:03d}/{}".format(
+              block, name or "layer_{:03d}".format(n))
+        else:
+          name = name or "layer_{:03d}".format(len(layer_stack))
       layer = cls(**kwargs)
       layer.set_name(name)
       layer_stack.append(layer)
