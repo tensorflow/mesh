@@ -50,6 +50,10 @@ class BertConfig(object):
                use_bias=True,
                attention_num_heads=12,
                attention_head_size=None,
+               attention_num_key_heads=None,
+               attention_key_head_size=None,
+               attention_num_value_heads=None,
+               attention_value_head_size=None,
                attention_probs_dropout_prob=0.1,
                feedforward_intermediate_size=3072,
                feedforward_intermediate_act="gelu",
@@ -89,6 +93,10 @@ class BertConfig(object):
         the Transformer encoder.
       attention_head_size: Size of attention keys and values.  If set to None,
         a default value is used equal to (d_model / attention_num_heads)
+      attention_num_key_heads: Number of attention key heads.
+      attention_key_head_size: Size of attention keys.
+      attention_num_value_heads: Number of attention value heads.
+      attention_value_head_size: Size of attention values.
       attention_probs_dropout_prob: The dropout ratio for the attention
         probabilities.
       feedforward_intermediate_size: The size of the "intermediate" layer in the
@@ -118,6 +126,10 @@ class BertConfig(object):
     self.attention_probs_dropout_prob = attention_probs_dropout_prob
     self.attention_num_heads = attention_num_heads
     self.attention_head_size = attention_head_size
+    self.attention_num_key_heads = attention_num_key_heads
+    self.attention_key_head_size = attention_key_head_size
+    self.attention_num_value_heads = attention_num_value_heads
+    self.attention_value_head_size = attention_value_head_size
     self.feedforward_intermediate_size = feedforward_intermediate_size
     self.feedforward_intermediate_act = feedforward_intermediate_act
     self.feedforward_intermediate_dropout_prob = (
@@ -367,6 +379,7 @@ class BertModel(object):
     output = mtf.transpose(output, x.shape)
     return output
 
+
   def feedforward(self, x):
     intermediate = mtf.layers.dense(
         x, reduced_dims=[self.model_dim],
@@ -553,6 +566,10 @@ class BertModel(object):
     return mtf.Dimension("num_heads", self.config.attention_num_heads)
 
   @property
+  def softmax_heads_dims(self):
+    return self.num_heads_dim
+
+  @property
   def max_position_embeddings_dim(self):
     return mtf.Dimension("max_position_embeddings",
                          self.config.max_position_embeddings)
@@ -596,6 +613,34 @@ class BertModel(object):
             "heads (%d)" % (self.model_dim.size, self.num_heads_dim.size))
       attention_head_size = int(self.model_dim.size / self.num_heads_dim.size)
     return mtf.Dimension("attention_head", attention_head_size)
+
+  @property
+  def key_dim(self):
+    """Dimensionality of attention key."""
+    if self.config.attention_key_head_size is None:
+      raise ValueError("The key head size is not defined.")
+    return mtf.Dimension("d_k", self.config.attention_key_head_size)
+
+  @property
+  def key_heads_dims(self):
+    """Dimensionality of number of key heads."""
+    if self.config.attention_num_key_heads is None:
+      raise ValueError("The number of key heads is not defined.")
+    return mtf.Dimension("key_heads", self.config.attention_key_head_size)
+
+  @property
+  def value_dim(self):
+    """Dimensionality of attention value."""
+    if self.config.attention_value_head_size is None:
+      raise ValueError("The value head size is not defined.")
+    return mtf.Dimension("d_v", self.config.attention_value_head_size)
+
+  @property
+  def value_heads_dims(self):
+    """Dimensionality of number of value heads."""
+    if self.config.attention_num_value_heads is None:
+      raise ValueError("The number of value heads is not defined.")
+    return mtf.Dimension("value_heads", self.config.attention_num_value_heads)
 
 
 def get_activation(activation_string):

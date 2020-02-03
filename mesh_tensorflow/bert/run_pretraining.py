@@ -21,6 +21,7 @@ from __future__ import division
 from __future__ import print_function
 
 import os
+import time
 
 import mesh_tensorflow as mtf
 import mesh_tensorflow.bert.bert as bert_lib
@@ -61,9 +62,9 @@ flags.DEFINE_integer(
     "Maximum number of masked LM predictions per sequence. "
     "Must match data generation.")
 
-flags.DEFINE_bool("do_train", False, "Whether to run training.")
-
-flags.DEFINE_bool("do_eval", False, "Whether to run eval on the dev set.")
+flags.DEFINE_string(
+    "mode", "train_and_eval",
+    "One of {\"train_and_eval\", \"train\", \"eval\"}.")
 
 flags.DEFINE_integer("train_batch_size", 32, "Total batch size for training.")
 
@@ -78,6 +79,9 @@ flags.DEFINE_string("optimizer", "adam", "adam/adafactor")
 flags.DEFINE_integer("num_train_steps", 100000, "Number of training steps.")
 
 flags.DEFINE_integer("num_warmup_steps", 10000, "Number of warmup steps.")
+
+flags.DEFINE_integer("steps_per_eval", 5000,
+                     "How often to evaluate the checkpoint.")
 
 flags.DEFINE_integer("save_checkpoints_steps", 1000,
                      "How often to save the model checkpoint.")
@@ -401,9 +405,6 @@ def _decode_record(record, name_to_features):
 def main(_):
   tf.logging.set_verbosity(tf.logging.INFO)
 
-  if not FLAGS.do_train and not FLAGS.do_eval:
-    raise ValueError("At least one of `do_train` or `do_eval` must be True.")
-
   bert_config = bert_lib.BertConfig.from_json_file(FLAGS.bert_config_file)
 
   tf.gfile.MakeDirs(FLAGS.output_dir)
@@ -448,35 +449,60 @@ def main(_):
       train_batch_size=FLAGS.train_batch_size,
       eval_batch_size=FLAGS.eval_batch_size)
 
-  if FLAGS.do_train:
-    tf.logging.info("***** Running training *****")
-    tf.logging.info("  Batch size = %d", FLAGS.train_batch_size)
+  if FLAGS.mode in ("train_and_eval", "train"):
+    tf.logging.info("Set train batch size = %d", FLAGS.train_batch_size)
     train_input_fn = input_fn_builder(
         input_files=input_files,
         max_seq_length=FLAGS.max_seq_length,
         max_predictions_per_seq=FLAGS.max_predictions_per_seq,
         is_training=True)
-    estimator.train(input_fn=train_input_fn, max_steps=FLAGS.num_train_steps)
 
-  if FLAGS.do_eval:
-    tf.logging.info("***** Running evaluation *****")
-    tf.logging.info("  Batch size = %d", FLAGS.eval_batch_size)
-
+  if FLAGS.mode in ("train_and_eval", "eval"):
+    tf.logging.info("Set eval batch size = %d", FLAGS.eval_batch_size)
     eval_input_fn = input_fn_builder(
         input_files=input_files,
         max_seq_length=FLAGS.max_seq_length,
         max_predictions_per_seq=FLAGS.max_predictions_per_seq,
         is_training=False)
 
-    result = estimator.evaluate(
-        input_fn=eval_input_fn, steps=FLAGS.max_eval_steps)
+    try:
+      current_step = tf.train.load_variable(FLAGS.output_dir,
+                                            tf.GraphKeys.GLOBAL_STEP)
+    except (TypeError, ValueError, tf.errors.NotFoundError):
+      current_step = 0
 
-    output_eval_file = os.path.join(FLAGS.output_dir, "eval_results.txt")
-    with tf.gfile.GFile(output_eval_file, "w") as writer:
-      tf.logging.info("***** Eval results *****")
-      for key in sorted(result.keys()):
-        tf.logging.info("  %s = %s", key, str(result[key]))
-        writer.write("%s = %s\n" % (key, str(result[key])))
+    while current_step < FLAGS.num_train_steps:
+      if FLAGS.mode == "train_and_eval":
+        # Train for up to steps_per_eval number of steps.
+        # At the end of training, a checkpoint will be written to --model_dir.
+        next_checkpoint = min(current_step + FLAGS.steps_per_eval,
+                              FLAGS.num_train_steps)
+      elif FLAGS.mode == "train":
+        next_checkpoint = FLAGS.num_train_steps
+
+      if FLAGS.mode in ("train_and_eval", "train"):
+        start_timestamp = time.time()  # This time will include compilation time
+        tf.logging.info("Starting to train.")
+        estimator.train(input_fn=train_input_fn, max_steps=next_checkpoint)
+        current_step = next_checkpoint
+
+        tf.logging.info("Finished training up to step %d. Elapsed seconds %d.",
+                        current_step, int(time.time() - start_timestamp))
+
+      if FLAGS.mode in ("train_and_eval", "eval"):
+        tf.logging.info("Starting to evaluate.")
+        result = estimator.evaluate(
+            input_fn=eval_input_fn, steps=FLAGS.max_eval_steps)
+        output_eval_file = os.path.join(
+            FLAGS.output_dir, "eval_results_{}.txt".format(current_step))
+        with tf.gfile.GFile(output_eval_file, "w") as writer:
+          tf.logging.info("***** Eval results *****")
+          for key in sorted(result.keys()):
+            tf.logging.info("  %s = %s", key, str(result[key]))
+            writer.write("%s = %s\n" % (key, str(result[key])))
+        if FLAGS.mode == "eval":
+          tf.logging.info("Exit eval mode")
+          break
 
 
 if __name__ == "__main__":
