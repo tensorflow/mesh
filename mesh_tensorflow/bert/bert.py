@@ -626,7 +626,7 @@ class BertModel(object):
     """Dimensionality of number of key heads."""
     if self.config.attention_num_key_heads is None:
       raise ValueError("The number of key heads is not defined.")
-    return mtf.Dimension("key_heads", self.config.attention_key_head_size)
+    return mtf.Dimension("key_heads", self.config.attention_num_key_heads)
 
   @property
   def value_dim(self):
