@@ -39,8 +39,12 @@ flags.DEFINE_string(
     "This specifies the model architecture.")
 
 flags.DEFINE_string(
-    "input_file", None,
-    "Input TF example files (can be a glob or comma separated).")
+    "input_train_files", None,
+    "Input TF example files for training (can be a glob or comma separated).")
+
+flags.DEFINE_string(
+    "input_eval_files", None,
+    "Input TF example files for evaluation (can be a glob or comma separated).")
 
 flags.DEFINE_string(
     "output_dir", None,
@@ -409,13 +413,21 @@ def main(_):
 
   tf.gfile.MakeDirs(FLAGS.output_dir)
 
-  input_files = []
-  for input_pattern in FLAGS.input_file.split(","):
-    input_files.extend(tf.gfile.Glob(input_pattern))
+  input_train_files = []
+  for input_pattern in FLAGS.input_train_files.split(","):
+    input_train_files.extend(tf.gfile.Glob(input_pattern))
 
-  tf.logging.info("*** Input Files ***")
-  for input_file in input_files:
-    tf.logging.info("  %s" % input_file)
+  tf.logging.info("*** Input Training Files ***")
+  for input_train_file in input_train_files:
+    tf.logging.info("  %s" % input_train_file)
+
+  input_eval_files = []
+  for input_pattern in FLAGS.input_eval_files.split(","):
+    input_eval_files.extend(tf.gfile.Glob(input_pattern))
+
+  tf.logging.info("*** Input Evaluation Files ***")
+  for input_eval_file in input_eval_files:
+    tf.logging.info("  %s" % input_eval_file)
 
   tpu_cluster_resolver = None
   if FLAGS.use_tpu and FLAGS.tpu_name:
@@ -452,7 +464,7 @@ def main(_):
   if FLAGS.mode in ("train_and_eval", "train"):
     tf.logging.info("Set train batch size = %d", FLAGS.train_batch_size)
     train_input_fn = input_fn_builder(
-        input_files=input_files,
+        input_files=input_train_files,
         max_seq_length=FLAGS.max_seq_length,
         max_predictions_per_seq=FLAGS.max_predictions_per_seq,
         is_training=True)
@@ -460,7 +472,7 @@ def main(_):
   if FLAGS.mode in ("train_and_eval", "eval"):
     tf.logging.info("Set eval batch size = %d", FLAGS.eval_batch_size)
     eval_input_fn = input_fn_builder(
-        input_files=input_files,
+        input_files=input_eval_files,
         max_seq_length=FLAGS.max_seq_length,
         max_predictions_per_seq=FLAGS.max_predictions_per_seq,
         is_training=False)
@@ -506,7 +518,8 @@ def main(_):
 
 
 if __name__ == "__main__":
-  flags.mark_flag_as_required("input_file")
+  flags.mark_flag_as_required("input_train_files")
+  flags.mark_flag_as_required("input_eval_files")
   flags.mark_flag_as_required("bert_config_file")
   flags.mark_flag_as_required("output_dir")
   tf.disable_v2_behavior()
