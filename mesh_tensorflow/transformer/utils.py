@@ -261,7 +261,8 @@ def tpu_estimator_model_fn(model_type,
                            variable_filter=None,
                            init_checkpoint=None,
                            ensemble_inputs=None,
-                           mesh_devices=None):
+                           mesh_devices=None,
+                           model_info_file=None):
   """Create a TPUEstimator model function.
 
   Args:
@@ -303,7 +304,8 @@ def tpu_estimator_model_fn(model_type,
       If None, then all models are trained on the same inputs.
     mesh_devices: a list of strings, the device names to use for each mesh
       slice. Only required for GPU.
-
+    model_info_file: an optional string, information about variables and
+      operations will be logged to this file during the TRAIN mode.
   Returns:
     a function to be passed to TPUEstimator
   """
@@ -551,7 +553,10 @@ def tpu_estimator_model_fn(model_type,
           trainable_var_grads, trainable_vars
       )
 
-      lowering = mtf.Lowering(graph, {mesh: mesh_impl}, autostack=autostack)
+      lowering = mtf.Lowering(
+          graph, {mesh: mesh_impl},
+          autostack=autostack,
+          log_file=model_info_file)
 
       tf_loss = lowering.export_to_tf_tensor(loss)
       tf_loss = tf.cast(tf_loss, tf.float32)

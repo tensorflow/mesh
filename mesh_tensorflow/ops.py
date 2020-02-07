@@ -625,7 +625,7 @@ class Lowering(object):
   ```
   """
 
-  def __init__(self, graph, mesh_to_impl, autostack=True):
+  def __init__(self, graph, mesh_to_impl, autostack=True, log_file=None):
     """Creates a Lowering of a Graph.
 
     Args:
@@ -638,6 +638,8 @@ class Lowering(object):
         This is a helpful performance optimization for large meshes.
         For more fine-grained control, you can call
         graph.rewrite_stack_variables() yourself before creating the Lowering.
+      log_file: an optional string. If provided, information about the variables
+        and operations will also be logged to this file.
     """
     # tf.logging.info("LOWERING GRAPH:\n%s" % graph.to_string)
     self.mesh_to_impl = mesh_to_impl   # {Mesh: MeshImpl}
@@ -656,13 +658,29 @@ class Lowering(object):
         self.add_counter(
             "output/%s" % type(op).__name__, self.laid_out_size(out))
         self.add_counter("output_unique/%s" % type(op).__name__, out.size)
-    log_variable_sizes(
-        graph.trainable_variables, "Trainable Variables", verbose=True,
-        mesh_to_impl=self.mesh_to_impl)
-    log_variable_sizes(
-        graph.all_variables, "All Variables", verbose=False,
-        mesh_to_impl=self.mesh_to_impl)
-    tf.logging.info("Counters:\n" + pretty_print_counters(self._counters))
+
+    def log_info(f=None):
+      """Log the variables and operations, possibly to file `f` as well."""
+      log_variable_sizes(
+          graph.trainable_variables,
+          "Trainable Variables",
+          verbose=True,
+          mesh_to_impl=self.mesh_to_impl,
+          log_file=f)
+      log_variable_sizes(
+          graph.all_variables,
+          "All Variables",
+          verbose=False,
+          mesh_to_impl=self.mesh_to_impl,
+          log_file=f)
+      _log_info_also_to_file(
+          "Counters:\n" + pretty_print_counters(self._counters), log_file=f)
+
+    if log_file:
+      with tf.io.gfile.GFile(log_file, mode="w") as f:
+        log_info(f)
+    else:
+      log_info()
 
   def mesh_impl(self, m):
     if not isinstance(m, Mesh):
@@ -5637,7 +5655,11 @@ def _cumprod(l):
   return ret
 
 
-def log_variable_sizes(var_list, tag, verbose=True, mesh_to_impl=None):
+def log_variable_sizes(var_list,
+                       tag,
+                       verbose=True,
+                       mesh_to_impl=None,
+                       log_file=None):
   """Log the sizes and shapes of variables, and the total size.
 
   Args:
@@ -5645,6 +5667,8 @@ def log_variable_sizes(var_list, tag, verbose=True, mesh_to_impl=None):
     tag: a string; defaults to "Trainable Variables"
     verbose: bool, if True, log every weight; otherwise, log total size only.
     mesh_to_impl: an optional map from Mesh to MeshImpl
+    log_file: an optional tf.io.gfile.GFile. If provided, information about
+      the variables will also be logged to this file.
   """
   if not var_list:
     return
@@ -5661,20 +5685,41 @@ def log_variable_sizes(var_list, tag, verbose=True, mesh_to_impl=None):
       slice_size = 0
     total_slice_size += slice_size
     if verbose:
-      tf.logging.info(
+      _log_info_also_to_file(
           "Variable %s size %s slice_size %s %s",
           v.name.ljust(60),
           str(v_size).ljust(12),
           str(slice_size).ljust(12),
-          str(v.shape).ljust(60))
+          str(v.shape).ljust(60),
+          log_file=log_file)
       if isinstance(v, StackedVariable):
         for n in v.original_names:
-          tf.logging.info("    " + n)
+          _log_info_also_to_file("    " + n, log_file=log_file)
     total_size += v_size
-  tf.logging.info("%s count: %s  Total size: %s  Total slice_size: %s",
-                  tag.ljust(30), str(len(var_list)).ljust(6),
-                  str(total_size).ljust(15),
-                  str(total_slice_size).ljust(15))
+  _log_info_also_to_file(
+      "%s count: %s  Total size: %s  Total slice_size: %s",
+      tag.ljust(30),
+      str(len(var_list)).ljust(6),
+      str(total_size).ljust(15),
+      str(total_slice_size).ljust(15),
+      log_file=log_file)
+
+
+def _log_info_also_to_file(format_str, *args, **kw_args):
+  """Logs at the info level and writes to file if one is provided.
+
+  Args:
+    format_str: a string; will be logged and can contain things such as %s.
+    *args: arguments to the format_str.
+    **kw_args: keyword arguments. May contain optional tf.io.gfile.GFile keyed
+      by "log_file", where the message will also be appended to this file. Other
+      arguments will be ignored.
+  """
+  tf.logging.info(format_str, *args)
+  log_file = kw_args.get("log_file", None)
+  if log_file:
+    log_file.write(format_str % args)
+    log_file.write("\n")
 
 
 class WhileLoopOperation(Operation):
