@@ -63,6 +63,7 @@ flags.DEFINE_string('checkpoint_dir', '', 'Path to saved models.')
 flags.DEFINE_integer('save_checkpoints_steps', 500,
                      'Frequency for saving models.')
 
+flags.DEFINE_boolean('on_gcp', False, 'Assign true if running on google cloud.')
 flags.DEFINE_boolean('write_summary', True, 'Whether to write summary.')
 flags.DEFINE_string('summary_dir', '', 'Path to saved summaries.')
 flags.DEFINE_string('pred_output_dir', '', 'Path to saved pred results.')
@@ -373,7 +374,7 @@ def _print_variable_values(sess):
     tf.logging.info('{}'.format(np.array(value).flatten()))
 
 
-def _train_phase(mesh_context):
+def _train_phase(mesh_context, config, master):
   """Handles input pipeline and trains the network."""
   if FLAGS.num_train_iterations_per_loop <= 0:
     return
@@ -390,7 +391,8 @@ def _train_phase(mesh_context):
       assert mesh_context.device_assignment
       assert mesh_context.num_cores
       simd_input_reader = input_reader.SimdMeshImplInputReader(
-          mesh_context.mesh_impl, ds_creator, mtf_shapes, is_eval_mode=False)
+          mesh_context.mesh_impl, ds_creator, mtf_shapes,
+          external_worker=(not FLAGS.on_gcp), is_eval_mode=False)
       train_computation = tpu.replicate(
           computation=model_train_fn,
           inputs=[[]] * mesh_context.num_cores,
@@ -414,10 +416,10 @@ def _train_phase(mesh_context):
       flush_summary = contrib_summary.flush()
 
     with tf.train.MonitoredTrainingSession(
-        master=FLAGS.master,
+        master=master,
         scaffold=_get_scaffold(additional_initializers=[]),
         hooks=all_hooks,
-        config=tf.ConfigProto(allow_soft_placement=True)) as sess:
+        config=config) as sess:
 
       if FLAGS.write_summary:
         contrib_summary.initialize(session=sess)
@@ -444,7 +446,7 @@ def _train_phase(mesh_context):
       _run_train_phase()
 
 
-def _eval_phase(mesh_context):
+def _eval_phase(mesh_context, config, master):
   """Handles input pipeline and evaluates the network."""
   if FLAGS.num_eval_iterations_per_loop <= 0:
     return
@@ -462,7 +464,8 @@ def _eval_phase(mesh_context):
       assert mesh_context.device_assignment
       assert mesh_context.num_cores
       simd_input_reader = input_reader.SimdMeshImplInputReader(
-          mesh_context.mesh_impl, ds_creator, mtf_shapes, is_eval_mode=True)
+          mesh_context.mesh_impl, ds_creator, mtf_shapes,
+          external_worker=(not FLAGS.on_gcp), is_eval_mode=True)
       eval_computation = tpu.replicate(
           computation=model_eval_fn,
           inputs=[[]] * mesh_context.num_cores,
@@ -476,7 +479,7 @@ def _eval_phase(mesh_context):
       for host_id in range(mesh_context.num_hosts):
         # pylint: disable=protected-access
         with ops.device(input_reader._host_id_to_tf_device(
-            host_id, external_worker=True)):
+            host_id, external_worker=(not FLAGS.on_gcp))):
           for device_ordinal in range(mesh_context.num_cores_per_host):
             outfeed_dequeue_op = tpu_ops.outfeed_dequeue_tuple(
                 dtypes=output_dtypes,
@@ -506,8 +509,8 @@ def _eval_phase(mesh_context):
 
     with tf.train.MonitoredSession(
         session_creator=tf.train.ChiefSessionCreator(
-            master=FLAGS.master,
-            config=tf.ConfigProto(allow_soft_placement=True)),
+            master=master,
+            config=config),
         hooks=all_hooks) as sess:
 
       if FLAGS.write_summary:
@@ -544,12 +547,6 @@ def _eval_phase(mesh_context):
       _run_eval_phase()
 
 
-def _shutdown():
-  with tf.Session(target=FLAGS.master,
-                  config=tf.ConfigProto(allow_soft_placement=True)) as sess:
-    sess.run(tpu.shutdown_system())
-
-
 def train_and_eval():
   """Trains and evaluates MeshTensorflow model without TPUEstimator.
 
@@ -559,7 +556,6 @@ def train_and_eval():
   mesh_context = None
   tf.logging.info('FLAGS.master: {}'.format(FLAGS.master))
   resolver = tf.distribute.cluster_resolver.TPUClusterResolver(FLAGS.master)
-  tf.config.experimental_connect_to_cluster(resolver)
   config = tf.ConfigProto()
   config.allow_soft_placement = True
   cluster_spec = resolver.cluster_spec()
@@ -571,11 +567,12 @@ def train_and_eval():
         sess, FLAGS.use_tpu, FLAGS.mesh_shape, unet.get_layout())
 
   for _ in range(FLAGS.num_training_loops):
-    _train_phase(mesh_context)
-    _eval_phase(mesh_context)
+    _train_phase(mesh_context, config, resolver.get_master())
+    _eval_phase(mesh_context, config, resolver.get_master())
 
   if FLAGS.use_tpu:
-    _shutdown()
+    with tf.Session(target=resolver.get_master(), config=config) as sess:
+      sess.run(tpu.shutdown_system())
 
   tf.logging.info('finished.')
 
@@ -585,4 +582,4 @@ def main(_):
 
 
 if __name__ == '__main__':
-  tf.compat.v1.app.run()
+  tf.app.run()
