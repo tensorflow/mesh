@@ -480,8 +480,7 @@ class Unitransformer(object):
     self.ensemble_dim = (
         mtf.Dimension("ensemble", ensemble) if ensemble else None)
     self.ensemble_dims = [self.ensemble_dim] if ensemble else []
-    if loss_fn:
-      self._compute_loss = loss_fn
+    self._loss_fn = loss_fn
     self.positional_embedding = positional_embedding
     self.input_full_attention = input_full_attention
     self.loss_on_targets_only = loss_on_targets_only
@@ -507,6 +506,9 @@ class Unitransformer(object):
     Returns:
       A 0-dimensional tensor of the loss.
     """
+    # Use a custom loss function if one is injected.
+    if self._loss_fn:
+      return self._loss_fn(self, context, logits, targets, output_vocab_dim)
     off_value = self.label_smoothing / output_vocab_dim.size
     on_value = 1.0 - self.label_smoothing + off_value
     soft_targets = mtf.one_hot(
@@ -595,7 +597,7 @@ class Unitransformer(object):
     if self.output_vocab_dim is None:
       return x
     if self.shared_embedding_and_softmax_weights:
-      logits = vocab_embedding.hidden_to_logits(x)
+      logits = vocab_embedding.hidden_to_logits(x, context)
     else:
       logits = mtf.layers.dense(
           x, self.output_vocab_dim, use_bias=False,
@@ -1704,7 +1706,8 @@ class VocabEmbedding(object):
   def ids_to_embedding(self, ids):
     return mtf.gather(self._embedding_weights, ids, self._vocab_dim)
 
-  def hidden_to_logits(self, hidden):
+  def hidden_to_logits(self, hidden, context):
+    del context
     hidden *= self._output_dim.size**-0.5
     return mtf.einsum([hidden, self._embedding_weights],
                       reduced_dims=[self._output_dim])
