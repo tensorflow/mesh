@@ -53,7 +53,6 @@ def linear_decay_learning_rate(step,
                                offset=0):
   """Linearly decay the learning rate to 0.
 
-
   Args:
     step: a tf.scalar representing the step we want the learning rate for.
     total_train_steps: a number, the total number of training steps.
@@ -64,11 +63,11 @@ def linear_decay_learning_rate(step,
   Returns:
     a tf.Scalar, the learning rate for the step.
   """
+  offset = tf.cast(offset, tf.float32)
+  step = tf.cast(step, tf.float32)
 
-  if step < offset:
-    return initial_lr
-  slope = initial_lr / float(total_train_steps - offset)
-  return initial_lr - slope * (step - offset)
+  return initial_lr * tf.minimum(1.0, (total_train_steps - step) /
+                                 (total_train_steps - offset))
 
 
 @gin.configurable
