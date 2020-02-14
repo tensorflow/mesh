@@ -637,6 +637,7 @@ def tpu_estimator_model_fn(model_type,
                   gin_config_saver_hook,
               ])
     elif mode == tf.estimator.ModeKeys.EVAL:
+      # perplexity eval
       logits, loss = logits_and_loss(mtf_features)
       anon_logits = mtf.anonymize(logits)
       lowering = mtf.Lowering(graph, {mesh: mesh_impl}, autostack=autostack)
@@ -657,10 +658,13 @@ def tpu_estimator_model_fn(model_type,
             tf.reduce_sum(weights, -1)))
         sequence_weights = tf.to_float(
             tf.not_equal(tf.reduce_sum(weights, -1), 0))
+        # the purpose of "mean_label" is as a checksum to ensure that
+        # models were evaluated on the same data.
         return {"neg_log_perplexity": tf.metrics.mean(-xent, weights),
                 "token_accuracy": tf.metrics.mean(token_correct, weights),
                 "sequence_accuracy": tf.metrics.mean(
-                    sequence_correct, sequence_weights)}
+                    sequence_correct, sequence_weights),
+                "mean_label": tf.metrics.mean(tf.cast(labels, tf.float32))}
 
       labels = lowering.export_to_tf_tensor(anon_targets)
       eval_metrics = (simple_metrics, [tf_logits, labels])
@@ -1611,7 +1615,7 @@ def run(tpu_job_name,
         optimizer=None,
         predict_fn=None,
         variable_filter=None,
-        perplexity_eval_steps=10,
+        perplexity_eval_steps=100,
         init_checkpoint=None,
         ensemble_inputs=None,
         train_model_fn=train_model):
@@ -1749,11 +1753,15 @@ def run(tpu_job_name,
       for eval_dataset in eval_datasets:
         tf.random.set_random_seed(12345)
         random.seed(12345)
+        num_examples = batch_size * perplexity_eval_steps
+        # include the number of examples in the evaluation name so as to
+        # make sure we are comparing apples to apples.
+        name = "%s_%d" % (eval_dataset.name, num_examples)
         _ = estimator.evaluate(
             input_fn=functools.partial(_input_fn, eval_dataset=eval_dataset),
             steps=perplexity_eval_steps,
             checkpoint_path=checkpoint_path,
-            name=eval_dataset.name)
+            name=name)
   elif mode == "eval":
     eval_model(estimator, vocabulary, sequence_length, batch_size,
                dataset_split, model_dir, eval_dataset_fn, eval_summary_dir,
