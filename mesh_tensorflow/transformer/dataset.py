@@ -116,7 +116,7 @@ def pack_or_pad(
   Returns:
     a tf.data.Dataset where all features have fixed shape [length].
   """
-  feature_keys = feature_keys or list(dataset.output_shapes.keys())
+  feature_keys = feature_keys or list(tf.data.get_output_shapes(dataset).keys())
   if pack:
     dataset = pack_dataset(dataset, length=length, keys=feature_keys)
   # Pad/trim length of each example to length.
@@ -137,7 +137,7 @@ def ensure_dataset_eos(dataset, feature_keys=None):
   Returns:
     a tf.data.Dataset where all specified features end with PAD=0 or EOS=1.
   """
-  feature_keys = feature_keys or dataset.output_shapes.keys()
+  feature_keys = feature_keys or tf.data.get_output_shapes(dataset).keys()
   def _ensure_eos(k, v):
     if k not in feature_keys:
       return v
@@ -510,7 +510,7 @@ def pack_dataset(dataset, length, keys=None, use_custom_ops=False):
   Returns:
     a tf.data.Dataset
   """
-  shapes = dataset.output_shapes
+  shapes = tf.data.get_output_shapes(dataset)
   if keys is None:
     keys = list(shapes.keys())
   for k in keys:
