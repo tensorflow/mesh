@@ -452,11 +452,12 @@ def tpu_estimator_model_fn(model_type,
     assert (mode == tf.estimator.ModeKeys.TRAIN or
             mode == tf.estimator.ModeKeys.EVAL)
 
-    def logits_and_loss(mtf_features):
+    def logits_and_loss(mtf_features, num_microbatches=1):
       """Compute logits and loss.
 
       Args:
         mtf_features: a dictionary
+        num_microbatches: integer
       Returns:
         logits: a mtf.Tensor
         loss: a mtf.Tensor
@@ -490,12 +491,13 @@ def tpu_estimator_model_fn(model_type,
       else:
         raise ValueError("unrecognized class")
 
-      return  transformer_model.call_simple(
+      return transformer_model.call_simple(
           inputs=inputs,
           targets=mtf_features["targets"],
           compute_loss=True,
           mode=mode,
           variable_dtype=get_variable_dtype(),
+          num_microbatches=num_microbatches,
           **position_kwargs)
 
     if mode == tf.estimator.ModeKeys.TRAIN:
@@ -505,8 +507,7 @@ def tpu_estimator_model_fn(model_type,
                                                     layout_rules)
       if num_microbatches > 1:
         def serialized_fn(mtf_features):
-          return {
-              "loss": (logits_and_loss(mtf_features)[1] / num_microbatches)}
+          return {"loss": logits_and_loss(mtf_features, num_microbatches)[1]}
         var_grads, loss_dict = mtf.serialize_training_step(
             mtf_features, serialized_fn, batch_dim, num_microbatches)
         loss = loss_dict["loss"]
