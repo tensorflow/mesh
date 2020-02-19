@@ -23,6 +23,8 @@ import dataclasses
 from mesh_tensorflow.transformer import learning_rate_schedules
 import tensorflow.compat.v1 as tf
 
+tf.disable_v2_behavior()
+
 
 @dataclasses.dataclass
 class LearningRateSpec(object):
@@ -65,5 +67,4 @@ class UtilsTest(parameterized.TestCase, tf.test.TestCase):
 
 
 if __name__ == "__main__":
-  tf.disable_v2_behavior()
   tf.test.main()
