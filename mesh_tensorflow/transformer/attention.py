@@ -76,6 +76,76 @@ def attention(q,
   return outputs
 
 
+def hybrid_attention(q,
+                     k,
+                     v,
+                     context,
+                     memory_length_dim,
+                     key_dim,
+                     value_dim,
+                     bias=None,
+                     dropout_rate=0.0,
+                     dropout_broadcast_dims=None,
+                     extra_logit=None):
+  """Dot-product attention - doesn't use positional dimensions.
+
+  key_dim is a Dimension representing the channels in the queries and keys
+  value_dim is a Dimension representing the channels in values
+  memory_length_dim is a Dimension representing the different key/value pairs.
+
+  Dimensions of q: other_query_dims + {key_dim}
+  Dimensions of k: other_memory_dims + {memory_length_dim, key_dim}
+  Dimensions of v: other_memory_dims + {memory_length_dim, value_dim}
+  other_memory_dims is a subset of other_query_dims
+
+  Typically, other_query_dims={batch, heads, length}
+  Typically, other_memory_dims={batch, heads}
+
+  Args:
+    q: a Tensor
+    k: a Tensor
+    v: a Tensor
+    context: context of the attention layer.
+    memory_length_dim: a Dimension
+    key_dim: a Dimension
+    value_dim: a Dimension
+    bias: a Tensor to be added into the attention logits.
+    dropout_rate: a float.
+    dropout_broadcast_dims: an optional list of mtf.Dimension
+    extra_logit: an optional scalar or tensor
+
+  Returns:
+    Tensor with shape q.shape - key_dim + value_dim
+  """
+  logits = mtf.einsum([q, k], reduced_dims=[key_dim])
+  if bias is not None:
+    logits += bias
+
+  query_length_dim = mtf.Dimension("length", memory_length_dim.size)
+  doubly_coeff = mtf.get_variable(
+      context.mesh, "doubly_coeff", [],
+      initializer=tf.constant_initializer(0.5),
+      dtype=context.variable_dtype)
+  doubly_coeff = mtf.maximum(mtf.minimum(doubly_coeff, 1.), 0.)
+
+  upper_weights = mtf.softmax(
+      logits, memory_length_dim, extra_logit=extra_logit)
+
+  lower_log_weights = mtf.log_softmax(
+      logits, query_length_dim, extra_logit=extra_logit)
+  doubly_weights = mtf.softmax(
+      lower_log_weights, memory_length_dim, extra_logit=extra_logit)
+
+  weights = doubly_coeff * doubly_weights + (1. - doubly_coeff) * upper_weights
+  if dropout_rate != 0.0:
+    weights = mtf.dropout(
+        weights, 1.0 - dropout_rate,
+        noise_shape=weights.shape - dropout_broadcast_dims)
+  outputs_shape = q.shape - key_dim + value_dim
+  outputs = mtf.einsum([weights, v], outputs_shape)
+  return outputs
+
+
 class AttentionParams(object):
   """A set of parameters used for (multihead) attention."""
 

@@ -140,7 +140,8 @@ class SelfAttention(transformer.TransformerLayer):
                dropout_rate=0.0,
                attention_kwargs=None,
                relative_attention_type=None,
-               relative_attention_num_buckets=32):
+               relative_attention_num_buckets=32,
+               attention_func=None):
     """Create a SelfAttention Layer.
 
     Args:
@@ -153,6 +154,7 @@ class SelfAttention(transformer.TransformerLayer):
       relative_attention_type: an optional string - one of
         (None, "bias", "bias_shared", "contextual")
       relative_attention_num_buckets: an integer
+      attention_func: attention function: None/'hybrid'.
     """
     self.num_heads = num_heads
     self.num_memory_heads = num_memory_heads
@@ -162,6 +164,7 @@ class SelfAttention(transformer.TransformerLayer):
     self.attention_kwargs = attention_kwargs or {}
     self.relative_attention_type = relative_attention_type
     self.relative_attention_num_buckets = relative_attention_num_buckets
+    self.attention_func = attention_func
 
   def attention_kwargs_from_context(self, context):
     kwargs = copy.copy(self.attention_kwargs)
@@ -211,13 +214,24 @@ class SelfAttention(transformer.TransformerLayer):
     if self.shared_kv:
       k = kv
       v = kv
-    o = attention.attention(
-        q, k, v,
-        memory_length,
-        self.kv_dim,
-        self.kv_dim,
-        self.compute_bias(context, memory_position, x, params.query_heads_dims),
-        **self.attention_kwargs_from_context(context))
+    if self.attention_func == "hybrid":
+      o = attention.hybrid_attention(
+          q, k, v, context,
+          memory_length,
+          self.kv_dim,
+          self.kv_dim,
+          self.compute_bias(
+              context, memory_position, x, params.query_heads_dims),
+          **self.attention_kwargs_from_context(context))
+    else:
+      o = attention.attention(
+          q, k, v,
+          memory_length,
+          self.kv_dim,
+          self.kv_dim,
+          self.compute_bias(
+              context, memory_position, x, params.query_heads_dims),
+          **self.attention_kwargs_from_context(context))
     return params.compute_output(o, output_shape=x.shape)
 
   def compute_bias(self, context, memory_position, x, heads_dims):
