@@ -48,6 +48,7 @@ from __future__ import division
 from __future__ import print_function
 
 import json
+import math
 
 import gin
 import mesh_tensorflow as mtf
@@ -296,6 +297,523 @@ class Context(object):
     else:
       return mtf.cast(
           mtf.not_equal(self.sequence_id, 0), self.activation_dtype)
+
+  def get_position(self):
+    if self.position_is_default:
+      return mtf.range(self.mesh, self.length_dim, tf.int32)
+    else:
+      return self.position
+
+
+@gin.configurable
+class UTLayerStack(TransformerLayer):
+  """A stack of layers for Universal Transformer.
+
+  This implementation is largely adapted from t2t universal transformer
+  implementation. Reference:
+  third_party/py/tensor2tensor/models/research
+  """
+
+  def __init__(
+      self,
+      layers,
+      dropout_rate=0.0,
+      norm_epsilon=1e-6,
+      num_vanilla_transformer_layers=2,
+      act_type=gin.REQUIRED,
+      recurrence_type=gin.REQUIRED,
+      act_max_steps=gin.REQUIRED,
+      act_epsilon=gin.REQUIRED,
+      num_rec_steps=gin.REQUIRED,
+      num_inrecurrence_layers=gin.REQUIRED,
+      position_start_index=gin.REQUIRED,
+      add_or_concat_timing_signal=gin.REQUIRED,
+      step_timing_signal_type=gin.REQUIRED,
+      add_position_timing_signal=gin.REQUIRED,
+      add_step_timing_signal=gin.REQUIRED,
+      mix_with_transformer_before_ut=gin.REQUIRED,
+      mix_with_transformer_after_ut=gin.REQUIRED,
+  ):
+    """Create a LayerStack for Universal Transformer.
+
+    Args:
+      layers: a list of TransformerLayer
+      dropout_rate: a floating-point number
+      norm_epsilon: a floating-point number
+      num_vanilla_transformer_layers: number of vanilla transformer layers
+        before the ACT layer.
+      act_type: act type
+      recurrence_type: recurrence type (allowable values: "act").
+      act_max_steps: maximum number of act steps
+      act_epsilon: halting threshold
+      num_rec_steps: maximum number of recurrent steps
+      num_inrecurrence_layers: number of inrecurrence layers
+      position_start_index: start index in embedding
+      add_or_concat_timing_signal: bool,
+      whether to add or concat the timing signal
+      step_timing_signal_type: step timing signal type
+      add_position_timing_signal: bool, whether to add position timing signal
+      add_step_timing_signal: bool, whether to add step timing signal
+      mix_with_transformer_before_ut: whether to mix transformer layers before
+        ut.
+      mix_with_transformer_after_ut: whether to mix transformer layers after ut.
+    """
+    self._layers = layers
+    self._dropout_rate = dropout_rate
+    self._norm_epsilon = norm_epsilon
+    self.num_vanilla_transformer_layers = num_vanilla_transformer_layers
+    self.act_type = act_type
+    self.recurrence_type = recurrence_type
+    self.act_max_steps = act_max_steps
+    self.act_epsilon = act_epsilon
+    self.num_rec_steps = num_rec_steps
+    self.num_inrecurrence_layers = num_inrecurrence_layers
+    self.position_start_index = position_start_index
+    self.add_or_concat_timing_signal = add_or_concat_timing_signal
+    self.step_timing_signal_type = step_timing_signal_type
+    self.add_position_timing_signal = add_position_timing_signal
+    self.add_step_timing_signal = add_step_timing_signal
+    self.mix_with_transformer_before_ut = mix_with_transformer_before_ut
+    self.mix_with_transformer_after_ut = mix_with_transformer_after_ut
+
+  def get_timing_signal_1d(self,
+                           context,
+                           length,
+                           channels,
+                           min_timescale=1.0,
+                           max_timescale=1.0e4,
+                           start_index=0):
+    """Gets a bunch of sinusoids of different frequencies.
+
+    Each channel of the input Tensor is incremented by a sinusoid of a different
+    frequency and phase.
+
+    This allows attention to learn to use absolute and relative positions.
+    Timing signals should be added to some precursors of both the query and the
+    memory inputs to attention.
+
+    The use of relative position is possible because sin(x+y) and cos(x+y) can
+    be expressed in terms of y, sin(x) and cos(x).
+
+    In particular, we use a geometric sequence of timescales starting with
+    min_timescale and ending with max_timescale.  The number of different
+    timescales is equal to channels / 2. For each timescale, we
+    generate the two sinusoidal signals sin(timestep/timescale) and
+    cos(timestep/timescale).  All of these sinusoids are concatenated in
+    the channels dimension.
+
+    Args:
+      context: mtf context.
+      length: a mtf.Dimension, length of timing signal sequence.
+      channels: a mtf.Dimension, size of timing embeddings to create.
+      The number of different timescales is equal to channels / 2.
+      min_timescale: a float
+      max_timescale: a float
+      start_index: index of first position
+
+    Returns:
+      a Tensor of timing signals [1, length, channels]
+    """
+
+    position = context.get_position() + start_index
+    num_timescales = mtf.constant(context.mesh, channels.size // 2)
+    log_timescale_increment = (
+        math.log(float(max_timescale) / float(min_timescale)) /
+        mtf.maximum(num_timescales - 1, 1))
+    channel_dim_name = channels.name
+    inv_timescales = (
+        min_timescale * mtf.exp(
+            mtf.mtf_range(context.mesh,
+                          mtf.Dimension(channel_dim_name, channels.size // 2),
+                          context.activation_dtype) * -log_timescale_increment))
+
+    scaled_time = position * inv_timescales
+    # Please note that this slightly differs from the published paper.
+    # See a discussion here:
+    # https://github.com/tensorflow/tensor2tensor/pull/177
+    #    concat_dim_name = scaled_time.shape.dimension_names[1]
+    concat_dim_name = channels.name
+    signal = mtf.concat(
+        [mtf.sin(scaled_time), mtf.cos(scaled_time)],
+        concat_dim_name=concat_dim_name)
+
+    if channels.size % 2 != 0:
+      raise NotImplementedError("Odd channel size not implemented.")
+    new_dims = [mtf.Dimension("expanded", 1)
+               ] + length.shape.dims + channels.shape.dim
+    signal = mtf.reshape(signal, mtf.Shape(new_dims))
+    return signal
+
+  def add_position_timing_signal_func(self, context, x, step):
+    """Add n-dimensional embedding as the position (horizontal) timing signal.
+
+    Args:
+      context: mtf context
+      x: a tensor with shape [batch, length, depth]
+      step: step
+
+    Returns:
+      a Tensor with the same shape as x.
+
+    """
+
+    if not self.position_start_index:
+      index = 0
+
+    elif self.position_start_index == "random":
+      # Shift all positions randomly
+      # TODO(dehghani): What would be reasonable for max number of shift?
+      index = mtf.random_uniform(
+          context.mesh, [], maxval=x.shape.dims[1].size, dtype=tf.int32)
+
+    elif self.position_start_index == "step":
+      # Shift positions based on the step
+      if self.recurrence_type == "act":
+        num_steps = self.act_max_steps
+      else:
+        num_steps = self.num_rec_steps
+      index = mtf.cast(x.shape.dims[1].size * step / num_steps, dtype=tf.int32)
+
+    length = context.length_dim
+    channels = context.model.model_dim
+    signal = self.get_timing_signal_1d(
+        context, length, channels, start_index=index)
+
+    if self.add_or_concat_timing_signal == "add":
+      x_with_timing = x + mtf.cast_like(signal, x.dtype)
+    # Unimplemented
+    if self.add_or_concat_timing_signal == "concat":
+      batch_dim = x.shape.dims[0]
+      out_shape = mtf.Shape([batch_dim] + signal.shape.dims[1:])
+      signal_tiled = mtf.broadcast(signal, out_shape)
+      x_with_timing = mtf.concat(
+          (x, signal_tiled), concat_dim_name=signal_tiled.dimension_names[-1])
+
+    return x_with_timing
+
+  def get_layer_timing_signal_learned_1d(self, context, channels, layer,
+                                         num_layers):
+    """get n-dimensional embedding as the layer (vertical) timing signal.
+
+    Adds embeddings to represent the position of the layer in the tower.
+
+    Args:
+      context: mtf context
+      channels: dimension of the timing signal
+      layer: layer num
+      num_layers: total number of layers
+
+    Returns:
+      a Tensor of timing signals [channels].
+    """
+    layer_dim = mtf.Dimension("layer", num_layers)
+    dim_1 = mtf.Dimension("dim_1", 1)
+    dim_2 = mtf.Dimension("dim_2", 1)
+    shape = mtf.Shape([layer_dim, dim_1, dim_2, channels])
+    layer_embedding = (
+        mtf.get_variable(
+            context.mesh,
+            "layer_embedding",
+            shape,
+            dtype=context.variable_dtype,
+            initializer=tf.random_normal_initializer(0, channels.size**-0.5)) *
+        (channels.size**0.5))
+    return mtf.gather(layer_embedding, layer, layer_dim)
+
+  def add_step_timing_signal_func(self, context, x, step):
+    """Add n-dimensional embedding as the step (vertical) timing signal.
+
+    Args:
+      context: mtf context
+      x: a tensor with shape [batch, length, depth]
+      step: step
+
+    Returns:
+      a Tensor with the same shape as x.
+
+    """
+    if self.recurrence_type == "act":
+      num_steps = self.act_max_steps
+    else:
+      num_steps = self.num_rec_steps
+    channels = x.shape.dims[-1]
+
+    if self.step_timing_signal_type == "learned":
+      signal = self.get_layer_timing_signal_learned_1d(context, channels, step,
+                                                       num_steps)
+    elif self.step_timing_signal_type == "sinusoid":
+      signal = self.get_layer_timing_signal_sinusoid_1d(context, channels, step,
+                                                        num_steps)
+    if self.add_or_concat_timing_signal == "add":
+      x_with_timing = x + mtf.cast_like(signal, x.dtype)
+    elif self.add_or_concat_timing_signal == "concat":
+      batch_dim = x.shape.dims[0]
+      out_shape = mtf.Shape([batch_dim] + x.shape.dims[1:])
+      signal_tiled = mtf.broadcast(signal, out_shape)
+      x_with_timing = mtf.concat(
+          (x, signal_tiled), concat_dim_name=signal_tiled.dimension_names[-1])
+
+    return x_with_timing
+
+  def step_preprocess(self, context, x, step):
+    """Preprocess the input at the beginning of each step.
+
+    Args:
+      context: mtf context
+      x: input tensor
+      step: step
+
+    Returns:
+      preprocessed input.
+
+    """
+    original_channel_size = x.shape.dims[-1]
+
+    if self.add_step_timing_signal:
+      x = self.add_step_timing_signal_func(context, x, step)
+    if ((self.add_position_timing_signal or self.add_position_timing_signal) and
+        self.add_or_concat_timing_signal == "concat"):
+      # linear projection to the original dimension of x
+      new_dims = x.shape.dims[:-1] + [original_channel_size]
+      x = mtf.layers.dense(
+          x, variable_dtype=context.variable_dtype,
+          new_dims=new_dims, activation=None, use_bias=False)
+      # TODO(yanqiz): implement sru in a separate CL
+
+
+#         if self.add_sru:
+#           x = common_layers.sru(x)
+
+    return x
+
+  def vanilla_transformer_layer(self, context, x, mask):
+    """Build a vanilla transformer layer."""
+
+    for lnum, layer in enumerate(self._layers):
+      scope_name = layer.name
+      with tf.variable_scope(scope_name or ""):
+        norm_x = self._layer_norm(context, (x * mask) if mask else x)
+        with tf.variable_scope(layer.__class__.__name__):
+          y = layer.call(context, norm_x)
+          if y.shape != x.shape:
+            raise ValueError("Layer %s returned misshaped output x=%s y=%s" %
+                             (layer.__class__.__name__, x, y))
+        x += self._dropout(context, y)
+      if context.layer_outputs is not None and lnum != len(self._layers) - 1:
+        context.layer_outputs.append(x)
+      context.layer_index += 1
+    x = self._layer_norm(context, x, name="final_layer_norm")
+    x = self._dropout(context, x)
+    if mask:
+      x *= mask
+    if context.layer_outputs is not None:
+      context.layer_outputs.append(x)
+    return x
+
+  def act_layer(self, context, x, mask):
+    """Build a Universal Transformer ACT layer."""
+    state = x
+    act_max_steps = self.act_max_steps
+    threshold = 1.0 - self.act_epsilon
+    state_shape_static = state.shape.dims
+
+    state_slice = slice(0, 3)
+    if self.act_type == "global":
+      state_slice = slice(0, 2)
+
+    # Dynamic shape for update tensors below
+    update_shape = state_shape_static[state_slice]
+
+    # Halting probabilities (p_t^n in the paper)
+    halting_probability = mtf.zeros(
+        context.mesh, update_shape, dtype=context.activation_dtype)
+
+    # Remainders (R(t) in the paper)
+    remainders = mtf.zeros(
+        context.mesh, update_shape, dtype=context.activation_dtype)
+
+    # Number of updates performed (N(t) in the paper)
+    n_updates = mtf.zeros(
+        context.mesh, update_shape, dtype=context.activation_dtype)
+
+    # Previous cell states (s_t in the paper)
+    previous_state = mtf.zeros_like(state)
+    step = mtf.constant(context.mesh, 0, dtype=tf.int32)
+
+    def ut_function(state, step, halting_probability, remainders, n_updates,
+                    previous_state):
+      """implements act (position-wise halting).
+
+      Args:
+        state: 3-D Tensor: [batch_size, length, channel]
+        step: indicates number of steps taken so far
+        halting_probability: halting probability
+        remainders: act remainders
+        n_updates: act n_updates
+        previous_state: previous state
+
+      Returns:
+        transformed_state: transformed state
+        step: step+1
+        halting_probability: halting probability
+        remainders: act remainders
+        n_updates: act n_updates
+        new_state: new state
+      """
+      state = self.step_preprocess(context, state, step)
+      if self.act_type == "random":
+        # random as halting probability
+        p = mtf.random_uniform(
+            context.mesh,
+            shape=halting_probability.shape.dims,
+            dtype=context.variable_dtype)
+      else:
+        last_dim_name = state.shape.dimension_names[-1]
+        new_dims = [mtf.Dimension(last_dim_name, 1)]
+        with tf.variable_scope("sigmoid_activation_for_pondering"):
+          p = mtf.layers.dense(
+              state,
+              variable_dtype=context.variable_dtype,
+              reduced_dims=[state.shape.dims[-1]],
+              new_dims=new_dims,
+              activation=mtf.sigmoid,
+              use_bias=True)
+          if self.act_type == "global":
+            # average over all positions (as a global halting prob)
+            p = mtf.reduce_mean(p, reduced_dim=p.shape.dims[1])
+            p = mtf.squeeze(p)
+          else:
+            # maintain position-wise probabilities
+            new_shape = p.shape.dims[:-1]
+            p = mtf.reshape(p, new_shape)
+      # Mask for inputs which have not halted yet
+      still_running = mtf.cast(
+          mtf.less(halting_probability, 1.0), context.activation_dtype)
+
+      # Mask of inputs which halted at this step
+      new_halted = mtf.cast(
+          mtf.greater(halting_probability + p * still_running, threshold),
+          context.activation_dtype) * still_running
+
+      # Mask of inputs which haven't halted, and didn't halt this step
+      still_running = mtf.cast(
+          mtf.less_equal(halting_probability + p * still_running, threshold),
+          context.activation_dtype) * still_running
+
+      # Add the halting probability for this step to the halting
+      # probabilities for those input which haven't halted yet
+      halting_probability += p * still_running
+
+      # Compute remainders for the inputs which halted at this step
+      remainders += new_halted * (1 - halting_probability)
+
+      # Add the remainders to those inputs which halted at this step
+      halting_probability += new_halted * remainders
+
+      # Increment n_updates for all inputs which are still running
+      n_updates += still_running + new_halted
+
+      # Compute the weight to be applied to the new state and output
+      # 0 when the input has already halted
+      # p when the input hasn't halted yet
+      # the remainders when it halted this step
+      input_tensor = p * still_running + new_halted * remainders
+      update_weights = input_tensor
+
+      # apply transformation on the state
+      transformed_state = state
+
+      for _ in range(self.num_inrecurrence_layers):
+        transformed_state = self.vanilla_transformer_layer(
+            context, x, mask)
+
+      # update running part in the weighted state and keep the rest
+      new_state = ((transformed_state * update_weights) +
+                   (previous_state * (1 - update_weights)))
+
+      if self.act_type == "accumulated":
+        # Add in the weighted state
+        new_state = (transformed_state * update_weights) + previous_state
+
+      step += 1
+
+      return (transformed_state, step, halting_probability, remainders,
+              n_updates, new_state)
+
+    for _ in range(act_max_steps + 1):
+      (state, step, halting_probability, remainders, n_updates,
+       previous_state) = ut_function(state, step, halting_probability,
+                                     remainders, n_updates, previous_state)
+    ponder_times = n_updates
+
+    mtf.scalar_summary("ponder_times", mtf.reduce_mean(ponder_times))
+    return state
+
+  def call(self, context, x):
+    """Call the layer stack."""
+    if isinstance(context.sequence_id, mtf.Tensor):
+      # We use this mask to zero out the padding regions at each layer.
+      # This "fixes" a bug where extreme values leak from the padding into the
+      # non-padding regions.
+      # TODO(noam): undertand this better and make a more principled fix.
+      mask = mtf.cast(
+          mtf.not_equal(context.sequence_id, 0), context.activation_dtype)
+    else:
+      mask = None
+    x = self._dropout(context, x)
+    if context.layer_outputs is not None:
+      context.layer_outputs.append(x)
+    if self.mix_with_transformer_before_ut:
+      for _ in range(self.num_vanilla_transformer_layers):
+        x = self.vanilla_transformer_layer(context, x, mask)
+    # Call a ACT layer
+    x = self.act_layer(context, x, mask)
+    if self.mix_with_transformer_after_ut:
+      for _ in range(self.num_vanilla_transformer_layers):
+        x = self.vanilla_transformer_layer(context, x, mask)
+    return x
+
+  def _dropout(self, context, x):
+    if context.train and self._dropout_rate > 0:
+      return mtf.dropout(
+          x,
+          rate=self._dropout_rate,
+          noise_shape=mtf.Shape(context.batch_dims + [context.model.model_dim]))
+    else:
+      return x
+
+  def _layer_norm(self, context, x, name=None):
+    """Layer normalization.
+
+    Args:
+      context: a Context
+      x: a Tensor
+      name: an optional string
+
+    Returns:
+      a Tensor
+    """
+    with tf.variable_scope(name, default_name="layer_norm"):
+      scale_shape = [context.model.model_dim]
+      if context.model.ensemble_dim:
+        scale_shape = [context.model.ensemble_dim] + scale_shape
+      scale = mtf.get_variable(
+          context.mesh,
+          "scale",
+          mtf.Shape(scale_shape),
+          initializer=tf.ones_initializer(),
+          dtype=context.variable_dtype)
+      variance = mtf.reduce_mean(
+          mtf.square(x), reduced_dim=context.model.model_dim)
+    return x * mtf.rsqrt(variance + self._norm_epsilon) * scale
+
+  @property
+  def num_layers(self):
+    return len(self.layers)
+
+  @property
+  def layers(self):
+    return self._layers
 
 
 @gin.configurable
@@ -1463,7 +1981,10 @@ class StudentTeacher(object):
 
 # gin-configurable constructors
 @gin.configurable
-def make_layer_stack(layers=gin.REQUIRED, num_layers=6, block_scope=True):
+def make_layer_stack(layers=gin.REQUIRED,
+                     use_universal_transformer=False,
+                     num_layers=6,
+                     block_scope=True):
   """Configurable layer stack.
 
   The "layers" argument specifies the layers in each block.  It is a list
@@ -1482,6 +2003,7 @@ def make_layer_stack(layers=gin.REQUIRED, num_layers=6, block_scope=True):
 
   Args:
     layers: a list (see above)
+    use_universal_transformer: whether to use universal transformer layers
     num_layers: an integer
     block_scope: a bool, if True then use scopes of the format
       ```
@@ -1522,7 +2044,8 @@ def make_layer_stack(layers=gin.REQUIRED, num_layers=6, block_scope=True):
       layer = cls(**kwargs)
       layer.set_name(name)
       layer_stack.append(layer)
-  return LayerStack(layer_stack)
+  use_layer_stack = UTLayerStack if use_universal_transformer else LayerStack
+  return use_layer_stack(layer_stack)
 
 
 @gin.configurable

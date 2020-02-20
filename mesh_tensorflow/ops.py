@@ -1678,6 +1678,14 @@ def cwise(tf_fn, xs, output_dtype=None, grad_function=None, name=None):
       grad_function=grad_function, name=name or "cwise")
 
 
+def sin(x, name="sin"):
+  return cwise(tf.sin, [x], name=name)
+
+
+def cos(x, name="cos"):
+  return cwise(tf.cos, [x], name=name)
+
+
 def square(x, name="square"):
   return cwise(
       tf.square, [x], name=name,
