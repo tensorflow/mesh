@@ -380,7 +380,8 @@ def pretokenized_tfrecord_dataset(filenames,
                                   eos_included,
                                   repeat,
                                   batch_size,
-                                  sequence_length):
+                                  sequence_length,
+                                  vocab_shift=0):
   """Reads tensor2tensor-style data files.
 
   The dataset is defined by sets of TFRecord files of TFExample protos.
@@ -398,6 +399,7 @@ def pretokenized_tfrecord_dataset(filenames,
     repeat: a boolean
     batch_size: an integer, DEPRECATED
     sequence_length: an integer
+    vocab_shift: an optional integer - add this value to all ids
   Returns:
     A tf.data.Dataset of batches
   """
@@ -412,6 +414,8 @@ def pretokenized_tfrecord_dataset(filenames,
         serialized=[serialized_example],
         features={k: tf.VarLenFeature(tf.int64) for k in keys})
     decoded = {k: v.values for k, v in decoded.items()}
+    if vocab_shift:
+      decoded = {k: v + vocab_shift for k, v in decoded.items()}
     if not eos_included:
       decoded = {k: tf.concat([v, [1]], 0) for k, v in decoded.items()}
     return decoded
@@ -427,7 +431,9 @@ def pretokenized_t2t_dataset(dataset_name=gin.REQUIRED,
                              dataset_split="train",
                              batch_size=None,
                              sequence_length=gin.REQUIRED,
-                             vocabulary=None):
+                             vocabulary=None,
+                             eos_included=True,
+                             vocab_shift=0):
   """Loads the Tensor2tensor dataset specified by dataset_name.
 
   Args:
@@ -438,6 +444,8 @@ def pretokenized_t2t_dataset(dataset_name=gin.REQUIRED,
     batch_size: an integer, DEPRECATED
     sequence_length: an integer
     vocabulary: ignored
+    eos_included: a boolean
+    vocab_shift: an optional integer - add this value to all ids read
 
   Returns:
     A tf.data.Dataset of batches
@@ -452,10 +460,11 @@ def pretokenized_t2t_dataset(dataset_name=gin.REQUIRED,
   dataset = pretokenized_tfrecord_dataset(
       filenames=filenames,
       text2self=text2self,
-      eos_included=True,
+      eos_included=eos_included,
       repeat=dataset_split == "train",
       batch_size=batch_size,
-      sequence_length=sequence_length)
+      sequence_length=sequence_length,
+      vocab_shift=vocab_shift)
   if dataset_split == "train":
     dataset = dataset.shuffle(1000)
   return dataset
