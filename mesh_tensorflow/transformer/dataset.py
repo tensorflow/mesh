@@ -261,8 +261,8 @@ def packed_parallel_tsv_dataset(dataset=gin.REQUIRED,
     inputs_enc = inputs_vocabulary.encode_tf(features["inputs"])
     targets_enc = targets_vocabulary.encode_tf(features["targets"])
     if append_eos:
-      inputs_enc = tf.concat([tf.to_int64(inputs_enc), [eos_id]], 0)
-      targets_enc = tf.concat([tf.to_int64(targets_enc), [eos_id]], 0)
+      inputs_enc = tf.concat([tf.cast(inputs_enc, tf.int64), [eos_id]], 0)
+      targets_enc = tf.concat([tf.cast(targets_enc, tf.int64), [eos_id]], 0)
     return {"inputs": inputs_enc, "targets": targets_enc}
 
   dataset = dataset.map(
@@ -366,7 +366,7 @@ def encode_all_features(dataset, vocabulary):
     for k, v in features.items():
       if v.dtype == tf.string:
         v = vocabulary.encode_tf(v)
-        v = tf.concat([tf.to_int64(v), [1]], 0)
+        v = tf.concat([tf.cast(v, tf.int64), [1]], 0)
         ret[k] = v
       else:
         tf.logging.info(
