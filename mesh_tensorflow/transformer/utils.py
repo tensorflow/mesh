@@ -1733,12 +1733,26 @@ def run(tpu_job_name,
                    train_dataset_fn, train_steps, ensemble_inputs)
   elif mode == "perplexity_eval":
     if eval_dataset_fn is None:
-      raise ValueError("Must provide eval_dataset_fn through gin")
-    eval_datasets = eval_dataset_fn(
-        sequence_length=sequence_length,
-        vocabulary=vocabulary,
-        dataset_split=dataset_split,
-    )
+      if train_dataset_fn is not None:
+        tf.logging.warning("Using train_dataset_fn for perplexity eval")
+        eval_datasets = [transformer_dataset.EvalDataset(
+            name="eval",
+            dataset_fn=functools.partial(train_dataset_fn,
+                                         sequence_length=sequence_length,
+                                         vocabulary=vocabulary,
+                                         dataset_split=dataset_split),
+            postprocess_fn=None,
+            metric_fns=None)]
+      else:
+        raise ValueError(
+            "for perplexity_eval, "
+            "must provide one of eval_dataset_fn and train_dataset_fn")
+    else:
+      eval_datasets = eval_dataset_fn(
+          sequence_length=sequence_length,
+          vocabulary=vocabulary,
+          dataset_split=dataset_split,
+      )
     def _input_fn(params, eval_dataset):
       del params
       return (eval_dataset.dataset_fn().repeat()
