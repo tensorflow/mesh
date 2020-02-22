@@ -480,7 +480,7 @@ class UTLayerStack(TransformerLayer):
         context, length, channels, start_index=index)
 
     if self.add_or_concat_timing_signal == "add":
-      x_with_timing = x + mtf.cast_like(signal, x.dtype)
+      x_with_timing = x + mtf.cast(signal, x.dtype)
     # Unimplemented
     if self.add_or_concat_timing_signal == "concat":
       batch_dim = x.shape.dims[0]
@@ -545,7 +545,7 @@ class UTLayerStack(TransformerLayer):
       signal = self.get_layer_timing_signal_sinusoid_1d(context, channels, step,
                                                         num_steps)
     if self.add_or_concat_timing_signal == "add":
-      x_with_timing = x + mtf.cast_like(signal, x.dtype)
+      x_with_timing = x + mtf.cast(signal, x.dtype)
     elif self.add_or_concat_timing_signal == "concat":
       batch_dim = x.shape.dims[0]
       out_shape = mtf.Shape([batch_dim] + x.shape.dims[1:])
@@ -602,12 +602,6 @@ class UTLayerStack(TransformerLayer):
       if context.layer_outputs is not None and lnum != len(self._layers) - 1:
         context.layer_outputs.append(x)
       context.layer_index += 1
-    x = self._layer_norm(context, x, name="final_layer_norm")
-    x = self._dropout(context, x)
-    if mask:
-      x *= mask
-    if context.layer_outputs is not None:
-      context.layer_outputs.append(x)
     return x
 
   def act_layer(self, context, x, mask):
@@ -771,6 +765,12 @@ class UTLayerStack(TransformerLayer):
     if self.mix_with_transformer_after_ut:
       for _ in range(self.num_vanilla_transformer_layers):
         x = self.vanilla_transformer_layer(context, x, mask)
+    x = self._layer_norm(context, x, name="final_layer_norm")
+    x = self._dropout(context, x)
+    if mask:
+      x *= mask
+    if context.layer_outputs is not None:
+      context.layer_outputs.append(x)
     return x
 
   def _dropout(self, context, x):
