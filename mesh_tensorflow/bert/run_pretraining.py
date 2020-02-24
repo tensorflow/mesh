@@ -26,6 +26,7 @@ import time
 import mesh_tensorflow as mtf
 import mesh_tensorflow.bert.bert as bert_lib
 import mesh_tensorflow.bert.optimization as optimization_lib
+from six.moves import range
 import tensorflow.compat.v1 as tf
 
 flags = tf.flags
