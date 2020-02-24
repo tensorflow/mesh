@@ -22,10 +22,25 @@ from __future__ import print_function
 from absl.testing import parameterized
 
 import mesh_tensorflow as mtf
+import mock
 import numpy as np
 
 import tensorflow.compat.v1 as tf
 from tensorflow.python.framework import test_util  # pylint:disable=g-direct-tensorflow-import
+
+
+def initialize_by_shape(shape_to_value):
+  """Create an initializer with values specified by tensor shape."""
+
+  def initialize(shape, dtype):
+    shape = tuple(shape)
+    if shape not in shape_to_value:
+      raise ValueError(
+          "Shape {} not found in shape to value map.".format(shape))
+    return tf.reshape(
+        tf.constant(shape_to_value[tuple(shape)], dtype=dtype), shape)
+
+  return initialize
 
 
 class LayersTest(parameterized.TestCase, tf.test.TestCase):
@@ -415,6 +430,83 @@ class LayersTest(parameterized.TestCase, tf.test.TestCase):
       expected = np.ones((batch, depth, height, width, channels),
                          dtype=np.float32) / stride_d / stride_h / stride_w
       self.assertAllClose(actual, expected)
+
+  @test_util.run_in_graph_and_eager_modes()
+  def testConv1d(self):
+    graph = mtf.Graph()
+    mesh = mtf.Mesh(graph, "my_mesh")
+
+    filter_size = 3
+    depth_dim = mtf.Dimension("depth", 2)
+    length_dim = mtf.Dimension("length", 4)
+    output_dim = mtf.Dimension("output", 2)
+
+    x = tf.constant([[1, 0], [0, 1], [1, 1], [2, 1]], dtype=tf.float32)
+    mtf_x = mtf.import_tf_tensor(
+        mesh, x, shape=mtf.Shape([length_dim, depth_dim]))
+
+    initializer_mock = mock.MagicMock()
+    initializer_mock.side_effect = initialize_by_shape({
+        (1, 3, 2, 2): [[[[1, -1], [0, 0]], [[2, -2], [-1, 1]], [[3, -3],
+                                                                [-2, 2]]]],
+    })
+
+    mtf_output = mtf.layers.conv1d(
+        mtf_x,
+        output_dim=output_dim,
+        filter_size=filter_size,
+        filter_initializer=initializer_mock)
+
+    mesh_impl = mtf.placement_mesh_impl.PlacementMeshImpl(
+        shape=[], layout={}, devices=[""])
+    lowering = mtf.Lowering(graph, {mesh: mesh_impl})
+    actual_output = lowering.export_to_tf_tensor(mtf_output)
+
+    self.evaluate(tf.global_variables_initializer())
+    self.evaluate(lowering.copy_masters_to_slices())
+    actual = self.evaluate(actual_output)
+
+    self.assertAllClose(actual, [[0, 0], [1, -1], [5, -5], [4, -4]])
+
+  @mock.patch.object(tf, "truncated_normal_initializer", autospec=True)
+  @test_util.run_in_graph_and_eager_modes()
+  def testSeparableConv1d(self, random_normal_initializer_mock):
+    graph = mtf.Graph()
+    mesh = mtf.Mesh(graph, "my_mesh")
+
+    depth_dim = mtf.Dimension("depth", 2)
+    length_dim = mtf.Dimension("length", 4)
+    output_dim = mtf.Dimension("output", 2)
+
+    x = tf.constant([[1, 0], [0, 1], [1, 1], [2, 1]], dtype=tf.float32)
+    mtf_x = mtf.import_tf_tensor(
+        mesh, x, shape=mtf.Shape([length_dim, depth_dim]))
+
+    initializer_mock = mock.MagicMock()
+    random_normal_initializer_mock.return_value = initializer_mock
+    initializer_mock.side_effect = initialize_by_shape({
+        (2,): [1, 2],
+        (2, 2): [[1, 0], [1, -1]],
+    })
+
+    mtf_output = mtf.layers.separable_conv1d(
+        mtf_x,
+        output_dim,
+        min_relative_pos=-1,
+        max_relative_pos=1,
+        use_bias=True)
+
+    mesh_impl = mtf.placement_mesh_impl.PlacementMeshImpl(
+        shape=[], layout={}, devices=[""])
+    lowering = mtf.Lowering(graph, {mesh: mesh_impl})
+    actual_output = lowering.export_to_tf_tensor(mtf_output)
+
+    self.evaluate(tf.global_variables_initializer())
+    self.evaluate(lowering.copy_masters_to_slices())
+    actual = self.evaluate(actual_output)
+
+    self.assertAllClose(actual, [[3, -2], [6, -4], [9, -6], [7, -4]])
+
 
 if __name__ == "__main__":
   tf.disable_v2_behavior()

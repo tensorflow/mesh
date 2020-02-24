@@ -221,6 +221,112 @@ class VarianceScalingInitializer(DenseInitializer):
                        "but got %s" % (self.distribution,))
 
 
+def conv1d(x, output_dim, filter_size=3, stride=1, **kw_args):
+  """1D Convolution.
+
+  Args:
+    x: a mtf.Tensor of format NWC.
+    output_dim: a mtf.Dimension, indicating the output channel dimension.
+    filter_size: a positive integer, the filter width.
+    stride: a positive integer, the stride.
+    **kw_args: optional keyword arguments to mtf.layers.conv2d.
+
+  Returns:
+    a mtf.Tensor of format NWO, where O is the output dimension.
+  """
+  fake_height_dim = mtf.Dimension("fake_height", 1)
+  x = mtf.reshape(
+      x, mtf.Shape(x.shape.dims[:-2] + [fake_height_dim] + x.shape.dims[-2:]))
+  output = conv2d(
+      x,
+      output_dim,
+      filter_size=(1, filter_size),
+      strides=(1, stride),
+      **kw_args)
+  return mtf.reshape(
+      output,
+      mtf.Shape([
+          d for d in x.shape.dims
+          if d != fake_height_dim and d != x.shape.dims[-1]
+      ] + [output_dim]))
+
+
+def _depthwise_conv1d_hack(x,
+                           depth_dim,
+                           length_dim,
+                           min_relative_pos=-1,
+                           max_relative_pos=1,
+                           name=None,
+                           use_bias=True,
+                           initializer_scale=1.0):
+  """Hacky version of a 1d depthwise convolution."""
+  ret = 0
+  kernel_size = max_relative_pos - min_relative_pos + 1
+  with tf.variable_scope(name, default_name="depthwise_conv_hack"):
+    for i in range(kernel_size):
+      relative_pos = min_relative_pos + i
+      shifted_input = mtf.shift(x, -relative_pos, length_dim, wrap=False)
+      ret += dense(
+          shifted_input,
+          new_dims=[],
+          reduced_dims=[],
+          expert_dims=[depth_dim],
+          name="depthwise_dense_%d" % i,
+          use_bias=use_bias and (i == 0),
+          kernel_initializer=VarianceScalingInitializer(
+              scale=initializer_scale / kernel_size))
+  return ret
+
+
+def separable_conv1d(x,
+                     output_dim,
+                     min_relative_pos=-1,
+                     max_relative_pos=1,
+                     depthwise_filter_initializer_scale=1.0,
+                     pointwise_filter_initializer_scale=1.0,
+                     name=None,
+                     use_bias=True):
+  """1-D convolution with separable filters.
+
+  Args:
+    x: a mtf.Tensor of format NWC.
+    output_dim: a mtf.Dimension, indicating the output channel dimension.
+    min_relative_pos: an integer, the inclusive minimum relative positive of the
+      depthwise filter, where a relative position of zero means the left end of
+      the filter aligns with the left end of the input.
+    max_relative_pos: an integer, the maximum relative position of the deptwise
+      filter. The filter size will be `max_relative_pos - min_relative_pos + 1`.
+    depthwise_filter_initializer_scale: a positive float, the scale of the
+      initializer for the depthwise filter.
+    pointwise_filter_initializer_scale: a positive float, the scale of the
+      initializer for the pointwise filter.
+    name: a string used for tf.variable_scope.
+    use_bias: a bool, whether to use bias in the convolutions.
+
+  Returns:
+    a mtf.Tensor of format NWO, where O is the output dimension.
+  """
+  depth_dim = x.shape.dims[-1]
+  length_dim = x.shape.dims[-2]
+  with tf.variable_scope(name, default_name="separable_conv1d"):
+    depthwise = _depthwise_conv1d_hack(
+        x,
+        depth_dim=depth_dim,
+        length_dim=length_dim,
+        min_relative_pos=min_relative_pos,
+        max_relative_pos=max_relative_pos,
+        use_bias=use_bias,
+        initializer_scale=depthwise_filter_initializer_scale)
+    return dense(
+        depthwise,
+        new_dims=[output_dim],
+        reduced_dims=[depth_dim],
+        name="pointwise_dense",
+        use_bias=use_bias,
+        kernel_initializer=VarianceScalingInitializer(
+            scale=pointwise_filter_initializer_scale))
+
+
 def conv2d(x, output_dim, filter_size=(3, 3),
            strides=(1, 1), padding="SAME", filter_initializer=None,
            variable_dtype=None, name=None):
