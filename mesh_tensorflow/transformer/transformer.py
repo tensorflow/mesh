@@ -507,9 +507,7 @@ class UTLayerStack(TransformerLayer):
       a Tensor of timing signals [channels].
     """
     layer_dim = mtf.Dimension("layer", num_layers)
-    dim_1 = mtf.Dimension("dim_1", 1)
-    dim_2 = mtf.Dimension("dim_2", 1)
-    shape = mtf.Shape([layer_dim, dim_1, dim_2, channels])
+    shape = mtf.Shape([layer_dim, channels])
     layer_embedding = (
         mtf.get_variable(
             context.mesh,
@@ -579,10 +577,6 @@ class UTLayerStack(TransformerLayer):
           x, variable_dtype=context.variable_dtype,
           new_dims=new_dims, activation=None, use_bias=False)
       # TODO(yanqiz): implement sru in a separate CL
-
-
-#         if self.add_sru:
-#           x = common_layers.sru(x)
 
     return x
 
@@ -655,6 +649,7 @@ class UTLayerStack(TransformerLayer):
         new_state: new state
       """
       state = self.step_preprocess(context, state, step)
+
       if self.act_type == "random":
         # random as halting probability
         p = mtf.random_uniform(
@@ -664,7 +659,8 @@ class UTLayerStack(TransformerLayer):
       else:
         last_dim_name = state.shape.dimension_names[-1]
         new_dims = [mtf.Dimension(last_dim_name, 1)]
-        with tf.variable_scope("sigmoid_activation_for_pondering"):
+        with tf.variable_scope(
+            "sigmoid_activation_for_pondering", reuse=tf.AUTO_REUSE):
           p = mtf.layers.dense(
               state,
               variable_dtype=context.variable_dtype,
@@ -688,7 +684,6 @@ class UTLayerStack(TransformerLayer):
       new_halted = mtf.cast(
           mtf.greater(halting_probability + p * still_running, threshold),
           context.activation_dtype) * still_running
-
       # Mask of inputs which haven't halted, and didn't halt this step
       still_running = mtf.cast(
           mtf.less_equal(halting_probability + p * still_running, threshold),
@@ -719,7 +714,7 @@ class UTLayerStack(TransformerLayer):
 
       for _ in range(self.num_inrecurrence_layers):
         transformed_state = self.vanilla_transformer_layer(
-            context, x, mask)
+            context, transformed_state, mask)
 
       # update running part in the weighted state and keep the rest
       new_state = ((transformed_state * update_weights) +
@@ -741,7 +736,7 @@ class UTLayerStack(TransformerLayer):
     ponder_times = n_updates
 
     mtf.scalar_summary("ponder_times", mtf.reduce_mean(ponder_times))
-    return state
+    return previous_state
 
   def call(self, context, x):
     """Call the layer stack."""
