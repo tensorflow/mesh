@@ -962,7 +962,7 @@ def decode_from_file(estimator,
 
 @gin.configurable
 def clean_decodes(ids, eos_id=1, pad_id=0, length_axis=-1):
-  """Replaces everything at and after EOS with PAD (along last axis).
+  """Replaces everything after EOS with PAD (along last axis).
 
   Args:
     ids: a d Tensor of type int.
@@ -974,8 +974,9 @@ def clean_decodes(ids, eos_id=1, pad_id=0, length_axis=-1):
     a Tensor of type int of ids.
   """
   eos_and_after = tf.cumsum(tf.cast(tf.equal(ids, eos_id), tf.int32),
-                            axis=length_axis)
-  return tf.where_v2(tf.greater_equal(eos_and_after, 1), pad_id, ids)
+                            exclusive=True, axis=length_axis)
+  valid_ids = tf.equal(eos_and_after, 0)
+  return tf.where_v2(valid_ids, ids, pad_id)
 
 
 def get_estimator(model_type, vocabulary, mesh_shape,
