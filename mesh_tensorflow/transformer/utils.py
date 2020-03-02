@@ -1347,7 +1347,7 @@ def export_model(estimator, export_dir, vocabulary, sequence_length,
       recent in the model directory.
 
   Returns:
-    None
+    The string path to the exported directory.
   """
 
   def serving_input_fn():
@@ -1381,13 +1381,8 @@ def export_model(estimator, export_dir, vocabulary, sequence_length,
     return tf.estimator.export.ServingInputReceiver(
         features=features, receiver_tensors=inputs)
 
-  tpu_estimator.export_estimator_savedmodel(
-      estimator=estimator,
-      export_dir_base=export_dir,
-      serving_input_receiver_fn=serving_input_fn,
-      as_text=False,
-      checkpoint_path=checkpoint_path,
-  )
+  return estimator.export_saved_model(
+      export_dir, serving_input_fn, checkpoint_path=checkpoint_path)
 
 
 def compute_batch_size(sequence_length,
