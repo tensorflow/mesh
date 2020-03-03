@@ -1086,7 +1086,8 @@ def get_estimator(model_type, vocabulary, mesh_shape,
 
 
 def train_model(estimator, vocabulary, sequence_length, batch_size,
-                train_dataset_fn, train_steps, ensemble_inputs):
+                train_dataset_fn, train_steps, ensemble_inputs,
+                dataset_split="train"):
   """Train a Mesh-TF model.
 
   Args:
@@ -1107,6 +1108,7 @@ def train_model(estimator, vocabulary, sequence_length, batch_size,
       train an ensemble where each model gets different inputs. You also need to
       configure Unitransformer.ensemble  to the right size. If None, then all
       models are trained on the same inputs.
+    dataset_split: str, which dataset split to train on.
   """
 
   def input_fn(params):
@@ -1114,7 +1116,7 @@ def train_model(estimator, vocabulary, sequence_length, batch_size,
     dataset = train_dataset_fn(
         sequence_length=sequence_length,
         vocabulary=vocabulary,
-        dataset_split="train")
+        dataset_split=dataset_split)
     dataset = dataset.repeat().batch(
         batch_size * (ensemble_inputs or 1), drop_remainder=True)
     dataset = dataset.prefetch(tf.data.experimental.AUTOTUNE)
