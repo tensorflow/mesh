@@ -788,19 +788,7 @@ class UTLayerStack(TransformerLayer):
     Returns:
       a Tensor
     """
-    with tf.variable_scope(name, default_name="layer_norm"):
-      scale_shape = [context.model.model_dim]
-      if context.model.ensemble_dim:
-        scale_shape = [context.model.ensemble_dim] + scale_shape
-      scale = mtf.get_variable(
-          context.mesh,
-          "scale",
-          mtf.Shape(scale_shape),
-          initializer=tf.ones_initializer(),
-          dtype=context.variable_dtype)
-      variance = mtf.reduce_mean(
-          mtf.square(x), reduced_dim=context.model.model_dim)
-    return x * mtf.rsqrt(variance + self._norm_epsilon) * scale
+    return layer_norm(context, x, self._norm_epsilon, name)
 
   @property
   def num_layers(self):
@@ -870,26 +858,7 @@ class LayerStack(TransformerLayer):
       return x
 
   def _layer_norm(self, context, x, name=None):
-    """Layer normalization.
-
-    Args:
-      context: a Context
-      x: a Tensor
-      name: an optional string
-    Returns:
-      a Tensor
-    """
-    with tf.variable_scope(name, default_name="layer_norm"):
-      scale_shape = [context.model.model_dim]
-      if context.model.ensemble_dim:
-        scale_shape = [context.model.ensemble_dim] + scale_shape
-      scale = mtf.get_variable(
-          context.mesh, "scale", mtf.Shape(scale_shape),
-          initializer=tf.ones_initializer(),
-          dtype=context.variable_dtype)
-      variance = mtf.reduce_mean(
-          mtf.square(x), reduced_dim=context.model.model_dim)
-    return x * mtf.rsqrt(variance + self._norm_epsilon) * scale
+    return layer_norm(context, x, self._norm_epsilon, name)
 
   @property
   def num_layers(self):
@@ -898,6 +867,36 @@ class LayerStack(TransformerLayer):
   @property
   def layers(self):
     return self._layers
+
+
+def layer_norm(context, x, norm_epsilon, name=None, model_dim=None):
+  """Layer normalization.
+
+  Args:
+    context: a Context
+    x: a Tensor
+    norm_epsilon: a float
+    name: an optional string
+    model_dim: an optional mtf.Dimension to use in place of the one attached to
+      the context
+
+  Returns:
+    a Tensor
+  """
+  if model_dim is None:
+    model_dim = context.model.model_dim
+  with tf.variable_scope(name, default_name="layer_norm"):
+    scale_shape = [model_dim]
+    if context.model.ensemble_dim:
+      scale_shape = [context.model.ensemble_dim] + scale_shape
+    scale = mtf.get_variable(
+        context.mesh,
+        "scale",
+        mtf.Shape(scale_shape),
+        initializer=tf.ones_initializer(),
+        dtype=context.variable_dtype)
+    variance = mtf.reduce_mean(mtf.square(x), reduced_dim=model_dim)
+  return x * mtf.rsqrt(variance + norm_epsilon) * scale
 
 
 @gin.configurable

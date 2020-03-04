@@ -288,14 +288,17 @@ def separable_conv1d(x,
                      use_bias=True):
   """1-D convolution with separable filters.
 
+  The filter size will be `max_relative_pos - min_relative_pos + 1`.
+
   Args:
     x: a mtf.Tensor of format NWC.
     output_dim: a mtf.Dimension, indicating the output channel dimension.
     min_relative_pos: an integer, the inclusive minimum relative positive of the
       depthwise filter, where a relative position of zero means the left end of
       the filter aligns with the left end of the input.
-    max_relative_pos: an integer, the maximum relative position of the deptwise
-      filter. The filter size will be `max_relative_pos - min_relative_pos + 1`.
+    max_relative_pos: an integer, the inclusive maximum relative position of the
+      depthwise filter, where a relative position of zero means the right end of
+      the filter aligns with the right end of the input.
     depthwise_filter_initializer_scale: a positive float, the scale of the
       initializer for the depthwise filter.
     pointwise_filter_initializer_scale: a positive float, the scale of the
