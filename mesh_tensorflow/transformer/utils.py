@@ -54,10 +54,15 @@ FLAGS = tf.flags.FLAGS
 _DEFAULT_CONFIG_FILE = "./gin/defaults.gin"
 
 # List of features used by model.
-_INPUT_FEATURES = [
+_MODEL_FEATURES = [
     "inputs", "inputs_position", "inputs_segmentation", "targets",
     "targets_position", "targets_segmentation", "targets_subsegmentation"
 ]
+
+
+def _filter_features(ex):
+  """Filters example features, keeping only valid model features."""
+  return {k: v for k, v in ex.items() if k in _MODEL_FEATURES}
 
 
 def parse_gin_defaults_and_flags():
@@ -667,11 +672,13 @@ def tpu_estimator_model_fn(model_type,
         predictions = tf.cast(tf.argmax(logits, axis=-1), labels.dtype)
         token_correct = tf.cast(
             tf.equal(predictions, labels), tf.float32) * weights
-        sequence_correct = tf.to_float(tf.equal(
-            tf.reduce_sum(token_correct, -1),
-            tf.reduce_sum(weights, -1)))
-        sequence_weights = tf.to_float(
-            tf.not_equal(tf.reduce_sum(weights, -1), 0))
+        sequence_correct = tf.cast(
+            tf.equal(tf.reduce_sum(token_correct, -1),
+                     tf.reduce_sum(weights, -1)),
+            tf.float32)
+        sequence_weights = tf.cast(
+            tf.not_equal(tf.reduce_sum(weights, -1), 0),
+            tf.float32)
         # the purpose of "mean_label" is as a checksum to ensure that
         # models were evaluated on the same data.
         return {"neg_log_perplexity": tf.metrics.mean(-xent, weights),
@@ -1279,9 +1286,7 @@ def eval_model(estimator, vocabulary, sequence_length, batch_size,
       # Only cache targets for those tasks with eval functions provides
       if eval_dataset.metric_fns:
         ds = eval_dataset.dataset_fn()
-        # Only pass those variables which will be used for decoding
-        ds = ds.map(
-            lambda x: {k: v for k, v in x.items() if k in _INPUT_FEATURES})
+        ds = ds.map(_filter_features)
         combined_ds = ds if not combined_ds else combined_ds.concatenate(ds)
     combined_ds = combined_ds.batch(batch_size, drop_remainder=False)
     # Pad the final batch.
@@ -1755,7 +1760,9 @@ def run(tpu_job_name,
       )
     def _input_fn(params, eval_dataset):
       del params
-      return (eval_dataset.dataset_fn().repeat()
+      return (eval_dataset.dataset_fn()
+              .map(_filter_features)
+              .repeat()
               .batch(batch_size * (ensemble_inputs or 1),
                      drop_remainder=True)
               .prefetch(tf.data.experimental.AUTOTUNE))
