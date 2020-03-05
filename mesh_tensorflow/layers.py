@@ -37,6 +37,7 @@ def dense(x,
           slice_dtype=tf.float32,
           variable_dtype=None,
           kernel_initializer=None,
+          kernel_weights=None,
           name=None):
   """Dense layer doing (kernel*x + bias) computation.
 
@@ -53,6 +54,7 @@ def dense(x,
     slice_dtype: a tf.dtype (deprecated - use variable_dtype)
     variable_dtype: a mtf.VariableDType
     kernel_initializer: an initializer for kernel variable.
+    kernel_weights: mtf.Tensor weights matrix to use for dense computation
     name: a string used for tf.variable_scope.
 
   Returns:
@@ -63,6 +65,7 @@ def dense(x,
 
   if variable_dtype is None:
     variable_dtype = mtf.VariableDType(master_dtype, slice_dtype, x.dtype)
+
   if expert_dims is None:
     expert_dims = []
   if reduced_dims is None:
@@ -83,9 +86,59 @@ def dense(x,
       tmp_name = "_" + original_name
       reduced_dims[i] = mtf.Dimension(tmp_name, reduced_dims[i].size)
       x = mtf.rename_dimension(x, original_name, tmp_name)
-  w_shape = mtf.Shape(expert_dims + reduced_dims + new_dims)
   output_shape = mtf.Shape([d for d in x.shape.dims if d not in reduced_dims] +
                            new_dims)
+  if not kernel_weights:
+    kernel_weights = get_dense_kernel_weights(x, new_dims, reduced_dims,
+                                              expert_dims, kernel_initializer,
+                                              name, variable_dtype,
+                                              master_dtype, slice_dtype)
+
+  with tf.variable_scope(name, default_name="dense"):
+    y = mtf.einsum([x, kernel_weights], output_shape)
+    if use_bias:
+      b = mtf.get_variable(
+          x.mesh,
+          "bias",
+          mtf.Shape(expert_dims + new_dims),
+          initializer=tf.zeros_initializer(),
+          dtype=variable_dtype)
+      y += b
+    if activation is not None:
+      y = activation(y)
+    return y
+
+
+def get_dense_kernel_weights(x,
+                             new_dims,
+                             reduced_dims,
+                             expert_dims,
+                             kernel_initializer,
+                             name=None,
+                             variable_dtype=None,
+                             master_dtype=tf.float32,
+                             slice_dtype=tf.float32):
+  """Create w matrix variable.
+
+  Args:
+    x: a mtf.Tensor.
+    new_dims: a list of mtf.Dimension.
+    reduced_dims: a list of mtf.Dimensions of x to be reduced.
+    expert_dims: an optional list of mtf.Dimension which represent different
+      experts. Different experts get different weights.
+    kernel_initializer: an initializer for kernel variable.
+    name: a string used for tf.variable_scope.
+    variable_dtype: a mtf.VariableDType
+    master_dtype: a tf.dtype (deprecated - use variable_dtype)
+    slice_dtype: a tf.dtype (deprecated - use variable_dtype)
+
+  Returns:
+    a mtf.Tensor.
+  """
+  if variable_dtype is None:
+    variable_dtype = mtf.VariableDType(master_dtype, slice_dtype, x.dtype)
+  w_shape = mtf.Shape(expert_dims + reduced_dims + new_dims)
+
   with tf.variable_scope(name, default_name="dense"):
     if kernel_initializer is None:
       kernel_initializer = VarianceScalingInitializer()
@@ -98,18 +151,7 @@ def dense(x,
         initializer=kernel_initializer,
         dtype=variable_dtype)
     w = mtf.cast(w, x.dtype)
-    y = mtf.einsum([x, w], output_shape)
-    if use_bias:
-      b = mtf.get_variable(
-          x.mesh,
-          "bias",
-          mtf.Shape(expert_dims + new_dims),
-          initializer=tf.zeros_initializer(),
-          dtype=variable_dtype)
-      y += b
-    if activation is not None:
-      y = activation(y)
-    return y
+  return w
 
 
 def dense_product(x,
@@ -258,10 +300,29 @@ def _depthwise_conv1d_hack(x,
                            max_relative_pos=1,
                            name=None,
                            use_bias=True,
-                           initializer_scale=1.0):
-  """Hacky version of a 1d depthwise convolution."""
+                           initializer_scale=1.0,
+                           kernel_depth_weights=None):
+  """Hacky version of a 1d depthwise convolution.
+
+  Args:
+    x: a mtf.Tensor
+    depth_dim: mtf.Dimension,
+    length_dim: mtf.Dimension,
+    min_relative_pos: int, min relative position,
+    max_relative_pos: int, max relative position,
+    name: str, variable_scope name,
+    use_bias: Bool, whether to use bias,
+    initializer_scale: int, initalizer scale,
+    kernel_depth_weights: an optional list of kernel weight tensors, one for
+      each relative position
+
+  Returns:
+    an mtf.Tensor
+  """
+
   ret = 0
   kernel_size = max_relative_pos - min_relative_pos + 1
+
   with tf.variable_scope(name, default_name="depthwise_conv_hack"):
     for i in range(kernel_size):
       relative_pos = min_relative_pos + i
@@ -271,10 +332,13 @@ def _depthwise_conv1d_hack(x,
           new_dims=[],
           reduced_dims=[],
           expert_dims=[depth_dim],
+          kernel_weights=kernel_depth_weights[i]
+          if kernel_depth_weights else None,
           name="depthwise_dense_%d" % i,
           use_bias=use_bias and (i == 0),
           kernel_initializer=VarianceScalingInitializer(
               scale=initializer_scale / kernel_size))
+
   return ret
 
 
