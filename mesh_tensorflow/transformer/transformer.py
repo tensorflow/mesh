@@ -320,6 +320,7 @@ class UTLayerStack(TransformerLayer):
       dropout_rate=0.0,
       norm_epsilon=1e-6,
       num_vanilla_transformer_layers=2,
+      couple_carry_transform_gates=True,
       act_type=gin.REQUIRED,
       recurrence_type=gin.REQUIRED,
       act_max_steps=gin.REQUIRED,
@@ -333,6 +334,8 @@ class UTLayerStack(TransformerLayer):
       add_step_timing_signal=gin.REQUIRED,
       mix_with_transformer_before_ut=gin.REQUIRED,
       mix_with_transformer_after_ut=gin.REQUIRED,
+      gates_inputs=gin.REQUIRED,
+      gate_ffn_layer=gin.REQUIRED,
   ):
     """Create a LayerStack for Universal Transformer.
 
@@ -342,6 +345,7 @@ class UTLayerStack(TransformerLayer):
       norm_epsilon: a floating-point number
       num_vanilla_transformer_layers: number of vanilla transformer layers
         before the ACT layer.
+      couple_carry_transform_gates: whether to couple carry and transform gates.
       act_type: act type
       recurrence_type: recurrence type (allowable values: "act").
       act_max_steps: maximum number of act steps
@@ -357,6 +361,8 @@ class UTLayerStack(TransformerLayer):
       mix_with_transformer_before_ut: whether to mix transformer layers before
         ut.
       mix_with_transformer_after_ut: whether to mix transformer layers after ut.
+      gates_inputs: controlling the cary/transform gate.
+      gate_ffn_layer: gate ff layer type
     """
     self._layers = layers
     self._dropout_rate = dropout_rate
@@ -375,6 +381,9 @@ class UTLayerStack(TransformerLayer):
     self.add_step_timing_signal = add_step_timing_signal
     self.mix_with_transformer_before_ut = mix_with_transformer_before_ut
     self.mix_with_transformer_after_ut = mix_with_transformer_after_ut
+    self.gates_inputs = gates_inputs
+    self.gate_ffn_layer = gate_ffn_layer
+    self.couple_carry_transform_gates = couple_carry_transform_gates
 
   def get_timing_signal_1d(self,
                            context,
@@ -598,6 +607,16 @@ class UTLayerStack(TransformerLayer):
       context.layer_index += 1
     return x
 
+  def ut_basic(self, context, x, mask):
+    def ut_function(x, step):
+      new_state = self.step_preprocess(context, x, step)
+      for _ in range(self.num_inrecurrence_layers):
+        new_state = self.vanilla_transformer_layer(context, new_state, mask)
+      return new_state
+    for i in range(self.num_rec_steps):
+      x = ut_function(x, i)
+    return x
+
   def act_layer(self, context, x, mask):
     """Build a Universal Transformer ACT layer."""
     state = x
@@ -738,6 +757,130 @@ class UTLayerStack(TransformerLayer):
     mtf.scalar_summary("ponder_times", mtf.reduce_mean(ponder_times))
     return previous_state
 
+  def ffn_layer_multi_inputs(self,
+                             context,
+                             mask,
+                             inputs_list,
+                             ffn_layer_type="dense",
+                             kernel_initializer=None,
+                             activation=None,
+                             preprocess=False,
+                             postprocess=False):
+    """Implements a Feed-forward layer with multiple inputs, pad-removing, etc.
+
+    Args:
+      context: mtf context
+      mask: mask
+      inputs_list: list of input tensors
+      ffn_layer_type: dense / dense_dropconnect/ dense_relu_dense
+      kernel_initializer: kernel initializer
+      activation: activation function
+      preprocess: if preprocess the input --> default: layer-norm
+      postprocess: if postprocess the output --> default: drop-out and residual
+
+    Returns:
+      a tensor
+    Raises:
+      ValueError: Unknown ffn_layer type.
+
+    """
+
+    # need at least one inputs
+    num_inputs = len(inputs_list)
+    assert num_inputs > 0
+
+    if preprocess:
+      # In case of having more than one input to the ffn,
+      # we just apply layer norm on them independently as preprocessing
+      for i, inputs in enumerate(inputs_list):
+        inputs_list[i] = self._layer_norm(
+            context, (inputs * mask) if mask else inputs)
+
+    # the output size is the hidden size of the main inputs
+    main_input = inputs_list[0]
+    original_shape = main_input.shape
+    hidden_size = original_shape.dims[-1].size
+
+    ffn_inputs = inputs_list[0]
+    if len(inputs_list) != 1:
+      ffn_inputs = mtf.concat(inputs_list, original_shape.dims[-1].name)
+    if ffn_layer_type == "dense":
+      last_dims = [
+          mtf.Dimension(ffn_inputs.shape.dims[-1].name, hidden_size)
+      ]
+      output = mtf.layers.dense(
+          ffn_inputs,
+          reduced_dims=[context.model.model_dim],
+          new_dims=last_dims,
+          activation=activation,
+          use_bias=True,
+          variable_dtype=context.variable_dtype,
+          expert_dims=context.model.ensemble_dims,
+          kernel_initializer=kernel_initializer)
+    elif ffn_layer_type == "dense_relu_dense":
+      output = mtf.layers.dense_relu_dense(
+          ffn_inputs,
+          hidden_channels=context.model.model_dim,
+          dropout=self.relu_dropout
+      )
+
+    else:
+      raise ValueError("Unknown ffn_layer type: %s" % ffn_layer_type)
+
+    if postprocess:
+      output = self._layer_norm(context, (output * mask) if mask else output)
+
+    return output
+
+  def ut_highway(self, context, layer_inputs, mask):
+    """A highway network layer."""
+    def ut_function(x, step):
+      """highway layer implementation."""
+      state, inputs, memory = x
+      new_state = self.step_preprocess(context, state, step)
+      for _ in range(self.num_inrecurrence_layers):
+        new_state = self.vanilla_transformer_layer(context, new_state, mask)
+      transformed_state = new_state
+
+      gate_inputs = []
+      if "s" in self.gates_inputs:
+        gate_inputs.append(state)
+      if "t" in self.gates_inputs:
+        gate_inputs.append(transformed_state)
+      if "i" in self.gates_inputs:
+        gate_inputs.append(inputs)
+      gate_ffn_layer = self.gate_ffn_layer
+
+      transform_gate = self.ffn_layer_multi_inputs(
+          context,
+          mask,
+          gate_inputs,
+          ffn_layer_type=gate_ffn_layer,
+          activation=mtf.sigmoid,
+          preprocess=True)
+      if self.couple_carry_transform_gates:
+        carry_gate = mtf.sub(1.0, transform_gate, name="carry")
+      else:
+        carry_gate = self.ffn_layer_multi_inputs(
+            context,
+            mask,
+            gate_inputs,
+            ffn_layer_type=gate_ffn_layer,
+            activation=tf.sigmoid,
+            preprocess=True)
+      new_state = state * carry_gate + transformed_state * transform_gate
+
+      mtf.scalar_summary("highway_transform_gate_layer",
+                         mtf.reduce_mean(transform_gate))
+      mtf.scalar_summary("highway_carry_gate_layer",
+                         mtf.reduce_mean(carry_gate))
+
+      return new_state, inputs, memory
+    for i in range(self.num_rec_steps):
+      layer_inputs = ut_function(layer_inputs, i)
+    output, _, _ = layer_inputs
+    return output
+
   def call(self, context, x):
     """Call the layer stack."""
     if isinstance(context.sequence_id, mtf.Tensor):
@@ -756,7 +899,13 @@ class UTLayerStack(TransformerLayer):
       for _ in range(self.num_vanilla_transformer_layers):
         x = self.vanilla_transformer_layer(context, x, mask)
     # Call a ACT layer
-    x = self.act_layer(context, x, mask)
+    if self.recurrence_type == "act":
+      x = self.act_layer(context, x, mask)
+    elif self.recurrence_type == "basic":
+      x = self.ut_basic(context, x, mask)
+    elif self.recurrence_type == "highway":
+      layer_inputs = (x, x, x)
+      x = self.ut_highway(context, layer_inputs, mask)
     if self.mix_with_transformer_after_ut:
       for _ in range(self.num_vanilla_transformer_layers):
         x = self.vanilla_transformer_layer(context, x, mask)
