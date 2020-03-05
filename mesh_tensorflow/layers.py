@@ -1849,8 +1849,11 @@ def embedding_weights(mesh,
                       ensemble_dim=None,
                       initializer=None):
   """Embedding weights."""
-  shape = mtf.Shape(
-      [ensemble_dim] if ensemble_dim else []) + [vocab_dim, output_dim]
+  if not ensemble_dim:
+    ensemble_dim = []
+  elif not isinstance(ensemble_dim, list):
+    ensemble_dim = [ensemble_dim]
+  shape = mtf.Shape(ensemble_dim) + [vocab_dim, output_dim]
   if initializer is None:
     initializer = tf.random_normal_initializer()
   ret = mtf.get_variable(
