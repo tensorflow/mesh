@@ -4050,7 +4050,7 @@ def get_variable(mesh, name, shape, dtype=tf.float32,
     tf.logging.warning(
         "Using default tf glorot_uniform_initializer for variable %s "
         " The initialzer will guess the input and output dimensions "
-        " based on dimension order."  % full_name)
+        " based on dimension order." % full_name)
   if full_name in mesh.graph.name_to_variable:
     var = mesh.graph.name_to_variable[full_name]
   else:
@@ -6164,6 +6164,14 @@ def serialize_training_step(features, model_fn, batch_dim, num_splits):
     outputs = model_fn(my_features)
     grads = gradients(
         [outputs["loss"]], [v.outputs[0] for v in graph.trainable_variables])
+    if None in grads:
+      for var, var_grad in zip(graph.trainable_variables, grads):
+        if var_grad is None:
+          tf.logging.error(
+              "None gradient for trainable variable %s." % var.outputs[0])
+      raise ValueError("Fond trainable variable(s) with None gradient. "
+                       "Check if there are trainable variables(s) "
+                       "disconnected from the graph.")
     output_keys = outputs.keys()
     cache["output_keys"] = output_keys
     ret = []
