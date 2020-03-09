@@ -2564,6 +2564,8 @@ def stack(xs, dim_name, axis=0, name=None):
   Returns:
     a Tensor
   """
+  if axis < 0:
+    axis = xs[0].shape.ndims + 1 + axis
   ret = StackOperation(xs, dim_name, axis, name).outputs[0]
   return ret
 
@@ -4818,8 +4820,63 @@ def top_k(x, reduced_dim, k_dim, name=None):
     values: a Tensor with same type as x.
     indices: a Tensor with dtype tf.int32
   """
-  op = TopKOperation(x, reduced_dim, k_dim, name=name)
-  return op.outputs[0], op.outputs[1]
+  if k_dim.size < 5:
+    return _iterative_top_k(x, reduced_dim, k_dim, name=name)
+  else:
+    op = TopKOperation(x, reduced_dim, k_dim, name=name)
+    return op.outputs[0], op.outputs[1]
+
+
+def _iterative_top_k(x, reduced_dim, k_dim, name=None):
+  """Like tf.top_k.
+
+  Iterative implementation of top_k.
+  This is faster for small k on TPU for now, since the implementation of
+  tf.nn.top_k() seems to use sorting.
+
+  Args:
+    x: a Tensor
+    reduced_dim: a Dimension in x.shape.dims.
+    k_dim: a Dimension.  The size determines k.
+    name: optional string.
+  Returns:
+    values: a Tensor with same type as x.
+    indices: a Tensor with dtype tf.int32
+  """
+  reduced_dim = convert_to_dimension(reduced_dim)
+  k_dim = convert_to_dimension(k_dim)
+  indices = []
+  values = []
+  k = k_dim.size
+  with tf.name_scope(name, default_name="top_k"):
+    for i in xrange(k):
+      max_val, max_index = top_1(x, reduced_dim)
+      indices.append(max_index)
+      values.append(max_val)
+      if i + 1 < k:
+        x += one_hot(max_index, reduced_dim, on_value=-1e9, dtype=x.dtype)
+  return stack(values, k_dim.name, -1), stack(indices, k_dim.name, -1)
+
+
+def _top_1_using_top_k(x, reduced_dim, name=None):
+  """Max and Argmax.
+
+  Implementation relies on tf.math.top_k, which seems to be slow on TPU,
+  since it sorts.
+
+  Args:
+    x: a Tensor
+    reduced_dim: a Dimension in x.shape.dims
+    name: an optional string
+  Returns:
+    values: Tensor equal to mtf.reduce_max(x, reduced_dim=reduced_dim)
+    indices: a Tensor with dtype tf.int32
+  """
+  one_dim = Dimension("_one", 1)
+  values, indices = top_k(x, reduced_dim, one_dim, name=name)
+  values = reshape(values, values.shape - one_dim)
+  indices = reshape(indices, indices.shape - one_dim)
+  return values, indices
 
 
 def top_1(x, reduced_dim, name=None):
@@ -4831,13 +4888,15 @@ def top_1(x, reduced_dim, name=None):
     name: an optional string
   Returns:
     values: Tensor equal to mtf.reduce_max(x, reduced_dim=reduced_dim)
-    indices: a Tensor with given dtype
+    indices: a Tensor with dtype tf.int32
   """
-  one_dim = Dimension("_one", 1)
-  values, indices = top_k(x, reduced_dim, one_dim, name=name)
-  values = reshape(values, values.shape - one_dim)
-  indices = reshape(indices, indices.shape - one_dim)
-  return values, indices
+  reduced_dim = convert_to_dimension(reduced_dim)
+  with tf.name_scope(name, default_name="top_1"):
+    max_val = reduce_max(x, reduced_dim=reduced_dim)
+    is_max = to_float(equal(x, max_val))
+    pos = mtf_range(x.mesh, reduced_dim, tf.float32)
+    indices = cast(reduce_max(is_max * pos, reduced_dim=reduced_dim), tf.int32)
+    return max_val, indices
 
 
 def argmax(x, reduced_dim, name=None):
