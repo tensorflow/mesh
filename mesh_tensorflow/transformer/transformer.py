@@ -1073,6 +1073,7 @@ class Unitransformer(object):
                ensemble=None,
                loss_fn=None,
                positional_embedding=True,
+               sinusoid_positional_embedding=False,
                input_full_attention=False,
                loss_on_targets_only=False,
                loss_denominator=None,
@@ -1098,6 +1099,9 @@ class Unitransformer(object):
       ensemble: an optional integer (for creating an ensemble of models)
       loss_fn: an optional function to override self._compute_loss
       positional_embedding: a boolean
+      sinusoid_positional_embedding: a boolean, whether to use the sinusoid
+        positional embedding from the "Attention Is All You Need" paper. If
+        True, this will override the positional_embedding setting.
       input_full_attention: a boolean
         This is an option for seq-to-seq as a language model.  Each example
         consists of [<inputs>, EOS=1, <targets>, EOS=1].  In the self-attention
@@ -1131,6 +1135,8 @@ class Unitransformer(object):
       if autoregressive:
         raise ValueError("autoregressive Transformer needs output vocabulary")
     self.autoregressive = autoregressive
+    if sinusoid_positional_embedding:
+      positional_embedding = True
     if positional_embedding:
       self.max_length_dim = mtf.Dimension("max_length", max_length)
     else:
@@ -1147,6 +1153,7 @@ class Unitransformer(object):
     self.ensemble_dims = [self.ensemble_dim] if ensemble else []
     self._loss_fn = loss_fn
     self.positional_embedding = positional_embedding
+    self.sinusoid_positional_embedding = sinusoid_positional_embedding
     self.input_full_attention = input_full_attention
     self.loss_on_targets_only = loss_on_targets_only
     self._loss_denominator = loss_denominator
@@ -1228,8 +1235,12 @@ class Unitransformer(object):
     if context.train:
       inputs = mtf.dropout(inputs, rate=self.token_dropout_rate)
     x = vocab_embedding.ids_to_embedding(inputs)
-    if self.positional_embedding:
-      if "positional_embedding" in context.shared_params:
+    if self.positional_embedding or self.sinusoid_positional_embedding:
+      if self.sinusoid_positional_embedding:
+        pos_emb_var = sinusoid_positional_embedding_weights(
+            mesh, self.max_length_dim, self.model_dim,
+            context.variable_dtype.activation_dtype)
+      elif "positional_embedding" in context.shared_params:
         pos_emb_var = context.shared_params["positional_embedding"]
       else:
         pos_emb_var = mtf.layers.embedding_weights(
@@ -1810,10 +1821,20 @@ class Bitransformer(object):
         if (self.encoder.positional_embedding
             and self.decoder.positional_embedding
             and self.encoder.max_length_dim == self.decoder.max_length_dim):
-          shared_params["positional_embedding"] = mtf.layers.embedding_weights(
-              mesh, self.encoder.max_length_dim, self.encoder.model_dim,
-              variable_dtype, "positional_embedding",
-              ensemble_dim=self.encoder.ensemble_dim)
+          if (self.encoder.sinusoid_positional_embedding and
+              self.decoder.sinusoid_positional_embedding):
+            pos_emb_var = sinusoid_positional_embedding_weights(
+                mesh, self.encoder.max_length_dim, self.encoder.model_dim,
+                variable_dtype.activation_dtype)
+          else:
+            pos_emb_var = mtf.layers.embedding_weights(
+                mesh,
+                self.encoder.max_length_dim,
+                self.encoder.model_dim,
+                variable_dtype,
+                "positional_embedding",
+                ensemble_dim=self.encoder.ensemble_dim)
+          shared_params["positional_embedding"] = pos_emb_var
     return shared_params
 
   def call_simple(self,
@@ -2411,4 +2432,47 @@ def get_vocab_embedding_cls(cls=VocabEmbedding):
     the class
   """
   return cls
+
+
+def sinusoid_positional_embedding_weights(mesh,
+                                          max_length_dim,
+                                          model_dim,
+                                          dtype,
+                                          min_timescale=1.0,
+                                          max_timescale=1.0e4):
+  """Gets a bunch of sinusoids of different frequencies.
+
+  Mostly copied from tensor2tensor's get_timing_signal_1d.
+
+  Args:
+    mesh: a mtf.Mesh
+    max_length_dim: a mtf.Dimension
+    model_dim: a mtf.Dimension
+    dtype: a tf.DType
+    min_timescale: a float
+    max_timescale: a float
+
+  Returns:
+    an mtf.Tensor of timing signals with shape [max_length_dim, model_dim]
+  Raises:
+    ValueError: If the model_dim is not divisible by 2.
+  """
+  if model_dim.size % 2:
+    raise ValueError("model_dim must be divisible by 2")
+  num_timescales = model_dim.size // 2
+  timescale_dim = mtf.Dimension(model_dim.name, num_timescales)
+  log_timescale_increment = (
+      math.log(float(max_timescale) / float(min_timescale)) /
+      max(float(num_timescales) - 1, 1))
+  inv_timescales = min_timescale * mtf.exp(
+      mtf.mtf_range(mesh, timescale_dim, dtype=tf.float32) *
+      -log_timescale_increment)
+  position = mtf.mtf_range(mesh, max_length_dim, dtype=tf.float32)
+  scaled_time = mtf.einsum([position, inv_timescales])
+  # Please note that this slightly differs from the published paper.
+  # See a discussion here: https://github.com/tensorflow/tensor2tensor/pull/177
+  embeddings = mtf.concat(
+      [mtf.sin(scaled_time), mtf.cos(scaled_time)], model_dim.name)
+  return mtf.cast(embeddings, dtype)
+
 
