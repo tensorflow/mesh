@@ -5668,6 +5668,21 @@ def random_uniform(mesh, shape, **kwargs):
   return RandomOperation(mesh, shape, tf.random.uniform, **kwargs).outputs[0]
 
 
+def random_normal(mesh, shape, **kwargs):
+  """Random uniform.
+
+  Args:
+    mesh: a Mesh
+    shape: a Shape
+    **kwargs: keyword args for tf.random.normal, except seed
+
+  Returns:
+    a Tensor
+  """
+  shape = convert_to_shape(shape)
+  return RandomOperation(mesh, shape, tf.random.normal, **kwargs).outputs[0]
+
+
 def dropout(x, keep_prob=None, rate=None, noise_shape=None, name=None):
   """Randomly set some elements to 0 and scale up the rest.
 
