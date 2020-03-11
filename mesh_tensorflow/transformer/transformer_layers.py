@@ -642,3 +642,431 @@ def _relative_position_bucket(relative_position,
   return ret
 
 
+@gin.configurable
+class TalkingHeadsSelfAttention(SelfAttention):
+  """Experimental Talking-heads self-attention layer.
+
+  https://arxiv.org/abs/2003.02436
+
+  This is a variant where there are (optionally) extra learned linear
+  projections on the attention logits and attention weights.  These linear
+  projections are across attention heads (but not across different query or
+  memory positions).
+
+  The user specifies three sets of mtf.Dimension:
+    key_heads_dims: "heads" dimensions the queries, keys and ther dot-product
+    softmax_heads_dims: "heads" dimensions for the logits and their softmax
+    value_heads_dims: "heads" dimensions for the values
+
+  If these three sets are identical, then this layer is identical to ordinary
+  multi-head attention.
+
+  If key_heads_dims != softmax_heads_dims, then a learned linear projection
+  is applied to compute the logits.  This projection reduces out dimensions
+  in (key_heads_dims-softmax_heads_dims) and inserts dimensions in
+  (softmax_heads_dims-key_heads_dims).
+
+  If softmax_heads_dims != value_heads_dims, then a learned linear
+  projection is applied to the weights (the output of the softmax).  This
+  projection reduces out dimensions in (softmax_heads_dims-value_heads_dims)
+  and inserts dimensions in (value_heads_dims-softmax_heads_dims).
+
+  TPU performance is lousy due to small matrix sizes.
+
+  Early experiments show that quality can be significantly better than baseline.
+
+  An additional supported option is dynamic talking-heads projections where the
+  talking-heads projections themselves contain terms that depend on the inputs.
+  Each of the logits-projection and the weights-projection can depend on either
+  or both of the query-antecedent X or the memory-antecedent Y.  This gives
+  a total of four dynamic projections which can be enabled individually.
+  To enable, set the dynamic_projections argument to a list containing a
+  some or all of the strings ["x2l", "m2l", "x2w", "m2w"].
+
+  Example:
+    TalkingHeadsSelfAttention.key_heads_dims = [("key_heads", 12)]
+    TalkingHeadsSelfAttention.softmax_heads_dims = [("heads", 32)]
+    TalkingHeadsSelfAttention.value_heads_dims = [("value_heads", 12)]
+    TalkingHeadsSelfAttention.key_size = 64
+    TalkingHeadsSelfAttention.value_size = 64
+    d_model = 1024
+
+    We start with an input x
+      x: [length, d_model]
+
+    The input is first transformed into queries, keys and values:
+      queries: [query_length, key_heads, key_size]
+      keys: [memory_length, key_heads, key_size]
+      values: [memory_length, value_heads, value_size]
+
+    queries and keys get einsummed to produce a tensor p:
+      p: [query_length, memory_length, key_heads]
+
+    p gets linearly transformed with a learned weight matrix with shape
+      [key_heads, softmax_heads] to produce logits
+    logits: [query_length, memory_length, softmax_heads]
+
+    take the softmax of logits (across memory_length to produce weights)
+    h: [query_length, memory_length, softmax_heads]
+
+    Now a learned linear projection with shape [softmax_heads, value_heads]
+      on h produces the weights.
+    weights: [query_length, memory_length, value_heads]
+
+    As usual, we einsum the weights with the values.
+    o: [query_length, value_heads, value_size]
+
+    Finally, project o back to the desired output dimension
+    y: [query_length, d_model]
+
+
+  Also, this doesn't model-parallelize trivially.  To model-parallelize, you
+  should add one heads-dimension that is present in all of key_heads_dims,
+  softmax_heads_dims, value_heads_dims.  Call this dimension "heads" and shard
+  that over multiple devices.  Then also include additional different
+  heads-dimension for the keys, softmax, and values.
+  """
+
+  def __init__(self,  # pylint: disable=super-init-not-called
+               key_heads_dims=(("heads", 12),),
+               softmax_heads_dims=(("heads", 12),),
+               value_heads_dims=(("heads", 12),),
+               key_size=64,
+               value_size=64,
+               dropout_rate=0.0,
+               relative_attention_type=None,
+               relative_attention_num_buckets=32,
+               dynamic_projections=None,
+               dynamic_projections_init_scale=1e-2):
+    """Create a SelfAttention Layer.
+
+    Args:
+      key_heads_dims: a list of mtf.Dimension or (name, size) pairs
+      softmax_heads_dims: a list of mtf.Dimension or (name, size) pairs
+      value_heads_dims: a list of mtf.Dimension or (name, size) pairs
+      key_size: an integer
+      value_size: an integer
+      dropout_rate: a float
+      relative_attention_type: an optional string - one of
+        (None, "bias", "bias_shared", "contextual")
+      relative_attention_num_buckets: an integer
+      dynamic_projections: an optional sequence containing a subset of
+        ["x2l", "m2l", "x2w", "m2w"] (see class comments)
+      dynamic_projections_init_scale: a float - initializer variance scaling
+        factor for these dynamic projections.  We have observed learning
+        difficulties when this value is too large.
+    """
+    self.key_heads_dims = [mtf.convert_to_dimension(d) for d in key_heads_dims]
+    self.softmax_heads_dims = [
+        mtf.convert_to_dimension(d) for d in softmax_heads_dims]
+    self.value_heads_dims = [
+        mtf.convert_to_dimension(d) for d in value_heads_dims]
+    self.key_dim = mtf.Dimension("d_k", key_size)
+    self.value_dim = mtf.Dimension("d_v", value_size)
+    self.dropout_rate = dropout_rate
+    self.relative_attention_type = relative_attention_type
+    self.relative_attention_num_buckets = relative_attention_num_buckets
+    self.dynamic_projections = dynamic_projections or []
+    self.dynamic_projections_init_scale = dynamic_projections_init_scale
+
+  def compute_q(self, context, x):
+    # Scale the initializer variance by 1.0/d_k
+    # This scales the initializer by rsqrt(d_k)
+    init_scale = 1.0 / self.key_dim.size
+    return mtf.layers.dense(
+        x, reduced_dims=[context.model.model_dim],
+        new_dims=self.key_heads_dims + [self.key_dim],
+        use_bias=False, activation=None,
+        variable_dtype=context.variable_dtype,
+        name="q", expert_dims=context.model.ensemble_dims,
+        kernel_initializer=mtf.layers.VarianceScalingInitializer(init_scale))
+
+  def compute_k(self, context, x):
+    return mtf.layers.dense(
+        x, reduced_dims=[context.model.model_dim],
+        new_dims=self.key_heads_dims + [self.key_dim],
+        use_bias=False, activation=None,
+        variable_dtype=context.variable_dtype,
+        name="k", expert_dims=context.model.ensemble_dims)
+
+  def compute_v(self, context, x):
+    return mtf.layers.dense(
+        x, reduced_dims=[context.model.model_dim],
+        new_dims=self.value_heads_dims + [self.value_dim],
+        use_bias=False, activation=None,
+        variable_dtype=context.variable_dtype,
+        name="v", expert_dims=context.model.ensemble_dims)
+
+  def compute_y(self, context, u):
+    return mtf.layers.dense(
+        u, reduced_dims=self.value_heads_dims + [self.value_dim],
+        new_dims=[context.model.model_dim],
+        use_bias=False, activation=None,
+        variable_dtype=context.variable_dtype,
+        name="y", expert_dims=context.model.ensemble_dims)
+
+  def call(self, context, x, losses=None):
+    """Call the layer."""
+    memory_length = self.memory_length(context)
+    q = self.compute_q(context, x)
+    if context.mode == "incremental":
+      m = x
+    else:
+      m = mtf.replace_dimensions(x, context.length_dim, memory_length)
+    k = self.compute_k(context, m)
+    v = self.compute_v(context, m)
+    if context.mode == "incremental":
+      one_hot = mtf.one_hot(
+          context.position, memory_length, dtype=context.activation_dtype)
+      inv_one_hot = 1.0 - one_hot
+      old_k, old_v = context.get_states(2)
+      k = old_k * inv_one_hot + k * one_hot
+      v = old_v * inv_one_hot + v * one_hot
+      memory_position = mtf.range(context.mesh, memory_length, tf.int32)
+    else:
+      memory_position = self.rename_length_to_memory_length(
+          context.position, context)
+    if context.mode == "incremental" or context.mode == "first_part":
+      context.record_new_states([k, v])
+    bias = self.compute_bias(context, memory_position, x,
+                             self.softmax_heads_dims, q)
+    return self.attention_internal(context, x, m, q, k, v, memory_length, bias)
+
+  def attention_internal(self, context, x, m, q, k, v, memory_length, bias):
+    p = mtf.einsum([q, k], reduced_dims=[self.key_dim])
+    logits = self.talking_heads(
+        context, p, "logits", self.key_heads_dims, self.softmax_heads_dims,
+        dynamic_projections_from=(
+            ([x] if "x2l" in self.dynamic_projections else []) +
+            ([m] if "m2l" in self.dynamic_projections else [])))
+    if bias is not None:
+      logits += bias
+    h = mtf.softmax(logits, memory_length)
+    weights = self.talking_heads(
+        context, h, "weights", self.softmax_heads_dims, self.value_heads_dims,
+        dynamic_projections_from=(
+            ([x] if "x2w" in self.dynamic_projections else []) +
+            ([m] if "m2w" in self.dynamic_projections else [])))
+    # TODO(noam): make dropout_broadcast_dims configurable
+    dropout_broadcast_dims = [context.length_dim]
+    weights = mtf.dropout(
+        weights, rate=self.dropout_rate if context.train else 0.0,
+        noise_shape=weights.shape - dropout_broadcast_dims)
+    u = mtf.einsum([weights, v], reduced_dims=[memory_length])
+    return self.compute_y(context, u)
+
+  def talking_heads(
+      self, context, inp, name, input_heads_dims, output_heads_dims,
+      dynamic_projections_from=None):
+    shared_dims = [d for d in input_heads_dims if d in output_heads_dims]
+    reduced_dims = [d for d in input_heads_dims if d not in output_heads_dims]
+    new_dims = [d for d in output_heads_dims if d not in input_heads_dims]
+    if not (reduced_dims or new_dims):
+      # Output dimensions are same as input dimensions.  Return the input
+      return inp
+    elif dynamic_projections_from:
+      # There are one or more dynamic talking-heads-projections
+      with tf.variable_scope(name):
+        # static projection - this is the same as the static projection in the
+        # "else" case below.  We create the weight matrix with get_variable
+        # instead of calling mtf.layers.dense() so that we can fold the
+        # static projection into one of the dynamic projections.
+        static_p_initializer = mtf.layers.VarianceScalingInitializer()(
+            reduced_dims, new_dims)
+        static_p_shape = (
+            context.model.ensemble_dims + shared_dims + reduced_dims + new_dims)
+        static_p = mtf.get_variable(inp.mesh,
+                                    "kernel",
+                                    static_p_shape,
+                                    initializer=static_p_initializer,
+                                    dtype=context.variable_dtype)
+        ps = []
+        for i, dp_from in enumerate(dynamic_projections_from):
+          kernel_initializer = mtf.layers.VarianceScalingInitializer(
+              self.dynamic_projections_init_scale
+              / mtf.Shape(reduced_dims).size)
+          ps.append(
+              mtf.layers.dense(
+                  dp_from, reduced_dims=[context.model.model_dim],
+                  new_dims=shared_dims + reduced_dims + new_dims,
+                  use_bias=False, activation=None,
+                  variable_dtype=context.variable_dtype,
+                  name="%s_dynamic_%d" % (name, i),
+                  expert_dims=context.model.ensemble_dims,
+                  kernel_initializer=kernel_initializer))
+        # Fold the static projection into one of the static projections.
+        # Mathematically, we could add all the dynamic projections together
+        #   here, but it would create a very large tensor which contained
+        #   both the query-length and memory-length dimensions, and would
+        #   probably be slower in practice.
+        ps[0] += static_p
+        return mtf.add_n(
+            [mtf.einsum([inp, p], reduced_dims=reduced_dims) for p in ps])
+    else:
+      # No dynamic projections.  Static talking-heads projection only
+      return mtf.layers.dense(
+          inp, reduced_dims=reduced_dims,
+          new_dims=new_dims,
+          use_bias=False, activation=None,
+          variable_dtype=context.variable_dtype,
+          name=name, expert_dims=context.model.ensemble_dims + shared_dims)
+
+
+@gin.configurable
+class TalkingHeadsEncDecAttention(TalkingHeadsSelfAttention):
+  """Talking-heads attention over encoder output.
+
+  See comments on TalkingHeadsSelfAttention.
+  """
+
+  def _get_memory_antecedent(self, context):
+    return context.encoder_output
+
+  def call(self, context, x, losses=None):
+    """Call the layer."""
+    m = self._get_memory_antecedent(context)
+    memory_input_dim = m.shape[-1]
+    if memory_input_dim != context.model.model_dim:
+      raise NotImplementedError(
+          "TODO(noam): support different model_dim in encoder and decoder.")
+    q = self.compute_q(context, x)
+    if context.mode == "incremental":
+      k, v, memory_length = context.get_constant_state()
+    else:
+      k = self.compute_k(context, m)
+      v = self.compute_v(context, m)
+      memory_length, = [d for d in m.shape.dims if d.name == "memory_length"]
+      if context.mode == "first_part":
+        context.record_constant_state((k, v, memory_length))
+    if context.encoder_sequence_id and context.sequence_id:
+      visible = mtf.equal(context.sequence_id, context.encoder_sequence_id)
+      bias = attention.visibility_mask_to_attention_bias(
+          visible, context.activation_dtype)
+    else:
+      bias = None
+    return self.attention_internal(context, x, m, q, k, v, memory_length, bias)
+
+
+@gin.configurable
+class GeneralBilinearSelfAttention(SelfAttention):
+  """General Bilinear Self-Attention.
+
+  Described in the forthcoming talking-heads paper.
+
+  Equivalent to multi-head attentino where d_kv == d_model.
+  It is redundant to have projections on both q and k.
+  It is redundant to have projections on both v and output.
+  We therefore omit the projections on k and v, making the two identical.
+  """
+
+  def __init__(self,  # pylint: disable=super-init-not-called
+               heads_dims=(("heads", 12),),
+               dropout_rate=0.0,
+               relative_attention_type=None,
+               relative_attention_num_buckets=32):
+    """Create a GeneralBilinearSelfAttention Layer.
+
+    Args:
+      heads_dims: a list of mtf.Dimension or (name, size) pairs
+      dropout_rate: a float
+      relative_attention_type: an optional string - one of
+        (None, "bias", "bias_shared", "contextual")
+      relative_attention_num_buckets: an integer
+    """
+    self.heads_dims = [
+        mtf.convert_to_dimension(d) for d in heads_dims]
+    self.dropout_rate = dropout_rate
+    self.relative_attention_type = relative_attention_type
+    self.relative_attention_num_buckets = relative_attention_num_buckets
+
+  def compute_q(self, context, x):
+    # Scale the initializer variance by 1.0/d_k
+    # This scales the initializer by rsqrt(d_k)
+    init_scale = 1.0 / context.model.model_dim.size
+    return mtf.layers.dense(
+        x, reduced_dims=[context.model.model_dim],
+        new_dims=self.heads_dims + [context.model.model_dim],
+        use_bias=False, activation=None,
+        variable_dtype=context.variable_dtype,
+        name="q", expert_dims=context.model.ensemble_dims,
+        kernel_initializer=mtf.layers.VarianceScalingInitializer(init_scale))
+
+  def compute_y(self, context, u):
+    return mtf.layers.dense(
+        u, reduced_dims=self.heads_dims + [context.model.model_dim],
+        new_dims=[context.model.model_dim],
+        use_bias=False, activation=None,
+        variable_dtype=context.variable_dtype,
+        name="y", expert_dims=context.model.ensemble_dims)
+
+  def call(self, context, x, losses=None):
+    """Call the layer."""
+    memory_length = self.memory_length(context)
+    q = self.compute_q(context, x)
+    if context.mode == "incremental":
+      m = x
+    else:
+      m = mtf.replace_dimensions(x, context.length_dim, memory_length)
+    if context.mode == "incremental":
+      one_hot = mtf.one_hot(
+          context.position, memory_length, dtype=context.activation_dtype)
+      inv_one_hot = 1.0 - one_hot
+      old_m, = context.get_states(1)
+      m = old_m * inv_one_hot + one_hot * m
+      memory_position = mtf.range(context.mesh, memory_length, tf.int32)
+    else:
+      memory_position = self.rename_length_to_memory_length(
+          context.position, context)
+    if context.mode == "incremental" or context.mode == "first_part":
+      context.record_new_states([m])
+    bias = self.compute_bias(context, memory_position, x, self.heads_dims, q)
+    return self.attention_internal(context, q, m, memory_length, bias)
+
+  def attention_internal(self, context, q, m, memory_length, bias):
+    logits = mtf.einsum([q, m], reduced_dims=[context.model.model_dim])
+    if bias is not None:
+      logits += bias
+    weights = mtf.softmax(logits, memory_length)
+    # TODO(noam): make dropout_broadcast_dims configurable
+    dropout_broadcast_dims = [context.length_dim]
+    weights = mtf.dropout(
+        weights, rate=self.dropout_rate if context.train else 0.0,
+        noise_shape=weights.shape - dropout_broadcast_dims)
+    u = mtf.einsum([weights, m], reduced_dims=[memory_length])
+    return self.compute_y(context, u)
+
+
+@gin.configurable
+class GeneralBilinearEncDecAttention(GeneralBilinearSelfAttention):
+  """Talking-heads attention over encoder output.
+
+  See comments on GBMSelfAttention.
+  """
+
+  def _get_memory_antecedent(self, context):
+    return context.encoder_output
+
+  def call(self, context, x, losses=None):
+    """Call the layer."""
+    memory_antecedent = self._get_memory_antecedent(context)
+    memory_input_dim = memory_antecedent.shape[-1]
+    if memory_input_dim != context.model.model_dim:
+      raise NotImplementedError(
+          "TODO(noam): support different model_dim in encoder and decoder.")
+    q = self.compute_q(context, x)
+    if context.mode == "incremental":
+      m, memory_length = context.get_constant_state()
+    else:
+      m = memory_antecedent
+      memory_length, = [d for d in m.shape.dims if d.name == "memory_length"]
+      if context.mode == "first_part":
+        context.record_constant_state((m, memory_length))
+    if context.encoder_sequence_id and context.sequence_id:
+      visible = mtf.equal(context.sequence_id, context.encoder_sequence_id)
+      bias = attention.visibility_mask_to_attention_bias(
+          visible, context.activation_dtype)
+    else:
+      bias = None
+    return self.attention_internal(context, q, m, memory_length, bias)
+
+
