@@ -35,7 +35,11 @@ import tensorflow.compat.v1 as tf
 class DenseReluDense(transformer.TransformerLayer):
   """Two dense layers with ReLU or other activation on hidden layer."""
 
-  def __init__(self, hidden_size=4096, dropout_rate=0.0, activation="relu"):
+  def __init__(self,
+               hidden_size=4096,
+               dropout_rate=0.0,
+               activation="relu",
+               weight_init_scale=1.0):
     """Create a DenseReluDense.
 
     Args:
@@ -43,31 +47,46 @@ class DenseReluDense(transformer.TransformerLayer):
       dropout_rate: a floating-point number
       activation: an activation function or a list of activation functions.
         see documentation for mtf.layers.dense_product()
+      weight_init_scale: scale initial weights by this amount.
     """
     self.hidden_size = hidden_size
     self.dropout_rate = dropout_rate
     self.activation = activation
 
+    # To scale the weights by weight_init_scale, we need to scale the variance
+    # by weight_init_scale**2.
+    self.wi_init = mtf.layers.VarianceScalingInitializer(
+        scale=weight_init_scale**2)
+    self.wo_init = mtf.layers.VarianceScalingInitializer(
+        scale=weight_init_scale**2)
+
   def call(self, context, x, losses=None):
     """Call the layer."""
     io_channels = x.shape.dims[-1]
     hidden_channels = mtf.Dimension("d_ff", self.hidden_size)
-    h = mtf.layers.dense_product(x,
-                                 reduced_dims=x.shape.dims[-1:],
-                                 new_dims=hidden_channels,
-                                 activation_functions=self.activation,
-                                 use_bias=False,
-                                 variable_dtype=context.variable_dtype,
-                                 name="wi",
-                                 expert_dims=context.model.ensemble_dims)
+    h = mtf.layers.dense_product(
+        x,
+        reduced_dims=x.shape.dims[-1:],
+        new_dims=hidden_channels,
+        activation_functions=self.activation,
+        use_bias=False,
+        variable_dtype=context.variable_dtype,
+        name="wi",
+        expert_dims=context.model.ensemble_dims,
+        kernel_initializer=self.wi_init)
     if context.train and self.dropout_rate != 0.0:
       h = mtf.dropout(h, 1.0 - self.dropout_rate,
                       noise_shape=h.shape - context.length_dim)
-    return mtf.layers.dense(h, io_channels, use_bias=False, activation=None,
-                            variable_dtype=context.variable_dtype,
-                            reduced_dims=h.shape.dims[-1:],
-                            name="wo",
-                            expert_dims=context.model.ensemble_dims)
+    return mtf.layers.dense(
+        h,
+        io_channels,
+        use_bias=False,
+        activation=None,
+        variable_dtype=context.variable_dtype,
+        reduced_dims=h.shape.dims[-1:],
+        name="wo",
+        expert_dims=context.model.ensemble_dims,
+        kernel_initializer=self.wo_init)
 
 
 def attention_params(context,
@@ -76,7 +95,8 @@ def attention_params(context,
                      num_memory_heads=0,
                      shared_kv=False,
                      combine_dims=False,
-                     keep_query_heads_dims=False):
+                     keep_query_heads_dims=False,
+                     weight_init_scale=1.0):
   """Attention Parameters for Transformer Layers.
 
   The num_heads argument indicates the number of read-heads.
@@ -100,6 +120,8 @@ def attention_params(context,
     shared_kv: a boolean
     combine_dims: a boolean
     keep_query_heads_dims: a boolean
+    weight_init_scale: a float
+
   Returns:
     an attention.AttentionParams object
   """
@@ -131,7 +153,8 @@ def attention_params(context,
       shared_kv=shared_kv,
       ensemble_dim=context.model.ensemble_dim,
       combine_dims=combine_dims,
-      keep_query_heads_dims=keep_query_heads_dims)
+      keep_query_heads_dims=keep_query_heads_dims,
+      weight_init_scale=weight_init_scale)
 
 
 @gin.configurable
@@ -149,7 +172,8 @@ class SelfAttention(transformer.TransformerLayer):
                relative_attention_num_buckets=32,
                attention_func=None,
                combine_dims=False,
-               keep_query_heads_dims=False):
+               keep_query_heads_dims=False,
+               weight_init_scale=1.0):
     """Create a SelfAttention Layer.
 
     Args:
@@ -165,6 +189,7 @@ class SelfAttention(transformer.TransformerLayer):
       attention_func: attention function: None/'hybrid'.
       combine_dims: a boolean
       keep_query_heads_dims: a boolean
+      weight_init_scale: a float
     """
     self.num_heads = num_heads
     self.num_memory_heads = num_memory_heads
@@ -177,6 +202,7 @@ class SelfAttention(transformer.TransformerLayer):
     self.attention_func = attention_func
     self.combine_dims = combine_dims
     self.keep_query_heads_dims = keep_query_heads_dims
+    self.weight_init_scale = weight_init_scale
 
   def layer_output_from_attention_output(self, context, attention_output,
                                          losses):
@@ -202,7 +228,8 @@ class SelfAttention(transformer.TransformerLayer):
         num_memory_heads=self.num_memory_heads,
         shared_kv=self.shared_kv,
         combine_dims=self.combine_dims,
-        keep_query_heads_dims=self.keep_query_heads_dims)
+        keep_query_heads_dims=self.keep_query_heads_dims,
+        weight_init_scale=self.weight_init_scale)
 
   def call(self, context, x, losses=None):
     """Call the layer."""

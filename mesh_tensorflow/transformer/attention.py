@@ -162,7 +162,8 @@ class AttentionParams(object):
                shared_kv=False,
                combine_dims=True,
                ensemble_dim=None,
-               keep_query_heads_dims=False):
+               keep_query_heads_dims=False,
+               weight_init_scale=1.0):
     """Create attention parameters.
 
     combine_dims is a hack for faster execution.  The heads and key/value
@@ -184,6 +185,7 @@ class AttentionParams(object):
       ensemble_dim: an optional Dimension
       keep_query_heads_dims: a boolean, if true keep the query_heads_dims in the
         output.
+      weight_init_scale: scale initial weights by this amount.
     """
     if shared_kv and key_dim != value_dim:
       raise ValueError("shared_kv requires key_dim == value_dim")
@@ -207,12 +209,16 @@ class AttentionParams(object):
       k_shape = [memory_input_dim] + self.k_dims
       v_shape = [memory_input_dim] + self.v_dims
       o_shape = self.o_dims + [output_dim]
+
     q_init = tf.random_normal_initializer(
-        stddev=(query_input_dim.size * key_dim.size) ** -0.5)
-    kv_init = tf.random_normal_initializer(
-        stddev=memory_input_dim.size ** -0.5)
+        stddev=weight_init_scale *
+        ((query_input_dim.size * key_dim.size) ** -0.5))
+    kv_init = tf.random_normal_initializer(stddev=weight_init_scale *
+                                           (memory_input_dim.size ** -0.5))
     o_init = tf.random_normal_initializer(
-        stddev=mtf.Shape(self.query_heads_dims + [value_dim]).size ** -0.5)
+        stddev=weight_init_scale *
+        (mtf.Shape(self.query_heads_dims + [value_dim]).size ** -0.5))
+
     if ensemble_dim:
       q_shape = [ensemble_dim] + q_shape
       k_shape = [ensemble_dim] + k_shape

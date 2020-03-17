@@ -321,6 +321,7 @@ class UTLayerStack(TransformerLayer):
       norm_epsilon=1e-6,
       num_vanilla_transformer_layers=2,
       couple_carry_transform_gates=True,
+      use_layer_norms=True,
       act_type=gin.REQUIRED,
       recurrence_type=gin.REQUIRED,
       act_max_steps=gin.REQUIRED,
@@ -346,6 +347,7 @@ class UTLayerStack(TransformerLayer):
       num_vanilla_transformer_layers: number of vanilla transformer layers
         before the ACT layer.
       couple_carry_transform_gates: whether to couple carry and transform gates.
+      use_layer_norms: a boolean
       act_type: act type
       recurrence_type: recurrence type (allowable values: "act").
       act_max_steps: maximum number of act steps
@@ -384,6 +386,7 @@ class UTLayerStack(TransformerLayer):
     self.gates_inputs = gates_inputs
     self.gate_ffn_layer = gate_ffn_layer
     self.couple_carry_transform_gates = couple_carry_transform_gates
+    self._use_layer_norms = use_layer_norms
 
   def get_timing_signal_1d(self,
                            context,
@@ -595,9 +598,11 @@ class UTLayerStack(TransformerLayer):
     for lnum, layer in enumerate(self._layers):
       scope_name = layer.name
       with tf.variable_scope(scope_name or ""):
-        norm_x = self._layer_norm(context, (x * mask) if mask else x)
+        layer_input = (x * mask) if mask else x
+        if self._use_layer_norms:
+          layer_input = self._layer_norm(context, layer_input)
         with tf.variable_scope(layer.__class__.__name__):
-          y = layer.call(context, norm_x)
+          y = layer.call(context, layer_input)
           if y.shape != x.shape:
             raise ValueError("Layer %s returned misshaped output x=%s y=%s" %
                              (layer.__class__.__name__, x, y))
@@ -793,8 +798,9 @@ class UTLayerStack(TransformerLayer):
       # In case of having more than one input to the ffn,
       # we just apply layer norm on them independently as preprocessing
       for i, inputs in enumerate(inputs_list):
-        inputs_list[i] = self._layer_norm(
-            context, (inputs * mask) if mask else inputs)
+        inputs_list[i] = (inputs * mask) if mask else inputs
+        if self._use_layer_norms:
+          inputs_list[i] = self._layer_norm(context, inputs_list[i])
 
     # the output size is the hidden size of the main inputs
     main_input = inputs_list[0]
@@ -828,7 +834,9 @@ class UTLayerStack(TransformerLayer):
       raise ValueError("Unknown ffn_layer type: %s" % ffn_layer_type)
 
     if postprocess:
-      output = self._layer_norm(context, (output * mask) if mask else output)
+      output = (output * mask) if mask else output
+      if self._use_layer_norms:
+        output = self._layer_norm(context, output)
 
     return output
 
@@ -909,7 +917,8 @@ class UTLayerStack(TransformerLayer):
     if self.mix_with_transformer_after_ut:
       for _ in range(self.num_vanilla_transformer_layers):
         x = self.vanilla_transformer_layer(context, x, mask)
-    x = self._layer_norm(context, x, name="final_layer_norm")
+    if self._use_layer_norms:
+      x = self._layer_norm(context, x, name="final_layer_norm")
     x = self._dropout(context, x)
     if mask:
       x *= mask
@@ -950,19 +959,25 @@ class UTLayerStack(TransformerLayer):
 
 @gin.configurable
 class LayerStack(TransformerLayer):
-  """A stack of layers with residual connections and layer norms."""
+  """A stack of layers with residual connections."""
 
-  def __init__(self, layers, dropout_rate=0.0, norm_epsilon=1e-6):
+  def __init__(self,
+               layers,
+               dropout_rate=0.0,
+               norm_epsilon=1e-6,
+               use_layer_norms=True):
     """Create a LayerStack.
 
     Args:
       layers: a list of TransformerLayer
       dropout_rate: a floating-point number
       norm_epsilon: a floating-point number
+      use_layer_norms: a boolean.
     """
     self._layers = layers
     self._dropout_rate = dropout_rate
     self._norm_epsilon = norm_epsilon
+    self._use_layer_norms = use_layer_norms
 
   def call(self, context, x):
     """Call the layer stack."""
@@ -980,9 +995,11 @@ class LayerStack(TransformerLayer):
       context.layer_outputs.append(x)
     for lnum, layer in enumerate(self._layers):
       with tf.variable_scope(layer.name or ""):
-        norm_x = self._layer_norm(context, (x * mask) if mask else x)
+        layer_input = (x * mask) if mask else x
+        if self._use_layer_norms:
+          layer_input = self._layer_norm(context, layer_input)
         with tf.variable_scope(layer.__class__.__name__):
-          y = layer.call(context, norm_x)
+          y = layer.call(context, layer_input)
           if y.shape != x.shape:
             raise ValueError("Layer %s returned misshaped output x=%s y=%s"
                              % (layer.__class__.__name__, x, y))
@@ -990,7 +1007,8 @@ class LayerStack(TransformerLayer):
       if context.layer_outputs is not None and lnum != len(self._layers) - 1:
         context.layer_outputs.append(x)
       context.layer_index += 1
-    x = self._layer_norm(context, x, name="final_layer_norm")
+    if self._use_layer_norms:
+      x = self._layer_norm(context, x, name="final_layer_norm")
     x = self._dropout(context, x)
     if mask:
       x *= mask
@@ -2148,7 +2166,8 @@ class StudentTeacher(object):
 def make_layer_stack(layers=gin.REQUIRED,
                      use_universal_transformer=False,
                      num_layers=6,
-                     block_scope=True):
+                     block_scope=True,
+                     use_layer_norms=False):
   """Configurable layer stack.
 
   The "layers" argument specifies the layers in each block.  It is a list
@@ -2184,6 +2203,8 @@ def make_layer_stack(layers=gin.REQUIRED,
       layer_002/...
       ...
       ```
+    use_layer_norms: a bool
+
   Returns:
     a LayerStack
   """
@@ -2209,7 +2230,7 @@ def make_layer_stack(layers=gin.REQUIRED,
       layer.set_name(name)
       layer_stack.append(layer)
   use_layer_stack = UTLayerStack if use_universal_transformer else LayerStack
-  return use_layer_stack(layer_stack)
+  return use_layer_stack(layer_stack, use_layer_norms=use_layer_norms)
 
 
 @gin.configurable
