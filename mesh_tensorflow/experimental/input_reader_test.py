@@ -53,7 +53,9 @@ class MtfInputReaderTest(parameterized.TestCase, tf.test.TestCase):
 
       # Get a device_assignment object for mtf.
       d_assignment = device_assignment.device_assignment(
-          topology, computation_shape=[1, 1, 1], num_replicas=num_cores)
+          topology,
+          computation_shape=[1,] * mtf.utils.topology_rank(topology),
+          num_replicas=num_cores)
 
       # Hacked dataset creator: creates different datasets for the first and
       # second call, in order to test SimdMeshImplInputReader.

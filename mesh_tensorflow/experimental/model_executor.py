@@ -134,7 +134,8 @@ class MeshContext(object):
 
       # Get a device_assignment object for mtf.
       self._d_assignment = device_assignment.device_assignment(
-          topology, computation_shape=[1, 1, 1],
+          topology,
+          computation_shape=[1,] * mtf.utils.topology_rank(topology),
           num_replicas=self._num_cores)
 
       self._mesh_impl = mtf.simd_mesh_impl.SimdMeshImpl(
