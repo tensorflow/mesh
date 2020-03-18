@@ -161,8 +161,7 @@ class AttentionParams(object):
                variable_dtype,
                shared_kv=False,
                combine_dims=True,
-               ensemble_dim=None,
-               keep_query_heads_dims=False):
+               ensemble_dim=None):
     """Create attention parameters.
 
     combine_dims is a hack for faster execution.  The heads and key/value
@@ -182,8 +181,6 @@ class AttentionParams(object):
       shared_kv: a boolean
       combine_dims: a boolean
       ensemble_dim: an optional Dimension
-      keep_query_heads_dims: a boolean, if true keep the query_heads_dims in the
-        output.
     """
     if shared_kv and key_dim != value_dim:
       raise ValueError("shared_kv requires key_dim == value_dim")
@@ -196,7 +193,6 @@ class AttentionParams(object):
     self.memory_heads_dims = memory_heads_dims or []
     self.shared_kv = shared_kv
     self.combine_dims = combine_dims
-    self.keep_query_heads_dims = keep_query_heads_dims
     if combine_dims:
       q_shape = [query_input_dim, _combined_dim(self.q_dims)]
       k_shape = [memory_input_dim, _combined_dim(self.k_dims)]
@@ -318,10 +314,6 @@ class AttentionParams(object):
       reduced_dims = [self.wo.shape.dims[-2]]
     else:
       reduced_dims = self.o_dims
-
-    if self.keep_query_heads_dims:
-      reduced_dims = [self.value_dim]
-
     return mtf.einsum(
         [o, self.wo], output_shape=output_shape, reduced_dims=reduced_dims)
 
