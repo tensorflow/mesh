@@ -74,7 +74,9 @@ def attention_params(context,
                      kv_dim,
                      num_heads,
                      num_memory_heads=0,
-                     shared_kv=False):
+                     shared_kv=False,
+                     combine_dims=True,
+                     keep_query_heads_dims=False):
   """Attention Parameters for Transformer Layers.
 
   The num_heads argument indicates the number of read-heads.
@@ -96,6 +98,8 @@ def attention_params(context,
     num_heads: an integer
     num_memory_heads: an optional integer
     shared_kv: a boolean
+    combine_dims: a boolean
+    keep_query_heads_dims: a boolean
   Returns:
     an attention.AttentionParams object
   """
@@ -125,7 +129,9 @@ def attention_params(context,
       memory_heads_dims=memory_heads_dims,
       variable_dtype=context.variable_dtype,
       shared_kv=shared_kv,
-      ensemble_dim=context.model.ensemble_dim)
+      ensemble_dim=context.model.ensemble_dim,
+      combine_dims=combine_dims,
+      keep_query_heads_dims=keep_query_heads_dims)
 
 
 @gin.configurable
@@ -141,7 +147,9 @@ class SelfAttention(transformer.TransformerLayer):
                attention_kwargs=None,
                relative_attention_type=None,
                relative_attention_num_buckets=32,
-               attention_func=None):
+               attention_func=None,
+               combine_dims=True,
+               keep_query_heads_dims=False):
     """Create a SelfAttention Layer.
 
     Args:
@@ -155,6 +163,8 @@ class SelfAttention(transformer.TransformerLayer):
         (None, "bias", "bias_shared", "contextual")
       relative_attention_num_buckets: an integer
       attention_func: attention function: None/'hybrid'.
+      combine_dims: a boolean
+      keep_query_heads_dims: a boolean
     """
     self.num_heads = num_heads
     self.num_memory_heads = num_memory_heads
@@ -165,6 +175,17 @@ class SelfAttention(transformer.TransformerLayer):
     self.relative_attention_type = relative_attention_type
     self.relative_attention_num_buckets = relative_attention_num_buckets
     self.attention_func = attention_func
+    self.combine_dims = combine_dims
+    self.keep_query_heads_dims = keep_query_heads_dims
+
+  def layer_output_from_attention_output(self, context, attention_output,
+                                         losses):
+    return attention_output
+
+  def expected_attention_output_shape(self, x, params):
+    if self.keep_query_heads_dims:
+      return mtf.Shape(x.shape[:-1] + params.query_heads_dims + x.shape[-1:])
+    return x.shape
 
   def attention_kwargs_from_context(self, context):
     kwargs = copy.copy(self.attention_kwargs)
@@ -174,11 +195,14 @@ class SelfAttention(transformer.TransformerLayer):
     return kwargs
 
   def make_params(self, context):
-    return attention_params(context=context,
-                            kv_dim=self.kv_dim,
-                            num_heads=self.num_heads,
-                            num_memory_heads=self.num_memory_heads,
-                            shared_kv=self.shared_kv)
+    return attention_params(
+        context=context,
+        kv_dim=self.kv_dim,
+        num_heads=self.num_heads,
+        num_memory_heads=self.num_memory_heads,
+        shared_kv=self.shared_kv,
+        combine_dims=self.combine_dims,
+        keep_query_heads_dims=self.keep_query_heads_dims)
 
   def call(self, context, x, losses=None):
     """Call the layer."""
@@ -226,7 +250,12 @@ class SelfAttention(transformer.TransformerLayer):
           self.compute_bias(context, memory_position, x,
                             params.query_heads_dims, q),
           **self.attention_kwargs_from_context(context))
-    return params.compute_output(o, output_shape=x.shape)
+
+    attention_output_shape = self.expected_attention_output_shape(x, params)
+    attention_output = params.compute_output(
+        o, output_shape=attention_output_shape)
+    return self.layer_output_from_attention_output(context, attention_output,
+                                                   losses)
 
   def compute_bias(self, context, memory_position, x, heads_dims, q):
     """Compute attention bias.
@@ -334,6 +363,47 @@ class SelfAttention(transformer.TransformerLayer):
     return None
 
 
+def enc_dec_attention(self_attention_layer, memory_antecedent, context, x,
+                      losses):
+  """Multi-head attention over the encoder outputs."""
+  memory_input_dim = memory_antecedent.shape[-1]
+  if memory_input_dim != context.model.model_dim:
+    raise NotImplementedError(
+        "TODO(noam): support different model_dim in encoder and decoder.")
+  params = self_attention_layer.make_params(context)
+  q = params.compute_q(x)
+  if context.mode == "incremental":
+    k, v, memory_length = context.get_constant_state()
+  else:
+    m = memory_antecedent
+    if self_attention_layer.shared_kv:
+      kv = params.compute_kv(m)
+      k = kv
+      v = kv
+    else:
+      k = params.compute_k(m)
+      v = params.compute_v(m)
+    memory_length, = [d for d in m.shape.dims if d.name == "memory_length"]
+    if context.mode == "first_part":
+      context.record_constant_state((k, v, memory_length))
+  if context.encoder_sequence_id and context.sequence_id:
+    visible = mtf.equal(context.sequence_id, context.encoder_sequence_id)
+    bias = attention.visibility_mask_to_attention_bias(visible,
+                                                       context.activation_dtype)
+  else:
+    bias = None
+  a = attention.attention(
+      q, k, v, memory_length, self_attention_layer.kv_dim,
+      self_attention_layer.kv_dim, bias,
+      **self_attention_layer.attention_kwargs_from_context(context))
+  attention_output_shape = self_attention_layer.expected_attention_output_shape(
+      x, params)
+  attention_output = params.compute_output(
+      a, output_shape=attention_output_shape)
+  return self_attention_layer.layer_output_from_attention_output(
+      context, attention_output, losses)
+
+
 @gin.configurable
 class EncDecAttention(SelfAttention):
   """Multi-head attention over encoder output."""
@@ -343,41 +413,8 @@ class EncDecAttention(SelfAttention):
 
   def call(self, context, x, losses=None):
     """Call the layer."""
-    memory_antecedent = self._get_memory_antecedent(context)
-    memory_input_dim = memory_antecedent.shape[-1]
-    if memory_input_dim != context.model.model_dim:
-      raise NotImplementedError(
-          "TODO(noam): support different model_dim in encoder and decoder.")
-    params = self.make_params(context)
-    q = params.compute_q(x)
-    if context.mode == "incremental":
-      k, v, memory_length = context.get_constant_state()
-    else:
-      m = memory_antecedent
-      if self.shared_kv:
-        kv = params.compute_kv(m)
-        k = kv
-        v = kv
-      else:
-        k = params.compute_k(m)
-        v = params.compute_v(m)
-      memory_length, = [d for d in m.shape.dims if d.name == "memory_length"]
-      if context.mode == "first_part":
-        context.record_constant_state((k, v, memory_length))
-    if context.encoder_sequence_id and context.sequence_id:
-      visible = mtf.equal(context.sequence_id, context.encoder_sequence_id)
-      bias = attention.visibility_mask_to_attention_bias(
-          visible, context.activation_dtype)
-    else:
-      bias = None
-    o = attention.attention(
-        q, k, v,
-        memory_length,
-        self.kv_dim,
-        self.kv_dim,
-        bias,
-        **self.attention_kwargs_from_context(context))
-    return params.compute_output(o, output_shape=x.shape)
+    return enc_dec_attention(self, self._get_memory_antecedent(context),
+                             context, x, losses)
 
 
 @gin.configurable
