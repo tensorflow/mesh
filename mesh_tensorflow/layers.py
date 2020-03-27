@@ -396,7 +396,7 @@ def separable_conv1d(x,
 
 def conv2d(x, output_dim, filter_size=(3, 3),
            strides=(1, 1), padding="SAME", filter_initializer=None,
-           variable_dtype=None, name=None):
+           variable_dtype=None, name=None, depthwise=False):
   """2D Convolution.
 
   Args:
@@ -414,7 +414,7 @@ def conv2d(x, output_dim, filter_size=(3, 3),
   """
   fh_dim = mtf.Dimension("fh", filter_size[0])
   fw_dim = mtf.Dimension("fw", filter_size[1])
-  input_dim = x.shape[-1]
+  input_dim = 1 if depthwise else x.shape[-1]
   with tf.variable_scope(name, default_name="conv2d"):
     if variable_dtype is None:
       variable_dtype = mtf.VariableDType(activation_dtype=x.dtype)
