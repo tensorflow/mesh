@@ -952,17 +952,20 @@ class UTLayerStack(TransformerLayer):
 class LayerStack(TransformerLayer):
   """A stack of layers with residual connections and layer norms."""
 
-  def __init__(self, layers, dropout_rate=0.0, norm_epsilon=1e-6):
+  def __init__(self, layers, dropout_rate=0.0, norm_epsilon=1e-6,
+               recompute_grads=False):
     """Create a LayerStack.
 
     Args:
       layers: a list of TransformerLayer
       dropout_rate: a floating-point number
       norm_epsilon: a floating-point number
+      recompute_grads: a boolean
     """
     self._layers = layers
     self._dropout_rate = dropout_rate
     self._norm_epsilon = norm_epsilon
+    self._recompute_grads = recompute_grads
 
   def call(self, context, x):
     """Call the layer stack."""
@@ -980,13 +983,12 @@ class LayerStack(TransformerLayer):
       context.layer_outputs.append(x)
     for lnum, layer in enumerate(self._layers):
       with tf.variable_scope(layer.name or ""):
-        norm_x = self._layer_norm(context, (x * mask) if mask else x)
-        with tf.variable_scope(layer.__class__.__name__):
-          y = layer.call(context, norm_x)
-          if y.shape != x.shape:
-            raise ValueError("Layer %s returned misshaped output x=%s y=%s"
-                             % (layer.__class__.__name__, x, y))
-        x += self._dropout(context, y)
+        if self._recompute_grads:
+          def fn(x, l=layer, c=context, m=mask):
+            return self._layer_fn(x, l, c, m)
+          x = mtf.recompute_grad(fn, [x])
+        else:
+          x = self._layer_fn(x, layer, context, mask)
       if context.layer_outputs is not None and lnum != len(self._layers) - 1:
         context.layer_outputs.append(x)
       context.layer_index += 1
@@ -997,6 +999,32 @@ class LayerStack(TransformerLayer):
     if context.layer_outputs is not None:
       context.layer_outputs.append(x)
     return x
+
+  @property
+  def _layer_fn_add_residual(self):
+    return True
+
+  def _layer_fn(self, x, layer, context, mask):
+    """Helper method for executing a layer and the stuff around it.
+
+    Args:
+      x: a Tensor
+      layer: a Layer
+      context: a Context
+      mask: an optional Tensor
+    Returns:
+      a Tensor
+    """
+    norm_x = self._layer_norm(context, (x * mask) if mask else x)
+    with tf.variable_scope(layer.__class__.__name__):
+      y = layer.call(context, norm_x)
+      if y.shape != x.shape:
+        raise ValueError("Layer %s returned misshaped output x=%s y=%s"
+                         % (layer.__class__.__name__, x, y))
+    y = self._dropout(context, y)
+    if self._layer_fn_add_residual:
+      y += x
+    return y
 
   def _dropout(self, context, x):
     if context.train and self._dropout_rate > 0:
@@ -1016,6 +1044,56 @@ class LayerStack(TransformerLayer):
   @property
   def layers(self):
     return self._layers
+
+
+@gin.configurable
+class ReversibleLayerStack(LayerStack):
+  """A version of LayerStack that uses a revnet.
+
+  This should be very memory-efficient if LayerStack.recompute_grads
+  is set to True.
+
+  "Reformer" https://arxiv.org/abs/2001.04451 uses something like this.
+  """
+
+  def call(self, context, x):
+    """Call the layer stack."""
+    if isinstance(context.sequence_id, mtf.Tensor):
+      # We use this mask to zero out the padding regions at each layer.
+      # This "fixes" a bug where extreme values leak from the padding into the
+      # non-padding regions.
+      # TODO(noam): undertand this better and make a more principled fix.
+      mask = mtf.cast(
+          mtf.not_equal(context.sequence_id, 0), context.activation_dtype)
+    else:
+      mask = None
+    x = self._dropout(context, x)
+    if context.layer_outputs is not None:
+      context.layer_outputs.append(x)
+    x1, x1_backwards, x2, x2_backwards = x, None, x, None
+    for lnum, layer in enumerate(self._layers):
+      with tf.variable_scope(layer.name or ""):
+        def fn(x, l=layer, c=context, m=mask):
+          return self._layer_fn(x, l, c, m)
+        x1, x1_backwards, x2, x2_backwards = (
+            mtf.layers.reversible_half_residual_and_swap(
+                x1, x1_backwards, x2, x2_backwards, fn,
+                recompute_grads=self._recompute_grads))
+      if context.layer_outputs is not None and lnum != len(self._layers) - 1:
+        context.layer_outputs.append(x)
+      context.layer_index += 1
+    x = x1 + x2
+    x = self._layer_norm(context, x, name="final_layer_norm")
+    x = self._dropout(context, x)
+    if mask:
+      x *= mask
+    if context.layer_outputs is not None:
+      context.layer_outputs.append(x)
+    return x
+
+  @property
+  def _layer_fn_add_residual(self):
+    return False
 
 
 def layer_norm(context, x, norm_epsilon, name=None, model_dim=None):
@@ -2146,7 +2224,7 @@ class StudentTeacher(object):
 # gin-configurable constructors
 @gin.configurable
 def make_layer_stack(layers=gin.REQUIRED,
-                     use_universal_transformer=False,
+                     layer_stack_cls=LayerStack,
                      num_layers=6,
                      block_scope=True):
   """Configurable layer stack.
@@ -2167,7 +2245,7 @@ def make_layer_stack(layers=gin.REQUIRED,
 
   Args:
     layers: a list (see above)
-    use_universal_transformer: whether to use universal transformer layers
+    layer_stack_cls: a class, e.g. LayerStack or ReversibleLayerStack
     num_layers: an integer
     block_scope: a bool, if True then use scopes of the format
       ```
@@ -2208,8 +2286,7 @@ def make_layer_stack(layers=gin.REQUIRED,
       layer = cls(**kwargs)
       layer.set_name(name)
       layer_stack.append(layer)
-  use_layer_stack = UTLayerStack if use_universal_transformer else LayerStack
-  return use_layer_stack(layer_stack)
+  return layer_stack_cls(layer_stack)
 
 
 @gin.configurable

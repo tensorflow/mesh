@@ -19,6 +19,7 @@ from __future__ import division
 from __future__ import print_function
 
 import collections
+import copy
 import functools
 import itertools
 import operator
@@ -382,6 +383,7 @@ class Graph(object):
     # Maps a name used in the graph to the next id to use for that name.
     self._names_in_use = {}
     self.name_to_variable = {}
+    self.captured_variable_scope = tf.get_variable_scope()
 
   def __repr__(self):
     return self.to_string
@@ -599,6 +601,71 @@ class Graph(object):
     self._trainable_variables = [
         v for v in self._trainable_variables if v not in variables
     ]
+
+  def clone_operations(self, ops, input_mapping):
+    """Clone a portion of the graph, but with different inputs.
+
+    The differnt inputs are specified by the `input_mapping` dictionary, which
+    maps from input Tensor in the original operations to input Tensor in the
+    cloned operations.  If an original operation uses an external input that is
+    not in `input_mapping`, then the original input is used for the cloned
+    operation.
+
+    The function returns a list of cloned operations as well an
+    `extended_mapping` dictionary which consits of the union of the input
+    mapping and the map from original-operation-output to
+    cloned-operation-output.
+
+    Variables and Random operations are not cloned.
+
+    Args:
+      ops: a list of operations
+      input_mapping: a dictionary from Tensor to Tensor
+    Returns:
+      cloned_operations: a list of operations
+      extended_mapping: a dictionary from Tensor to Tensor
+    """
+    # pylint: disable=protected-access
+    mapping = copy.copy(input_mapping)
+    prev_num_operations = len(self.operations)
+    for op in ops:
+      if isinstance(op, Variable):
+        continue
+      if isinstance(op, RandomOperation):
+        # The random values will be copied instead of recomputed.
+        # TODO(noam): Use stateless_random to allow for recompute.
+        tf.logging.warning(
+            "Not cloning random operation, so as to ensure the same values.")
+        continue
+      new_op = copy.copy(op)
+      # new_op._name = self.unique_name(op.name)
+      self._operations.append(new_op)
+      new_op._inputs = [mapping.get(t, t) for t in op._inputs]
+      new_op._outputs = []
+      for i, t in enumerate(op.outputs):
+        new_t = Tensor(new_op, t.shape, t.dtype, t.name, i)
+        new_t.usable = True
+        new_op._outputs.append(new_t)
+        if t in mapping:
+          raise ValueError(
+              "input mapping should not contain any of the outputs"
+              " of the cloned operations")
+        mapping[t] = new_t
+    # pylint: enable=protected-access
+    return self.operations[prev_num_operations:], mapping
+
+  def capture_operations(self, fn):
+    """Run a function and capture the list of operations it generates.
+
+    Args:
+      fn: a function taking no arguments
+    Returns:
+      fn_output: the function output
+      captured_operations: a list of Operation
+    """
+    n = len(self.operations)
+    y = fn()
+    return y, self.operations[n:]
 
 
 class Lowering(object):
@@ -1346,6 +1413,9 @@ class Tensor(object):
     if name is None:
       name = self.operation.name + ":" + str(index)
     self._name = name
+    # A flag that we can turn off to assert that no one uses the tensor
+    #   as the input to an operation.
+    self.usable = True
 
   @property
   def shape(self):
@@ -1440,7 +1510,7 @@ class Operation(object):
       if not inputs:
         raise ValueError("mesh must be specified if no inputs")
       mesh = inputs[0].mesh
-    self._inputs = inputs
+    self._inputs = inputs[:]
     self._outputs = []
     self._mesh = mesh
     # In a default operation, all dimensions are splittable.
@@ -1449,6 +1519,9 @@ class Operation(object):
     assert name is not None
     self._name = mesh.graph.unique_name(name)
     mesh.graph.operations.append(self)
+    for t in inputs:
+      if not t.usable:
+        raise ValueError("Operation %s has unusable input %s" % (self, t))
 
   @property
   def graph(self):
@@ -3889,6 +3962,9 @@ class Variable(Operation):
     if trainable:
       self.graph.trainable_variables.append(self)
 
+  def __repr__(self):
+    return "Variable(%s)" % self.value
+
   def lower(self, lowering):
     mesh_impl = lowering.mesh_impl(self)
     with utils.outside_all_rewrites():
@@ -5110,38 +5186,43 @@ def gather(weights, indices, dim, output_shape=None):
                 reduced_dims=[dim], output_shape=output_shape)
 
 
-def gradients(ys, xs, grad_ys=None):
+def gradients(ys, xs, grad_ys=None, operations=None):
   """Compute gradients in dtf.
 
   Args:
     ys: a list of Tensors
     xs: a list of Tensors
     grad_ys: an optional list of Tensors
+    operations: list of operations through which to back-propagate gradients
+      defaults to ys[0].graph.operations
 
   Returns:
     grad_xs: a list of Tensors
   """
-  graph = ys[0].graph
+  if operations is None:
+    operations = ys[0].graph.operations
   if not grad_ys:
     grad_ys = [Constant(y.mesh, 1.0, y.shape, y.dtype).outputs[0] for y in ys]
   # figure out what Tensors are downstream of xs
   downstream = set(xs)
-  for op in graph.operations:
+  for op in operations:
     if op.has_gradient:
       if set(op.inputs) & downstream:
         downstream |= set(op.outputs)
-  tensor_to_gradient = dict(zip(ys, grad_ys))
-  for op in graph.operations[::-1]:
-    grad_outputs = [tensor_to_gradient.get(out) for out in op.outputs]
-    if op.has_gradient and any(grad_outputs) and (set(op.inputs) & downstream):
-      with tf.variable_scope(op.name + "/gradients"):
-        input_grads = op.gradient(grad_outputs)
-        for inp, grad in zip(op.inputs, input_grads):
-          if inp in downstream and grad is not None:
-            if inp in tensor_to_gradient:
-              tensor_to_gradient[inp] += grad
-            else:
-              tensor_to_gradient[inp] = grad
+  tensor_to_gradient = {y: g for y, g in zip(ys, grad_ys) if g is not None}
+  with tf.variable_scope(ys[0].graph.captured_variable_scope):
+    for op in operations[::-1]:
+      grad_outputs = [tensor_to_gradient.get(out) for out in op.outputs]
+      if (op.has_gradient and any(grad_outputs)
+          and (set(op.inputs) & downstream)):
+        with tf.variable_scope(op.name + "/gradients"):
+          input_grads = op.gradient(grad_outputs)
+          for inp, grad in zip(op.inputs, input_grads):
+            if inp in downstream and grad is not None:
+              if inp in tensor_to_gradient:
+                tensor_to_gradient[inp] += grad
+              else:
+                tensor_to_gradient[inp] = grad
   return [tensor_to_gradient.get(x, None) for x in xs]
 
 
@@ -6011,6 +6092,160 @@ def while_loop(cond_fn, body_fn, inputs, num_loop_vars=None,
   return WhileLoopOperation(
       my_cond_fn, my_body_fn, inputs, tf_kwargs=kwargs,
       has_accumulators=has_accumulators).outputs
+
+
+class CustomGradientOperation(Operation):
+  """Operation to implement custom gradients.
+
+  See comments on custom_gradient() below.
+  """
+
+  def __init__(self,
+               explicit_inputs,
+               all_inputs,
+               fn_outputs,
+               grad_fn,
+               forward_operations,
+               name=None):
+    super(CustomGradientOperation, self).__init__(
+        all_inputs + fn_outputs, name=name or "custom_gradient")
+    self._explicit_inputs = explicit_inputs
+    self._all_inputs = all_inputs
+    self._grad_fn = grad_fn
+    self._fn_outputs = fn_outputs
+    self._outputs = [Tensor(self, x.shape, x.dtype, index=i)
+                     for i, x in enumerate(fn_outputs)]
+    self._forward_operations = forward_operations
+
+  def lower(self, lowering):
+    for fn_output, output in zip(
+        self._fn_outputs, self._outputs):
+      lowering.set_tensor_lowering(output,
+                                   lowering.tensors[fn_output])
+
+  def gradient(self, grad_ys):
+    graph = self._inputs[0].graph
+    old_num_vars = len(graph.all_variables)
+    grads = self._grad_fn(
+        explicit_inputs=self._explicit_inputs,
+        all_inputs=self._all_inputs,
+        forward_operations=self._forward_operations,
+        outputs=self._fn_outputs,
+        output_grads=grad_ys)
+    new_num_vars = len(graph.all_variables)
+    if new_num_vars != old_num_vars:
+      raise ValueError(
+          "new variables created by custom gradient."
+          "Maybe a problem with scope. %s" % (
+              graph.all_variables[old_num_vars:],))
+    for g, t in zip(grads, self._all_inputs):
+      if g is None:
+        tf.logging.warning("No gradient on input %s" % t)
+    return list(grads) + [None] * len(self._fn_outputs)
+
+
+def custom_gradient(fn, grad_fn, explicit_inputs):
+  """Execute a function and call a custom gradient fn on the backward pass.
+
+  `fn` takes positional Tensor arguments and returns a Tensor or a tuple of
+  Tensors.
+
+  `explicit_inputs` is a list of tensors to be passed as positional arguments
+  to the function `fn`.
+
+  `grad_fn` has the following signature:
+    Args:
+      explicit_inputs: the list of Tensors passed to this function and to `fn`
+      all_inputs: a list of tensors beginning with explicit_inputs, but also
+        containing external Tensors used by fn.
+      forward_operations: a list of Operation. (the operations created on the
+        foward pass
+      outputs: the outputs of `fn` from the forward pass
+      output_grads: the gradient Tensors corresponding to those outputs.
+    Returns
+      a list of Tensor/None with the same length as `all_inputs`
+
+  Args:
+    fn: a function taking positional Tensor arguments
+    grad_fn: a function (see above)
+    explicit_inputs: list of Tensors
+  Returns:
+    a list of outputs
+  """
+  graph = explicit_inputs[0].graph
+  outputs, forward_operations = graph.capture_operations(
+      lambda: fn(*explicit_inputs))
+  returns_tuple = isinstance(outputs, tuple)
+  new_outputs = set()
+  new_inputs = set()
+  for op in forward_operations:
+    new_inputs.update(set(op.inputs))
+    if not isinstance(op, Variable):
+      new_outputs.update(set(op.outputs))
+  external_inputs = list(new_inputs - new_outputs - set(explicit_inputs))
+  external_inputs = [t for t in external_inputs if t.dtype.is_floating]
+  all_inputs = explicit_inputs + external_inputs
+  if not returns_tuple:
+    outputs = outputs,
+  ret = CustomGradientOperation(explicit_inputs,
+                                all_inputs,
+                                list(outputs),
+                                grad_fn,
+                                forward_operations).outputs
+  # Make sure no one uses the internals of this function, since the gradients
+  #  will probably not work correctly.
+  for t in new_outputs - set(outputs):
+    t.usable = False
+  return ret if returns_tuple else ret[0]
+
+
+def _recompute_grad_grad(explicit_inputs,
+                         all_inputs,
+                         forward_operations,
+                         outputs,
+                         output_grads,
+                         control_dependencies):
+  """Gradient function used with recompute_grad."""
+  graph = forward_operations[0].graph
+  input_mapping = {t: t for t in all_inputs}
+  if control_dependencies:
+    # we need to outsmart XLA here to force a control dependency
+    zero_with_control_dependency = reduce_sum(output_grads[0] * 1e-30)
+    for t in explicit_inputs:
+      if t.dtype.is_floating:
+        input_mapping[t] += cast(zero_with_control_dependency, t.dtype)
+  mapped_inputs = [input_mapping[t] for t in all_inputs]
+  recomputed_operations, mapping = graph.clone_operations(
+      forward_operations, input_mapping)
+  recomputed_outputs = [mapping[t] for t in outputs]
+  input_grads = gradients(
+      ys=recomputed_outputs,
+      xs=mapped_inputs,
+      grad_ys=output_grads,
+      operations=recomputed_operations)
+  for x, g in zip(all_inputs, input_grads):
+    if x.dtype.is_floating and g is None:
+      raise ValueError("_recompute_grad_grad: no gradient for %s" % x)
+  return input_grads
+
+
+def recompute_grad(fn, explicit_inputs, control_dependencies=True):
+  """Execute a function and recompute it on the backwards pass.
+
+  Args:
+    fn: a function taking positional arguments and returning a Tensor or tuple
+      of Tensors.
+    explicit_inputs: inputs to the function
+    control_dependencies: a boolean - whether to force the recomputation to
+      happen after the output gradients.
+  Returns:
+    a Tensor or tuple of Tensors
+  """
+  return custom_gradient(
+      fn,
+      functools.partial(_recompute_grad_grad,
+                        control_dependencies=control_dependencies),
+      explicit_inputs)
 
 
 def where(condition, if_true, if_false, output_shape=None):

@@ -2012,3 +2012,89 @@ def avg_pool3d(x, ksize=(2, 2, 2), name="avg_pool3d"):
   """
   return x if tuple(ksize) == (1, 1, 1) else mtf.PoolOperation(
       x, ksize, strides=ksize, pool_fn_string="AVG_3D", name=name).outputs[0]
+
+
+def _reversible_half_residual_grad(
+    explicit_inputs, all_inputs, forward_operations, outputs, output_grads):
+  """Backpropagation function for a revnet."""
+  x1, _, x2, _ = explicit_inputs
+  extra_inputs = all_inputs[len(explicit_inputs):]
+  _, _, y1, _ = outputs
+  dy2, dy2_backwards, dy1, dy1_backwards = output_grads
+  # last operation should be an addition to produce y1
+  if not isinstance(forward_operations[-1], mtf.AddOperation):
+    raise ValueError("expected an addition here")
+  f_ops = forward_operations[:-1]
+  orig_fx2 = f_ops[-1].outputs[0]
+  orig_x2 = x2
+  if dy2_backwards is not None:
+    x2 = dy2_backwards
+  if dy1_backwards is not None:
+    y1 = dy1_backwards
+  graph = all_inputs[0].graph
+  f_again_ops, mapping = graph.clone_operations(f_ops, {orig_x2: x2})
+  fx2 = mapping[orig_fx2]
+  x1 = y1 - fx2
+  grads = mtf.gradients(ys=[fx2], xs=[x2] + extra_inputs, grad_ys=[dy1],
+                        operations=f_again_ops)
+  dx2 = dy2 + grads[0]
+  extra_inputs_grads = grads[1:]
+  dx1 = dy1
+  return [dx1, x1, dx2, x2] + extra_inputs_grads
+
+
+def _half_residual_and_swap(x1, x1_backwards, x2, x2_backwards, f=None):
+  return x2, x2_backwards, x1 + f(x2), x1_backwards
+
+
+def reversible_half_residual_and_swap(x1,
+                                      x1_backwards,
+                                      x2,
+                                      x2_backwards,
+                                      f,
+                                      recompute_grads=True):
+  """Building block of a revnet.
+
+  https://arxiv.org/abs/1707.04585
+
+  All the inputs and output Tensors have the same shape and dtype.
+
+  The forward computation is:
+    y1 = x1 + f(x2)
+    y2 = x2
+
+  The x1_backwards and x2_backwards tensors are used by backpropagation.
+  None should be passed for the first layer, then the outputs of each layer
+  should be passed to the next.
+
+  Example usage:
+  x1, x1_backwards, x2, x2_backwards = x, None, x, None
+  for f in my_functions:
+    x1, x1_backwards, x2, x2_backwards = mtf.layers.reversible_half_residual(
+      x1, x1_backwards, x2, x2_backwards)
+  y = (x1 + x2) / 2
+
+  Args:
+    x1: a Tensor
+    x1_backwards: a Tensor or None
+    x2: a Tensor
+    x2_backwards: a Tensor or None
+    f: a function from Tensor to Tensor
+    recompute_grads: a boolean
+  Returns:
+    y2: a Tensor
+    y2_backwards: a Tensor
+    y1: a Tensor
+    y1_backwards: a Tensor
+  """
+  if recompute_grads:
+    if x1_backwards is None:
+      x1_backwards = mtf.zeros_like(x1)
+    if x2_backwards is None:
+      x2_backwards = mtf.zeros_like(x2)
+    return mtf.custom_gradient(
+        functools.partial(_half_residual_and_swap, f=f),
+        _reversible_half_residual_grad,
+        [x1, x1_backwards, x2, x2_backwards])
+  else:
+    return _half_residual_and_swap(x1, x1_backwards, x2, x2_backwards, f)

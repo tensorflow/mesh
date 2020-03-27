@@ -271,18 +271,6 @@ class SelfAttention(transformer.TransformerLayer):
     """
     min_relative_position = self.min_relative_position(context)
     max_relative_position = self.max_relative_position(context)
-    # we can often cache the result of this function between similar layers
-    can_cache = (
-        self.relative_attention_type is None or
-        self.relative_attention_type == "bias_shared")
-    if can_cache:
-      cache_key = ("self_attention_mask",
-                   min_relative_position,
-                   max_relative_position,
-                   self.relative_attention_type,
-                   tuple(heads_dims))
-      if cache_key in context.cache:
-        return context.cache[cache_key]
     biases = []
     relative_position = memory_position - context.position
     if min_relative_position is not None:
@@ -325,9 +313,21 @@ class SelfAttention(transformer.TransformerLayer):
       if (self.relative_attention_type == "bias" or
           self.relative_attention_type == "bias_shared"):
         bias_shape = context.model.ensemble_dims + heads_dims + [buckets_dim]
-        values = mtf.get_variable(
-            context.mesh, "relative_attention_bias",
-            bias_shape, dtype=context.variable_dtype)
+        values = None
+        cache = self.relative_attention_type == "bias_shared"
+        if cache:
+          cache_key = ("self_attention_bias",
+                       min_relative_position,
+                       max_relative_position,
+                       tuple(heads_dims))
+          if cache_key in context.cache:
+            values = context.cache[cache_key]
+        if values is None:
+          values = mtf.get_variable(
+              context.mesh, "relative_attention_bias",
+              bias_shape, dtype=context.variable_dtype)
+        if cache:
+          context.cache[cache_key] = values
       elif self.relative_attention_type == "contextual":
         values = layers.dense(
             q, reduced_dims=[self.kv_dim],
@@ -340,10 +340,7 @@ class SelfAttention(transformer.TransformerLayer):
         raise ValueError("unrecognized relative_attention_type \"%s\"" %
                          self.relative_attention_type)
       biases.append(mtf.gather(values, rp_bucket, buckets_dim))
-    ret = mtf.add_n(biases) if biases else None
-    if can_cache:
-      context.cache[cache_key] = ret
-    return ret
+    return mtf.add_n(biases) if biases else None
 
   @property
   def kv_dim(self):

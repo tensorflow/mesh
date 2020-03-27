@@ -591,6 +591,37 @@ class TopKTest(tf.test.TestCase):
                         self.evaluate(expected_d_inputs))
 
 
+class RecomputeGradTest(tf.test.TestCase):
+
+  def testRecomputeGrad(self):
+    graph = mtf.Graph()
+    mesh = mtf.Mesh(graph, "my_mesh")
+    # let's differentiate x^2 + x
+    # dy/dx = 2x+1
+    def x_squared_plus_x(x):
+      return x * x + x
+    x = tf.constant([5, 10], dtype=tf.float32)
+    dy = tf.constant([2, 3], dtype=tf.float32)
+    two = mtf.Dimension("two", 2)
+    expected_y = tf.constant([30, 110], dtype=tf.float32)
+    expected_dx = tf.constant([22, 63], dtype=tf.float32)
+    mtf_x = mtf.import_fully_replicated(
+        mesh, x, shape=mtf.Shape([two]))
+    mtf_dy = mtf.import_tf_tensor(
+        mesh, dy, shape=mtf.Shape([two]))
+    mtf_y = mtf.recompute_grad(x_squared_plus_x, [mtf_x])
+    [mtf_dx] = mtf.gradients([mtf_y], [mtf_x], [mtf_dy])
+    mesh_impl = mtf.placement_mesh_impl.PlacementMeshImpl(
+        shape="processors:2", layout="two:processors", devices=["", ""])
+    lowering = mtf.Lowering(graph, {mesh: mesh_impl})
+    actual_y = lowering.export_to_tf_tensor(mtf_y)
+    actual_dx = lowering.export_to_tf_tensor(mtf_dx)
+    self.assertAllEqual(self.evaluate(actual_y),
+                        self.evaluate(expected_y))
+    self.assertAllEqual(self.evaluate(actual_dx),
+                        self.evaluate(expected_dx))
+
+
 if __name__ == "__main__":
   tf.disable_v2_behavior()
   tf.enable_eager_execution()
