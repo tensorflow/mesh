@@ -1839,6 +1839,39 @@ def gelu(x):
   return x * cdf
 
 
+def elu(x):
+  """Exponential Linear Unit.
+
+  This is a smoother version of the RELU.
+  Original paper: https://arxiv.org/abs/1511.07289
+  Args:
+    x: float Tensor to perform activation.
+
+  Returns:
+    'x' with the ELU activation applied.
+  """
+  return cwise(tf.nn.elu, [x], name="elu")
+
+
+def selu(x):
+  """Scaled Exponential Linear Unit.
+
+  This is a smoother version of the RELU.
+  Original paper: https://arxiv.org/abs/1706.02515
+  Args:
+    x: float Tensor to perform activation.
+
+  Returns:
+    'x' with the SELU activation applied.
+  """
+  return cwise(tf.nn.selu, [x], name="selu")
+
+
+def softplus(x):
+  """Softplus activation."""
+  return cwise(tf.math.softplus, [x], name="softplus")
+
+
 def reciprocal(x, name="reciprocal"):
   return cwise(
       tf.math.reciprocal, [x], name=name,
