@@ -953,7 +953,7 @@ class LayerStack(TransformerLayer):
   """A stack of layers with residual connections and layer norms."""
 
   def __init__(self, layers, dropout_rate=0.0, norm_epsilon=1e-6,
-               recompute_grads=False):
+               recompute_grads=False, use_layer_norm=True, use_rezero=False):
     """Create a LayerStack.
 
     Args:
@@ -961,11 +961,15 @@ class LayerStack(TransformerLayer):
       dropout_rate: a floating-point number
       norm_epsilon: a floating-point number
       recompute_grads: a boolean
+      use_layer_norm: a boolean
+      use_rezero: a boolean (rezero, https://arxiv.org/abs/2003.04887)
     """
     self._layers = layers
     self._dropout_rate = dropout_rate
     self._norm_epsilon = norm_epsilon
     self._recompute_grads = recompute_grads
+    self._use_layer_norm = use_layer_norm
+    self._use_rezero = use_rezero
 
   def call(self, context, x):
     """Call the layer stack."""
@@ -992,7 +996,8 @@ class LayerStack(TransformerLayer):
       if context.layer_outputs is not None and lnum != len(self._layers) - 1:
         context.layer_outputs.append(x)
       context.layer_index += 1
-    x = self._layer_norm(context, x, name="final_layer_norm")
+    if self._use_layer_norm:
+      x = self._layer_norm(context, x, name="final_layer_norm")
     x = self._dropout(context, x)
     if mask:
       x *= mask
@@ -1015,7 +1020,8 @@ class LayerStack(TransformerLayer):
     Returns:
       a Tensor
     """
-    norm_x = self._layer_norm(context, (x * mask) if mask else x)
+    if self._use_layer_norm:
+      norm_x = self._layer_norm(context, (x * mask) if mask else x)
     with tf.variable_scope(layer.__class__.__name__):
       y = layer.call(context, norm_x)
       if y.shape != x.shape:
@@ -1023,7 +1029,12 @@ class LayerStack(TransformerLayer):
                          % (layer.__class__.__name__, x, y))
     y = self._dropout(context, y)
     if self._layer_fn_add_residual:
-      y += x
+      if self._use_rezero:
+        rezero_weight = tf.get_variable(
+            name="rezero_weight", shape=[1], initializer=tf.zeros_initializer)
+        y = x + rezero_weight * y
+      else:
+        y += x
     return y
 
   def _dropout(self, context, x):
