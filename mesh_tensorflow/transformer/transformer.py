@@ -244,6 +244,12 @@ class Context(object):
   def activation_dtype(self):
     return self.variable_dtype.activation_dtype
 
+  @property
+  def encoder_length_dim(self):
+    ret, = [d for d in self.encoder_output.shape.dims
+            if d.name == "memory_length"]
+    return ret
+
   def get_states(self, n):
     """Get the next n recurrent states.
 
@@ -1214,8 +1220,10 @@ class Unitransformer(object):
     """
     self.layer_stack = layer_stack
     self.model_dim = mtf.Dimension("d_model", d_model)
+    self.input_vocab_size_unpadded = input_vocab_size
     self.input_vocab_dim = mtf.Dimension(
         "vocab", _round_up_to_multiple(input_vocab_size, vocab_divisor))
+    self.output_vocab_size_unpadded = output_vocab_size
     if output_vocab_size:
       self.output_vocab_dim = mtf.Dimension(
           "vocab", _round_up_to_multiple(output_vocab_size, vocab_divisor))
