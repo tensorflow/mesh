@@ -221,6 +221,8 @@ class Context(object):
     self.losses = losses
     self.initial_position = initial_position
     self.layer_outputs = layer_outputs
+    if self.layer_outputs is None:
+      self.layer_outputs = []
     self.encoder_output = encoder_output
     self.encoder_sequence_id = encoder_sequence_id
     self.constant_states = constant_states
@@ -608,7 +610,7 @@ class UTLayerStack(TransformerLayer):
             raise ValueError("Layer %s returned misshaped output x=%s y=%s" %
                              (layer.__class__.__name__, x, y))
         x += self._dropout(context, y)
-      if context.layer_outputs is not None and lnum != len(self._layers) - 1:
+      if lnum != len(self._layers) - 1:
         context.layer_outputs.append(x)
       context.layer_index += 1
     return x
@@ -899,8 +901,7 @@ class UTLayerStack(TransformerLayer):
     else:
       mask = None
     x = self._dropout(context, x)
-    if context.layer_outputs is not None:
-      context.layer_outputs.append(x)
+    context.layer_outputs.append(x)
     if self.mix_with_transformer_before_ut:
       for _ in range(self.num_vanilla_transformer_layers):
         x = self.vanilla_transformer_layer(context, x, mask)
@@ -919,8 +920,7 @@ class UTLayerStack(TransformerLayer):
     x = self._dropout(context, x)
     if mask:
       x *= mask
-    if context.layer_outputs is not None:
-      context.layer_outputs.append(x)
+    context.layer_outputs.append(x)
     return x
 
   def _dropout(self, context, x):
@@ -958,92 +958,140 @@ class UTLayerStack(TransformerLayer):
 class LayerStack(TransformerLayer):
   """A stack of layers with residual connections and layer norms."""
 
-  def __init__(self, layers, dropout_rate=0.0, norm_epsilon=1e-6,
-               recompute_grads=False, use_layer_norm=True, use_rezero=False):
+  def __init__(self,
+               layers,
+               sublayers_initial=None,
+               sublayers_per_layer=None,
+               sublayers_final=None,
+               dropout_rate=0.0,
+               norm_epsilon=1e-6,
+               recompute_grads=False):
     """Create a LayerStack.
+
+    `layers` is a list of TransformerLayer objects representing the
+    building blocks of the transformer model, e.g.
+    transformer_layers.SelfAttention.
+
+    In addition, there are a bunch of other transformations which occur around
+    the layer body, and at the beginning and the end of the layer stack.  We
+    call these "sublayers".  They are configurable with the `sublayers_initial`,
+    `sublayers_per_layer`, and `sublayers_final` arguments, each of which takes
+    an optional list of sublayer functions.
+
+    Each of the sublayer functions has signature:
+      x, layer_stack, context -> y
+    where x is the input tensor and y is the output tensor.
+
+    The default sublayers are listed in:
+
+      LayerStack._default_sublayers_initial
+      LayerStack._default_sublayers_per_layer
+      LayerStack._default_sublayers_final
+
+    Refer to these as examples of how to write and call your own sublayer
+    functions.
 
     Args:
       layers: a list of TransformerLayer
+      sublayers_initial: an optional list of sublayer functions
+      sublayers_per_layer: an optional list of sublayer functions
+      sublayers_final: an optional list of sublayer functions
       dropout_rate: a floating-point number
       norm_epsilon: a floating-point number
       recompute_grads: a boolean
-      use_layer_norm: a boolean
-      use_rezero: a boolean (rezero, https://arxiv.org/abs/2003.04887)
     """
     self._layers = layers
+    self._sublayers_initial = (
+        sublayers_initial or self._default_sublayers_initial)
+    self._sublayers_per_layer = (
+        sublayers_per_layer or self._default_sublayers_per_layer)
+    self._sublayers_final = (
+        sublayers_final or self._default_sublayers_final)
     self._dropout_rate = dropout_rate
     self._norm_epsilon = norm_epsilon
     self._recompute_grads = recompute_grads
-    self._use_layer_norm = use_layer_norm
-    self._use_rezero = use_rezero
 
   def call(self, context, x):
     """Call the layer stack."""
-    if isinstance(context.sequence_id, mtf.Tensor):
-      # We use this mask to zero out the padding regions at each layer.
-      # This "fixes" a bug where extreme values leak from the padding into the
-      # non-padding regions.
-      # TODO(noam): undertand this better and make a more principled fix.
-      mask = mtf.cast(
-          mtf.not_equal(context.sequence_id, 0), context.activation_dtype)
-    else:
-      mask = None
-    x = self._dropout(context, x)
-    if context.layer_outputs is not None:
-      context.layer_outputs.append(x)
+    x = self._call_sublayers(self._sublayers_initial, x, context)
+    context.layer_outputs.append(x)
     for lnum, layer in enumerate(self._layers):
       with tf.variable_scope(layer.name or ""):
         if self._recompute_grads:
-          def fn(x, l=layer, c=context, m=mask):
-            return self._layer_fn(x, l, c, m)
+          def fn(x, l=layer, c=context):
+            return self._layer_fn(x, l, c)
           x = mtf.recompute_grad(fn, [x])
         else:
-          x = self._layer_fn(x, layer, context, mask)
-      if context.layer_outputs is not None and lnum != len(self._layers) - 1:
+          x = self._layer_fn(x, layer, context)
+      if lnum != len(self._layers) - 1:
         context.layer_outputs.append(x)
       context.layer_index += 1
-    if self._use_layer_norm:
-      x = self._layer_norm(context, x, name="final_layer_norm")
-    x = self._dropout(context, x)
-    if mask:
-      x *= mask
-    if context.layer_outputs is not None:
-      context.layer_outputs.append(x)
+    x = self._call_sublayers(self._sublayers_final, x, context)
+    context.layer_outputs.append(x)
     return x
 
   @property
-  def _layer_fn_add_residual(self):
-    return True
+  def _default_sublayers_initial(self):
+    return [sublayer_dropout]
 
-  def _layer_fn(self, x, layer, context, mask):
-    """Helper method for executing a layer and the stuff around it.
+  @property
+  def _default_sublayers_per_layer(self):
+    return [sublayer_mask_padding,
+            sublayer_layer_norm,
+            sublayer_call_layer,
+            sublayer_dropout,
+            sublayer_residual]
+
+  @property
+  def _default_sublayers_final(self):
+    return [sublayer_final_layer_norm,
+            sublayer_dropout,
+            sublayer_mask_padding]
+
+  def mask_padding(self, context, x):
+    """Zero out padding regions.
+
+    This "fixes" a bug where extreme values leak from the padding into the
+    non-padding regions.
+    TODO(noam): undertand this better and make a more principled fix.
+
+    Args:
+      context: a Tensor
+      x: a Tensor
+    Returns:
+      a Tensor
+    """
+    if isinstance(context.sequence_id, mtf.Tensor):
+      return x * mtf.cast(
+          mtf.not_equal(context.sequence_id, 0), context.activation_dtype)
+    else:
+      return x
+
+  def _call_sublayers(self, sublayers, x, context):
+    for s in sublayers:
+      x = s(x, self, context)
+    return x
+
+  def _layer_fn(self, x, layer, context):
+    """Call the layer and its associated sublayers.
 
     Args:
       x: a Tensor
       layer: a Layer
       context: a Context
-      mask: an optional Tensor
     Returns:
       a Tensor
     """
-    if self._use_layer_norm:
-      norm_x = self._layer_norm(context, (x * mask) if mask else x)
-    with tf.variable_scope(layer.__class__.__name__):
-      y = layer.call(context, norm_x)
-      if y.shape != x.shape:
-        raise ValueError("Layer %s returned misshaped output x=%s y=%s"
-                         % (layer.__class__.__name__, x, y))
-    y = self._dropout(context, y)
-    if self._layer_fn_add_residual:
-      if self._use_rezero:
-        rezero_weight = tf.get_variable(
-            name="rezero_weight", shape=[1], initializer=tf.zeros_initializer)
-        y = x + rezero_weight * y
-      else:
-        y += x
+    context.current_layer = layer
+    context.current_layer_input = x
+    y = self._call_sublayers(self._sublayers_per_layer, x, context)
+    if y.shape != x.shape:
+      raise ValueError(
+          "Layer %s returned misshaped output x=%s y=%s"
+          % (layer.__class__.__name__, x, y))
     return y
 
-  def _dropout(self, context, x):
+  def dropout(self, context, x):
     if context.train and self._dropout_rate > 0:
       return mtf.dropout(
           x, rate=self._dropout_rate,
@@ -1051,7 +1099,7 @@ class LayerStack(TransformerLayer):
     else:
       return x
 
-  def _layer_norm(self, context, x, name=None):
+  def layer_norm(self, context, x, name=None):
     return layer_norm(context, x, self._norm_epsilon, name)
 
   @property
@@ -1061,6 +1109,53 @@ class LayerStack(TransformerLayer):
   @property
   def layers(self):
     return self._layers
+
+
+@gin.configurable
+def sublayer_call_layer(x, layer_stack, context):
+  del layer_stack
+  layer = context.current_layer
+  with tf.variable_scope(layer.__class__.__name__):
+    return layer.call(context, x)
+
+
+@gin.configurable
+def sublayer_mask_padding(x, layer_stack, context):
+  return layer_stack.mask_padding(context, x)
+
+
+@gin.configurable
+def sublayer_layer_norm(x, layer_stack, context):
+  return layer_stack.layer_norm(context, x)
+
+
+@gin.configurable
+def sublayer_final_layer_norm(x, layer_stack, context):
+  return layer_stack.layer_norm(context, x, name="final_layer_norm")
+
+
+@gin.configurable
+def sublayer_residual(x, layer_stack, context):
+  del layer_stack
+  return x + context.current_layer_input
+
+
+@gin.configurable
+def sublayer_dropout(x, layer_stack, context):
+  return layer_stack.dropout(context, x)
+
+
+@gin.configurable
+def sublayer_rezero(x, layer_stack, context, initial_value=0.0):
+  """Multiply by zero-initialized scalar (residual not included)."""
+  del layer_stack
+  rezero_weight = mtf.get_variable(
+      x.mesh, "rezero_weight", shape=context.model.ensemble_dims,
+      dtype=context.variable_dtype,
+      initializer=tf.constant_initializer(initial_value))
+  return x * rezero_weight
+
+
 
 
 @gin.configurable
@@ -1075,46 +1170,36 @@ class ReversibleLayerStack(LayerStack):
 
   def call(self, context, x):
     """Call the layer stack."""
-    if isinstance(context.sequence_id, mtf.Tensor):
-      # We use this mask to zero out the padding regions at each layer.
-      # This "fixes" a bug where extreme values leak from the padding into the
-      # non-padding regions.
-      # TODO(noam): undertand this better and make a more principled fix.
-      mask = mtf.cast(
-          mtf.not_equal(context.sequence_id, 0), context.activation_dtype)
-    else:
-      mask = None
-    x = self._dropout(context, x)
-    if context.layer_outputs is not None:
-      context.layer_outputs.append(x)
+    x = self._call_sublayers(self._sublayers_initial, x, context)
+    context.layer_outputs.append(x)
     x1, x1_backwards, x2, x2_backwards = x, None, x, None
     for lnum, layer in enumerate(self._layers):
       with tf.variable_scope(layer.name or ""):
-        def fn(x, l=layer, c=context, m=mask):
-          return self._layer_fn(x, l, c, m)
+        def fn(x, l=layer, c=context):
+          return self._layer_fn(x, l, c)
         x1, x1_backwards, x2, x2_backwards = (
             mtf.layers.reversible_half_residual_and_swap(
                 x1, x1_backwards, x2, x2_backwards, fn,
                 recompute_grads=self._recompute_grads))
-      if context.layer_outputs is not None and lnum != len(self._layers) - 1:
+      if lnum != len(self._layers) - 1:
         context.layer_outputs.append(x)
       context.layer_index += 1
     x = x1 + x2
-    x = self._layer_norm(context, x, name="final_layer_norm")
-    x = self._dropout(context, x)
-    if mask:
-      x *= mask
-    if context.layer_outputs is not None:
-      context.layer_outputs.append(x)
+    x = self._call_sublayers(self._sublayers_final, x, context)
+    context.layer_outputs.append(x)
     return x
 
   @property
-  def _layer_fn_add_residual(self):
-    return False
+  def _default_sublayers_per_layer(self):
+    """No residual, which is handled separately."""
+    return [sublayer_mask_padding,
+            sublayer_layer_norm,
+            sublayer_call_layer,
+            sublayer_dropout]
 
 
 def layer_norm(context, x, norm_epsilon, name=None, model_dim=None):
-  """Layer normalization.
+  """RMS normalization.
 
   Args:
     context: a Context
@@ -1130,13 +1215,10 @@ def layer_norm(context, x, norm_epsilon, name=None, model_dim=None):
   if model_dim is None:
     model_dim = context.model.model_dim
   with tf.variable_scope(name, default_name="layer_norm"):
-    scale_shape = [model_dim]
-    if context.model.ensemble_dim:
-      scale_shape = [context.model.ensemble_dim] + scale_shape
     scale = mtf.get_variable(
         context.mesh,
         "scale",
-        mtf.Shape(scale_shape),
+        mtf.Shape(context.model.ensemble_dims + [model_dim]),
         initializer=tf.ones_initializer(),
         dtype=context.variable_dtype)
     variance = mtf.reduce_mean(mtf.square(x), reduced_dim=model_dim)
@@ -1247,7 +1329,6 @@ class Unitransformer(object):
     self.mesh_shape = mesh_shape
     self.ensemble_dim = (
         mtf.Dimension("ensemble", ensemble) if ensemble else None)
-    self.ensemble_dims = [self.ensemble_dim] if ensemble else []
     self._loss_fn = loss_fn
     self.positional_embedding = positional_embedding
     self.sinusoid_positional_embedding = sinusoid_positional_embedding
@@ -1262,6 +1343,10 @@ class Unitransformer(object):
   @property
   def fully_autoregressive(self):
     return self.autoregressive and not self.input_full_attention
+
+  @property
+  def ensemble_dims(self):
+    return [self.ensemble_dim] if self.ensemble_dim else []
 
   def _compute_loss(self, context, logits, targets, output_vocab_dim):
     """Regular cross entropy loss.
