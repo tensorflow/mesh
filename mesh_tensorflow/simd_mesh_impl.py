@@ -711,19 +711,23 @@ def auto_logical_to_physical_tpu(logical_shape,
 
   Example:
 
-  auto_logical_to_physical_tpu(logical_shape=[16, 8], physical_shape=[8, 8, 2])
+  auto_logical_to_physical_tpu(
+    logical_shape=[16, 8], physical_shape=[8, 8, 1, 2])
 
   Heuristics in this function subject to change.
 
   Args:
     logical_shape: a list of integers
-    physical_shape: a list of integers - typically [X, Y, cores]
+    physical_shape: a list of integers - typically [X, Y, 1, cores]
     return_coordinates: a boolean - return a list of integer lists (coordinates)
        instead of a list of processor indices
 
   Returns:
     logical_to_physical: a permutation of range(product(physical_shape)))
   """
+  tf.logging.info("auto_logical_to_physical_tpu "
+                  "logical_shape=%s physical_shape=%s" %
+                  (logical_shape, physical_shape))
   if mtf.list_product(logical_shape) != mtf.list_product(physical_shape):
     raise ValueError(
         "physical and logical shapes must have the same product "
@@ -738,6 +742,15 @@ def auto_logical_to_physical_tpu(logical_shape,
     if return_coordinates:
       default = [mtf.pnum_to_processor_coordinates(i) for i in default]
     return default
+  if len(physical_shape) == 4 and physical_shape[2] == 1:
+    # This is what we currently expect as the TPU physical shape.
+    # The first two dimensions (in backwards order) correspond to the chip
+    #   number and the last dimension corresponds to two cores on a chip.
+    physical_shape = [physical_shape[1],
+                      physical_shape[0],
+                      physical_shape[3]]
+  else:
+    tf.logging.warning("Unrecognized format for tpu physical shape")
   if len(physical_shape) != 3:
     return _default_value()
   p0, p1, p2 = physical_shape
