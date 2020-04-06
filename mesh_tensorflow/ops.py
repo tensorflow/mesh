@@ -4003,15 +4003,10 @@ class Variable(Operation):
     with utils.outside_all_rewrites():
       sv = mesh_impl.LaidOutVariable(self, mesh_impl)
     lowering.variables[self] = sv
-    # Encourage re-decoding every time the slices are read.
-    # XLA should really be able to rematerilize without this.
-    def to_laid_out_tensor_fn():
-      return mesh_impl.slicewise(
-          tf.cast, sv.laid_out_tensor, self.activation_dtype)
     lowering.set_tensor_lowering(
         self.outputs[0],
-        LazyLaidOutTensor(to_laid_out_tensor_fn,
-                          mesh_impl.slice_shape(self.shape)))
+        mesh_impl.slicewise(
+            tf.cast, sv.laid_out_tensor, self.activation_dtype))
     if self._trainable:
       lowering.add_counter("variables/trainable", self.outputs[0].size)
     else:
@@ -4226,7 +4221,8 @@ def assign(var, new_val, assign_fn=assign_slice, name=None):
   """Assign a new value to a variable.
 
   Args:
-    var: either a Variable operation or its output Tensor.
+    var: either a Variable operation or its output Tensor,
+      or the output of a chain of unary operations starting with a Variable.
     new_val: a Tensor
     assign_fn: a function from
         (mtf.Variable, tf.Variable, tf.Tensor) -> tf.Operation
@@ -4236,8 +4232,11 @@ def assign(var, new_val, assign_fn=assign_slice, name=None):
   Raises:
     ValueError: if var is not a Variable and var.operation is not a Variable
   """
+  # find the original Variable operation.
   if isinstance(var, Tensor):
     var = var.operation
+  while not isinstance(var, Variable) and len(var.inputs) == 1:
+    var = var.inputs[0].operation
   if not isinstance(var, Variable):
     raise ValueError("var must be a mtf.Variable or its output Tensor.")
   return Assign([var], [new_val], assign_fn=assign_fn, name=name)
