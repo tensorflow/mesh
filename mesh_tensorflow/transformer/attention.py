@@ -63,7 +63,7 @@ def attention(q,
   Returns:
     Tensor with shape q.shape - key_dim + value_dim
   """
-  logits = mtf.einsum([q, k], reduced_dims=[key_dim])
+  logits = mtf.layers.us_einsum([q, k], reduced_dims=[key_dim])
   if bias is not None:
     logits += bias
   weights = mtf.softmax(logits, memory_length_dim, extra_logit=extra_logit)
@@ -117,7 +117,7 @@ def hybrid_attention(q,
   Returns:
     Tensor with shape q.shape - key_dim + value_dim
   """
-  logits = mtf.einsum([q, k], reduced_dims=[key_dim])
+  logits = mtf.layers.us_einsum([q, k], reduced_dims=[key_dim])
   if bias is not None:
     logits += bias
 
@@ -207,12 +207,18 @@ class AttentionParams(object):
       k_shape = [memory_input_dim] + self.k_dims
       v_shape = [memory_input_dim] + self.v_dims
       o_shape = self.o_dims + [output_dim]
-    q_init = tf.random_normal_initializer(
-        stddev=(query_input_dim.size * key_dim.size) ** -0.5)
-    kv_init = tf.random_normal_initializer(
-        stddev=memory_input_dim.size ** -0.5)
-    o_init = tf.random_normal_initializer(
-        stddev=mtf.Shape(self.query_heads_dims + [value_dim]).size ** -0.5)
+    if mtf.layers.unit_scaling_convention():
+      init = tf.random_normal_initializer(stddev=1.0)
+      q_init = init
+      kv_init = init
+      o_init = init
+    else:
+      q_init = tf.random_normal_initializer(
+          stddev=(query_input_dim.size * key_dim.size) ** -0.5)
+      kv_init = tf.random_normal_initializer(
+          stddev=memory_input_dim.size ** -0.5)
+      o_init = tf.random_normal_initializer(
+          stddev=mtf.Shape(self.query_heads_dims + [value_dim]).size ** -0.5)
     if ensemble_dim:
       q_shape = [ensemble_dim] + q_shape
       k_shape = [ensemble_dim] + k_shape
@@ -241,7 +247,7 @@ class AttentionParams(object):
       a Tensor with dimensions
          query_heads_dims + {key_dim} + other_dims
     """
-    ret = mtf.einsum(
+    ret = mtf.layers.us_einsum(
         [query_antecedent, self.wq], reduced_dims=[self.query_input_dim])
     if self.combine_dims:
       ret = mtf.replace_dimensions(ret, ret.shape.dims[-1], self.q_dims)
@@ -259,7 +265,7 @@ class AttentionParams(object):
     """
     if not self.shared_kv:
       raise ValueError("compute_kv can only be called with shared_kv")
-    ret = mtf.einsum(
+    ret = mtf.layers.us_einsum(
         [memory_antecedent, self.wkv], reduced_dims=[self.memory_input_dim])
     if self.combine_dims:
       ret = mtf.replace_dimensions(ret, ret.shape.dims[-1], self.k_dims)
@@ -277,7 +283,7 @@ class AttentionParams(object):
     """
     if self.shared_kv:
       raise ValueError("compute_k cannot be called with shared_kv")
-    ret = mtf.einsum(
+    ret = mtf.layers.us_einsum(
         [memory_antecedent, self.wk], reduced_dims=[self.memory_input_dim])
     if self.combine_dims:
       ret = mtf.replace_dimensions(ret, ret.shape.dims[-1], self.k_dims)
@@ -295,7 +301,7 @@ class AttentionParams(object):
     """
     if self.shared_kv:
       raise ValueError("compute_v cannot be called with shared_kv")
-    ret = mtf.einsum(
+    ret = mtf.layers.us_einsum(
         [memory_antecedent, self.wv], reduced_dims=[self.memory_input_dim])
     if self.combine_dims:
       ret = mtf.replace_dimensions(ret, ret.shape.dims[-1], self.v_dims)
@@ -322,7 +328,7 @@ class AttentionParams(object):
     if self.keep_query_heads_dims:
       reduced_dims = [self.value_dim]
 
-    return mtf.einsum(
+    return mtf.layers.us_einsum(
         [o, self.wo], output_shape=output_shape, reduced_dims=reduced_dims)
 
   @property

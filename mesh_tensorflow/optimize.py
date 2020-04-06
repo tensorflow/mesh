@@ -22,6 +22,7 @@ from __future__ import print_function
 
 import re
 import gin
+from mesh_tensorflow import layers
 from mesh_tensorflow import ops_with_redefined_builtins as mtf
 import tensorflow.compat.v1 as tf
 
@@ -364,7 +365,8 @@ class AdafactorOptimizer(Optimizer):
 
   def _learning_rate_default(self, multiply_by_parameter_scale):
     learning_rate = tf.minimum(tf.math.rsqrt(step_num() + 1.0), 0.01)
-    if not multiply_by_parameter_scale:
+    if (not multiply_by_parameter_scale
+        and not layers.unit_scaling_convention()):
       learning_rate *= 0.05
     return learning_rate
 

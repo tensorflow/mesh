@@ -601,19 +601,20 @@ class TransparentEncDecAttention(EncDecAttention):
         [encoder_layer_outputs[0]] +
         encoder_layer_outputs[layers_per_module::layers_per_module],
         dim_name="encoder_module_outputs")
+    stddev = 1.0
+    if not mtf.layers.unit_scaling_convention():
+      stddev *= encoder_module_outputs_dim.size ** -0.5
     w = mtf.get_variable(
         context.mesh,
         "w",
         mtf.Shape([encoder_module_outputs_dim, decoder_module_inputs_dim]),
-        initializer=tf.random_normal_initializer(
-            stddev=(encoder_module_outputs_dim.size *
-                    decoder_module_inputs_dim.size)**-0.5),
+        initializer=tf.random_normal_initializer(stddev=stddev),
         dtype=context.variable_dtype)
     if context.train and self.dropout_rate != 0.0:
       w = mtf.dropout(w, 1.0 - self.dropout_rate)
     s = mtf.softmax(w, reduced_dim=encoder_module_outputs_dim)
-    z = mtf.einsum([s, encoder_module_outputs],
-                   reduced_dims=[encoder_module_outputs_dim])
+    z = mtf.layers.us_einsum([s, encoder_module_outputs],
+                             reduced_dims=[encoder_module_outputs_dim])
     input_per_decoder = mtf.split(
         z,
         split_dim=decoder_module_inputs_dim,
@@ -924,14 +925,17 @@ class TalkingHeadsSelfAttention(SelfAttention):
   def compute_q(self, context, x):
     # Scale the initializer variance by 1.0/d_k
     # This scales the initializer by rsqrt(d_k)
-    init_scale = 1.0 / self.key_dim.size
+    init_scale = 1.0
+    if not mtf.layers.unit_scaling_convention():
+      init_scale /= self.key_dim.size
+    kernel_initializer = mtf.layers.VarianceScalingInitializer(init_scale)
     return mtf.layers.dense(
         x, reduced_dims=[context.model.model_dim],
         new_dims=self.key_heads_dims + [self.key_dim],
         use_bias=False, activation=None,
         variable_dtype=context.variable_dtype,
         name="q", expert_dims=context.model.ensemble_dims,
-        kernel_initializer=mtf.layers.VarianceScalingInitializer(init_scale))
+        kernel_initializer=kernel_initializer)
 
   def compute_k(self, context, x):
     return mtf.layers.dense(
@@ -985,7 +989,7 @@ class TalkingHeadsSelfAttention(SelfAttention):
     return self.attention_internal(context, x, m, q, k, v, memory_length, bias)
 
   def attention_internal(self, context, x, m, q, k, v, memory_length, bias):
-    p = mtf.einsum([q, k], reduced_dims=[self.key_dim])
+    p = mtf.layers.us_einsum([q, k], reduced_dims=[self.key_dim])
     logits = self.talking_heads(
         context, p, "logits", self.key_heads_dims, self.softmax_heads_dims,
         dynamic_projections_from=(
@@ -1034,9 +1038,11 @@ class TalkingHeadsSelfAttention(SelfAttention):
                                     dtype=context.variable_dtype)
         ps = []
         for i, dp_from in enumerate(dynamic_projections_from):
+          init_scale = self.dynamic_projections_init_scale
+          if not mtf.layers.unit_scaling_convention():
+            init_scale /= mtf.Shape(reduced_dims).size
           kernel_initializer = mtf.layers.VarianceScalingInitializer(
-              self.dynamic_projections_init_scale
-              / mtf.Shape(reduced_dims).size)
+              init_scale)
           ps.append(
               mtf.layers.dense(
                   dp_from, reduced_dims=[context.model.model_dim],
@@ -1053,7 +1059,8 @@ class TalkingHeadsSelfAttention(SelfAttention):
         #   probably be slower in practice.
         ps[0] += static_p
         return mtf.add_n(
-            [mtf.einsum([inp, p], reduced_dims=reduced_dims) for p in ps])
+            [mtf.layers.us_einsum([inp, p], reduced_dims=reduced_dims)
+             for p in ps])
     else:
       # No dynamic projections.  Static talking-heads projection only
       return mtf.layers.dense(
@@ -1135,7 +1142,9 @@ class GeneralBilinearSelfAttention(SelfAttention):
   def compute_q(self, context, x):
     # Scale the initializer variance by 1.0/d_k
     # This scales the initializer by rsqrt(d_k)
-    init_scale = 1.0 / context.model.model_dim.size
+    init_scale = 1.0
+    if not mtf.layers.unit_scaling_convention():
+      init_scale /= context.model.model_dim.size
     return mtf.layers.dense(
         x, reduced_dims=[context.model.model_dim],
         new_dims=self.heads_dims + [context.model.model_dim],
@@ -1176,7 +1185,8 @@ class GeneralBilinearSelfAttention(SelfAttention):
     return self.attention_internal(context, q, m, memory_length, bias)
 
   def attention_internal(self, context, q, m, memory_length, bias):
-    logits = mtf.einsum([q, m], reduced_dims=[context.model.model_dim])
+    logits = mtf.layers.us_einsum(
+        [q, m], reduced_dims=[context.model.model_dim])
     if bias is not None:
       logits += bias
     weights = mtf.softmax(logits, memory_length)
