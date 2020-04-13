@@ -403,8 +403,10 @@ def _depthwise_conv1d_hack(x,
     name: str, variable_scope name,
     use_bias: Bool, whether to use bias,
     initializer_scale: int, initalizer scale,
-    kernel_depth_weights: an optional list of kernel weight tensors, one for
-      each relative position
+    kernel_depth_weights: an optional list of kernel weight tensors. The list
+    contains one element for each relative position in the kernel. Each element
+    has a width equal to the depth over which the separable conv operation is
+    being "separated"
 
   Returns:
     an mtf.Tensor
@@ -439,7 +441,8 @@ def separable_conv1d(x,
                      depthwise_filter_initializer_scale=1.0,
                      pointwise_filter_initializer_scale=1.0,
                      name=None,
-                     use_bias=True):
+                     use_bias=True,
+                     kernel_depth_weights=None):
   """1-D convolution with separable filters.
 
   The filter size will be `max_relative_pos - min_relative_pos + 1`.
@@ -459,6 +462,10 @@ def separable_conv1d(x,
       initializer for the pointwise filter.
     name: a string used for tf.variable_scope.
     use_bias: a bool, whether to use bias in the convolutions.
+    kernel_depth_weights: an optional list of kernel weight tensors. The list
+    contains one element for each relative position in the kernel. Each element
+    has a width equal to the dimension over which the separable conv operation
+    is being "separated"
 
   Returns:
     a mtf.Tensor of format NWO, where O is the output dimension.
@@ -473,7 +480,8 @@ def separable_conv1d(x,
         min_relative_pos=min_relative_pos,
         max_relative_pos=max_relative_pos,
         use_bias=use_bias,
-        initializer_scale=depthwise_filter_initializer_scale)
+        initializer_scale=depthwise_filter_initializer_scale,
+        kernel_depth_weights=kernel_depth_weights)
     return dense(
         depthwise,
         new_dims=[output_dim],
