@@ -34,6 +34,7 @@ import gin.tf
 
 import mesh_tensorflow as mtf
 from mesh_tensorflow.transformer import dataset as transformer_dataset
+from mesh_tensorflow.transformer import learning_rate_schedules
 from mesh_tensorflow.transformer import transformer
 import numpy as np
 import pkg_resources
@@ -288,9 +289,7 @@ def tpu_estimator_model_fn(model_type,
     keep_checkpoint_max: an integer, maximum number of checkpoints to keep
     save_checkpoints_steps: an integer, save a checkpoint every this number of
       steps
-    learning_rate_schedule: an optional function taking the scalar named
-      argument `step` and return the scalar learning rate. Alternatively, a
-      constant.
+    learning_rate_schedule: a constant or a function from step to learning rate
     optimizer: a class extending optimize.Optimizer, required for training
     outer_batch_size: outer batch dimension that could be used to enable the mix
       of data-parallel and model-parallel training of Mixture of Experts (MoE)
@@ -1658,7 +1657,10 @@ def run(tpu_job_name,
     mesh_shape: an input to mtf.convert_to_shape()
     mesh_devices: a list of strings, see `get_estimator` docstring.
     layout_rules: an input to mtf.convert_to_layout_rules()
-    learning_rate_schedule: an optional function, see `get_estimator` docstring.
+    learning_rate_schedule: a function which takes the scalar name argument
+      `step` and the numeric argument `total_train_steps` and returns the scalar
+      learning rate.  Alternatively a float.  Alternatively, a list of
+      such factos to be multiplied together.
     optimizer: a class extending optimize.Optimizer, required for training
     predict_fn: an optional function, see `get_estimator` docstring for details.
     variable_filter: a string, see `get_estimator` docstring for details.
@@ -1677,6 +1679,11 @@ def run(tpu_job_name,
 
   if not isinstance(train_steps, int):
     train_steps = train_steps(batch_size, sequence_length)
+
+  if isinstance(learning_rate_schedule, list):
+    learning_rate_schedule = functools.partial(
+        learning_rate_schedules.product_learning_rate,
+        factors=learning_rate_schedule)
 
   if callable(learning_rate_schedule):
     learning_rate_schedule = functools.partial(
