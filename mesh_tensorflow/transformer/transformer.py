@@ -495,6 +495,26 @@ def sublayer_final_layer_norm(x, layer_stack, context):
 
 
 @gin.configurable
+def sublayer_layer_norm_subsampled(x, layer_stack, context, percentage=100.):
+  """RMS normalization."""
+  model_dim = context.model.model_dim
+  with tf.variable_scope("layer_norm_subsampled"):
+    scale = mtf.get_variable(
+        context.mesh,
+        "scale",
+        mtf.Shape(context.model.ensemble_dims + [model_dim]),
+        initializer=tf.ones_initializer(),
+        dtype=context.variable_dtype)
+    var_dim = mtf.Dimension(
+        model_dim.name,
+        int(math.ceil(model_dim.size * percentage/100)))
+    var_activations = mtf.slice(x, 0, var_dim.size, var_dim.name)
+    variance = mtf.reduce_mean(
+        mtf.square(var_activations), reduced_dim=var_dim)
+  return x * mtf.rsqrt(variance + layer_stack.norm_epsilon) * scale
+
+
+@gin.configurable
 def sublayer_residual(x, layer_stack, context):
   del layer_stack
   return x + context.current_layer_input
