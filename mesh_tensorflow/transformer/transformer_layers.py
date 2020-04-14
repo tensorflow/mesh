@@ -35,7 +35,8 @@ import tensorflow.compat.v1 as tf
 class DenseReluDense(transformer.TransformerLayer):
   """Two dense layers with ReLU or other activation on hidden layer."""
 
-  def __init__(self, hidden_size=4096, dropout_rate=0.0, activation="relu"):
+  def __init__(self, hidden_size=4096, dropout_rate=0.0, activation="relu",
+               use_bias=False):
     """Create a DenseReluDense.
 
     Args:
@@ -43,10 +44,12 @@ class DenseReluDense(transformer.TransformerLayer):
       dropout_rate: a floating-point number
       activation: an activation function or a list of activation functions.
         see documentation for mtf.layers.dense_product()
+      use_bias: a boolean, whether to use bias in the dense layers.
     """
     self.hidden_size = hidden_size
     self.dropout_rate = dropout_rate
     self.activation = activation
+    self.use_bias = use_bias
 
   def call(self, context, x, losses=None):
     """Call the layer."""
@@ -56,14 +59,16 @@ class DenseReluDense(transformer.TransformerLayer):
                                  reduced_dims=x.shape.dims[-1:],
                                  new_dims=hidden_channels,
                                  activation_functions=self.activation,
-                                 use_bias=False,
+                                 use_bias=self.use_bias,
                                  variable_dtype=context.variable_dtype,
                                  name="wi",
                                  expert_dims=context.model.ensemble_dims)
     if context.train and self.dropout_rate != 0.0:
       h = mtf.dropout(h, 1.0 - self.dropout_rate,
                       noise_shape=h.shape - context.length_dim)
-    return mtf.layers.dense(h, io_channels, use_bias=False, activation=None,
+    return mtf.layers.dense(h, io_channels,
+                            use_bias=self.use_bias,
+                            activation=None,
                             variable_dtype=context.variable_dtype,
                             reduced_dims=h.shape.dims[-1:],
                             name="wo",
