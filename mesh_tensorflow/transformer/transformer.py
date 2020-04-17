@@ -22,7 +22,7 @@ mesh-tensorflow Transformer implementation in the Tensor2Tensor library.
 The interface is for the user to create a Unitransformer or Bitransformer
 object and then call its methods (call_simple, sample_autoregressive, etc.)
 The Unitransformer or Bitransformer is configured by creating a LayerStack
-object contiaining instances of TransformerLayer.  Users can subclass
+object containing instances of TransformerLayer.  Users can subclass
 TransformerLayer to create new types of layers.
 
 Supported so far:
@@ -32,7 +32,7 @@ Supported so far:
  - fast autoregressive sampling with temperature
  - beam search
  - mixture of experts layer
- - local attetion layer
+ - local attention layer
  - shared embedding / shared embedding and softmax weights
 
 Not yet supported:  TODO(noam)
@@ -60,7 +60,7 @@ class TransformerLayer(object):
   library.
 
   Transformer layers should subclass TransformerLayer.  In the constructor, the
-  subclasses simply record their hyperparmeters.  Subclasses must implement a
+  subclasses simply record their hyperparameters.  Subclasses must implement a
   call() method, representing a call to that layer.  The call method is passed
   an input tensor and a Context object.  Variables should be created inside of
   the call().
@@ -153,7 +153,7 @@ class Context(object):
       length_dim: a mtf.Dimension
       variable_dtype: a mtf.VariableDType
       beam_dim: an optional mtf.Dimension (present in beam search)
-      mode: either a tf.estimator.ModeKeys or one of the follwing:
+      mode: either a tf.estimator.ModeKeys or one of the following:
         "first_part"
         "incremental"
       position: an optional Tensor - represents position in the sequence.

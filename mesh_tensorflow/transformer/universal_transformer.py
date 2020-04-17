@@ -610,7 +610,7 @@ class UTLayerStack(transformer.TransformerLayer):
       # We use this mask to zero out the padding regions at each layer.
       # This "fixes" a bug where extreme values leak from the padding into the
       # non-padding regions.
-      # TODO(noam): undertand this better and make a more principled fix.
+      # TODO(noam): understand this better and make a more principled fix.
       mask = mtf.cast(
           mtf.not_equal(context.sequence_id, 0), context.activation_dtype)
     else:
