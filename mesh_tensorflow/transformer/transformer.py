@@ -578,6 +578,15 @@ class ReversibleLayerStack(LayerStack):
             sublayer_dropout]
 
 
+@gin.configurable
+def sublayer_true_layer_norm(x, layer_stack, context):
+  """True (aka normal) Normalization."""
+  model_dim = context.model.model_dim
+  with tf.variable_scope("true_layer_norm"):
+    return mtf.layers.layer_norm(x, model_dim, layer_stack.norm_epsilon)
+
+
+@gin.configurable
 def layer_norm(context, x, norm_epsilon, name=None, model_dim=None):
   """RMS normalization.
 
