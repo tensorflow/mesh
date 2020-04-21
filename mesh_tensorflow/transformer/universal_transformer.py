@@ -59,6 +59,8 @@ class UTLayerStack(transformer.TransformerLayer):
       mix_with_transformer_after_ut=gin.REQUIRED,
       gates_inputs=gin.REQUIRED,
       gate_ffn_layer=gin.REQUIRED,
+      use_gated_transformer=gin.REQUIRED,
+      gating_type=gin.REQUIRED,
   ):
     """Create a LayerStack for Universal Transformer.
 
@@ -86,6 +88,8 @@ class UTLayerStack(transformer.TransformerLayer):
       mix_with_transformer_after_ut: whether to mix transformer layers after ut.
       gates_inputs: controlling the cary/transform gate.
       gate_ffn_layer: gate ff layer type
+      use_gated_transformer: whether to use gated transformer.
+      gating_type: gating type.
     """
     self._layers = layers
     self._dropout_rate = dropout_rate
@@ -107,6 +111,8 @@ class UTLayerStack(transformer.TransformerLayer):
     self.gates_inputs = gates_inputs
     self.gate_ffn_layer = gate_ffn_layer
     self.couple_carry_transform_gates = couple_carry_transform_gates
+    self.use_gated_transformer = use_gated_transformer
+    self.gating_type = gating_type
 
   def get_timing_signal_1d(self,
                            context,
@@ -324,11 +330,66 @@ class UTLayerStack(transformer.TransformerLayer):
           if y.shape != x.shape:
             raise ValueError("Layer %s returned misshaped output x=%s y=%s" %
                              (layer.__class__.__name__, x, y))
+          if self.use_gated_transformer:
+            y = self.gating(context, x, y, mask)
         x += self._dropout(context, y)
       if lnum != len(self._layers) - 1:
         context.layer_outputs.append(x)
       context.layer_index += 1
     return x
+
+  def gating(self, context, x, transformed_x, mask):
+    """Implementation of various gating layers."""
+    gate_ffn_layer = self.gate_ffn_layer
+    if self.gating_type == "highway":
+      gate_inputs = [x]
+      transform_gate = self.ffn_layer_multi_inputs(
+          context,
+          mask,
+          gate_inputs,
+          ffn_layer_type=gate_ffn_layer,
+          activation=mtf.sigmoid,
+          preprocess=True)
+      carry_gate = self.ffn_layer_multi_inputs(
+          context,
+          mask,
+          gate_inputs,
+          ffn_layer_type=gate_ffn_layer,
+          activation=mtf.sigmoid,
+          preprocess=True)
+      new_state = x * carry_gate + transformed_x * transform_gate
+      return new_state
+    elif self.gating_type == "gru":
+      gate_inputs = [x, transformed_x]
+      transition_function_update_gate = self.ffn_layer_multi_inputs(
+          context,
+          mask,
+          gate_inputs,
+          ffn_layer_type=gate_ffn_layer,
+          activation=mtf.sigmoid,
+          preprocess=True)
+      transition_function_reset_gate = self.ffn_layer_multi_inputs(
+          context,
+          mask,
+          gate_inputs,
+          ffn_layer_type=gate_ffn_layer,
+          activation=mtf.sigmoid,
+          preprocess=True)
+
+      reset_state = transition_function_reset_gate * x
+      gate_inputs = [reset_state, transformed_x]
+      transition_function_candidate = self.ffn_layer_multi_inputs(
+          context,
+          mask,
+          gate_inputs,
+          ffn_layer_type=gate_ffn_layer,
+          activation=mtf.sigmoid,
+          preprocess=True)
+
+      transition_function_output = (
+          (1 - transition_function_update_gate) * transformed_x +
+          transition_function_update_gate * transition_function_candidate)
+      return transition_function_output
 
   def ut_basic(self, context, x, mask):
     def ut_function(x, step):
@@ -520,21 +581,17 @@ class UTLayerStack(transformer.TransformerLayer):
             context, (inputs * mask) if mask else inputs)
 
     # the output size is the hidden size of the main inputs
-    main_input = inputs_list[0]
-    original_shape = main_input.shape
-    hidden_size = original_shape.dims[-1].size
-
     ffn_inputs = inputs_list[0]
     if len(inputs_list) != 1:
-      ffn_inputs = mtf.concat(inputs_list, original_shape.dims[-1].name)
+      ffn_inputs = mtf.concat(inputs_list, context.model.model_dim.name)
     if ffn_layer_type == "dense":
-      last_dims = [
-          mtf.Dimension(ffn_inputs.shape.dims[-1].name, hidden_size)
-      ]
+      # last_dims = [
+      #     mtf.Dimension(ffn_inputs.shape.dims[-1].name, hidden_size)
+      # ]
       output = mtf.layers.dense(
           ffn_inputs,
-          reduced_dims=[context.model.model_dim],
-          new_dims=last_dims,
+          reduced_dims=[ffn_inputs.shape.dims[-1]],
+          new_dims=[context.model.model_dim],
           activation=activation,
           use_bias=True,
           variable_dtype=context.variable_dtype,
@@ -589,7 +646,7 @@ class UTLayerStack(transformer.TransformerLayer):
             mask,
             gate_inputs,
             ffn_layer_type=gate_ffn_layer,
-            activation=tf.sigmoid,
+            activation=mtf.sigmoid,
             preprocess=True)
       new_state = state * carry_gate + transformed_state * transform_gate
 
