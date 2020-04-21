@@ -318,8 +318,8 @@ class LayerStack(TransformerLayer):
                sublayers_initial=None,
                sublayers_per_layer=None,
                sublayers_final=None,
-               dropout_rate=0.0,
-               norm_epsilon=1e-6,
+               dropout_rate=None,
+               norm_epsilon=None,
                recompute_grads=False):
     """Create a LayerStack.
 
@@ -331,40 +331,78 @@ class LayerStack(TransformerLayer):
     the layer body, and at the beginning and the end of the layer stack.  We
     call these "sublayers".  They are configurable with the `sublayers_initial`,
     `sublayers_per_layer`, and `sublayers_final` arguments, each of which takes
-    an optional list of sublayer functions.
+    a list of sublayer functions.
 
     Each of the sublayer functions has signature:
       x, layer_stack, context -> y
     where x is the input tensor and y is the output tensor.
 
-    The default sublayers are listed in:
+    The default sublayers specified in defaults.gin are:
 
-      LayerStack._default_sublayers_initial
-      LayerStack._default_sublayers_per_layer
-      LayerStack._default_sublayers_final
+      transformer.LayerStack.sublayers_initial = [
+          @transformer.sublayer_dropout,
+      ]
+      transformer.LayerStack.sublayers_per_layer = [
+          @transformer.sublayer_rms_norm,
+          @transformer.sublayer_call_layer,
+          @transformer.sublayer_dropout,
+          @transformer.sublayer_residual,
+      ]
+      transformer.LayerStack.sublayers_final = [
+          @transformer.sublayer_rms_norm,
+          @transformer.sublayer_dropout,
+      ]
 
     Refer to these as examples of how to write and call your own sublayer
     functions.
+
+    `dropout_rate` and `norm_epsilon` should only be specified in a legacy mode,
+    for compatiblity with older checkpoints.
 
     Args:
       layers: a list of TransformerLayer
       sublayers_initial: an optional list of sublayer functions
       sublayers_per_layer: an optional list of sublayer functions
       sublayers_final: an optional list of sublayer functions
-      dropout_rate: a floating-point number
-      norm_epsilon: a floating-point number
+      dropout_rate: DEPRECATED - a floating-point number
+      norm_epsilon: DEPRECATED - a floating-point number
       recompute_grads: a boolean
     """
     self._layers = layers
-    self._sublayers_initial = (
-        sublayers_initial or self._default_sublayers_initial)
-    self._sublayers_per_layer = (
-        sublayers_per_layer or self._default_sublayers_per_layer)
-    self._sublayers_final = (
-        sublayers_final or self._default_sublayers_final)
-    self._dropout_rate = dropout_rate
-    self._norm_epsilon = norm_epsilon
     self._recompute_grads = recompute_grads
+    self._sublayers_initial = sublayers_initial
+    self._sublayers_per_layer = sublayers_per_layer
+    self._sublayers_final = sublayers_final
+    if (dropout_rate is not None) != (norm_epsilon is not None):
+      raise ValueError(
+          "LayerStack.dropout_rate and LayerStack.norm_epsilon should either "
+          "be both not None (legacy mode) or both None (normal mode)")
+    if dropout_rate is not None:
+      self._legacy_init(dropout_rate, norm_epsilon)
+
+  def _legacy_init(self, dropout_rate, norm_epsilon):
+    """Legacy initialization for use with old checkpoints.
+
+    dropout_rate and norm_epsilon are specified in LayerStack.
+    Custom sublayers are not specified.
+
+    Args:
+      dropout_rate: a float
+      norm_epsilon: a float
+    """
+    self.dropout_rate = dropout_rate
+    self.norm_epsilon = norm_epsilon
+    if (self._sublayers_initial is not None or
+        self._sublayers_per_layer is not None or
+        self._sublayers_final is not None):
+      tf.logging.warning("legacy mode - ignoring custom sublayers")
+    self._sublayers_initial = [sublayer_legacy_dropout]
+    self._sublayers_per_layer = [sublayer_legacy_rms_norm,
+                                 sublayer_call_layer,
+                                 sublayer_legacy_dropout,
+                                 sublayer_residual]
+    self._sublayers_final = [sublayer_legacy_final_rms_norm,
+                             sublayer_legacy_dropout]
 
   def call(self, context, x):
     """Call the layer stack."""
@@ -382,45 +420,9 @@ class LayerStack(TransformerLayer):
         context.layer_outputs.append(x)
       context.layer_index += 1
     x = self._call_sublayers(self._sublayers_final, x, context)
+    x = sublayer_mask_padding(x, self, context)
     context.layer_outputs.append(x)
     return x
-
-  @property
-  def _default_sublayers_initial(self):
-    return [sublayer_dropout]
-
-  @property
-  def _default_sublayers_per_layer(self):
-    return [sublayer_mask_padding,
-            sublayer_layer_norm,
-            sublayer_call_layer,
-            sublayer_dropout,
-            sublayer_residual]
-
-  @property
-  def _default_sublayers_final(self):
-    return [sublayer_final_layer_norm,
-            sublayer_dropout,
-            sublayer_mask_padding]
-
-  def mask_padding(self, context, x):
-    """Zero out padding regions.
-
-    This "fixes" a bug where extreme values leak from the padding into the
-    non-padding regions.
-    TODO(noam): undertand this better and make a more principled fix.
-
-    Args:
-      context: a Tensor
-      x: a Tensor
-    Returns:
-      a Tensor
-    """
-    if isinstance(context.sequence_id, mtf.Tensor):
-      return x * mtf.cast(
-          mtf.not_equal(context.sequence_id, 0), context.activation_dtype)
-    else:
-      return x
 
   def _call_sublayers(self, sublayers, x, context):
     for s in sublayers:
@@ -446,21 +448,6 @@ class LayerStack(TransformerLayer):
           % (layer.__class__.__name__, x, y))
     return y
 
-  def dropout(self, context, x):
-    if context.train and self._dropout_rate > 0:
-      return mtf.dropout(
-          x, rate=self._dropout_rate,
-          noise_shape=mtf.Shape(context.batch_dims + [context.model.model_dim]))
-    else:
-      return x
-
-  def layer_norm(self, context, x, name=None):
-    return layer_norm(context, x, self._norm_epsilon, name)
-
-  @property
-  def norm_epsilon(self):
-    return self._norm_epsilon
-
   @property
   def num_layers(self):
     return len(self.layers)
@@ -472,7 +459,7 @@ class LayerStack(TransformerLayer):
 
 @gin.configurable
 def sublayer_call_layer(x, layer_stack, context):
-  del layer_stack
+  x = sublayer_mask_padding(x, layer_stack, context)
   layer = context.current_layer
   with tf.variable_scope(layer.__class__.__name__):
     return layer.call(context, x)
@@ -480,23 +467,70 @@ def sublayer_call_layer(x, layer_stack, context):
 
 @gin.configurable
 def sublayer_mask_padding(x, layer_stack, context):
-  return layer_stack.mask_padding(context, x)
+  """Zero out padding regions.
+
+  This "fixes" a bug where extreme values leak from the padding into the
+  non-padding regions.
+  TODO(noam): undertand this better and make a more principled fix.
+
+  Args:
+    x: a Tensor
+    layer_stack: ignored
+    context: a Tensor
+  Returns:
+    a Tensor
+  """
+  del layer_stack
+  if isinstance(context.sequence_id, mtf.Tensor):
+    return x * mtf.cast(
+        mtf.not_equal(context.sequence_id, 0), context.activation_dtype)
+  else:
+    return x
 
 
 @gin.configurable
-def sublayer_layer_norm(x, layer_stack, context):
-  return layer_norm(context, x, layer_stack.norm_epsilon)
+def sublayer_rms_norm(x, layer_stack, context, epsilon=1e-6, name="rms_norm"):
+  """RMS normalization.
+
+  Args:
+    x: an input mtf.Tensor
+    layer_stack: a LayerStack
+    context: a Context
+    epsilon: a float
+    name: a string
+  Returns:
+    a mtf.Tensor
+  """
+  del layer_stack
+  model_dim = context.model.model_dim
+  with tf.variable_scope(name):
+    scale = mtf.get_variable(
+        context.mesh,
+        "scale",
+        mtf.Shape(context.model.ensemble_dims + [model_dim]),
+        initializer=tf.ones_initializer(),
+        dtype=context.variable_dtype)
+    variance = mtf.reduce_mean(mtf.square(x), reduced_dim=model_dim)
+  return x * mtf.rsqrt(variance + epsilon) * scale
 
 
 @gin.configurable
-def sublayer_final_layer_norm(x, layer_stack, context):
-  return layer_norm(context, x, layer_stack.norm_epsilon,
-                    name="final_layer_norm")
+def sublayer_legacy_rms_norm(x, layer_stack, context):
+  """Deprecated - keep for checkpoint/operative_config.gin compatibility."""
+  return sublayer_rms_norm(x, layer_stack, context, name="layer_norm")
 
 
 @gin.configurable
-def sublayer_layer_norm_subsampled(x, layer_stack, context, percentage=100.):
+def sublayer_legacy_final_rms_norm(x, layer_stack, context):
+  """Deprecated - keep for checkpoint/operative_config.gin compatibility."""
+  return sublayer_rms_norm(x, layer_stack, context, name="final_layer_norm")
+
+
+@gin.configurable
+def sublayer_rms_norm_subsampled(x, layer_stack, context, percentage=100.,
+                                 epsilon=1e-6):
   """RMS normalization."""
+  del layer_stack
   model_dim = context.model.model_dim
   with tf.variable_scope("layer_norm_subsampled"):
     scale = mtf.get_variable(
@@ -511,7 +545,7 @@ def sublayer_layer_norm_subsampled(x, layer_stack, context, percentage=100.):
     var_activations = mtf.slice(x, 0, var_dim.size, var_dim.name)
     variance = mtf.reduce_mean(
         mtf.square(var_activations), reduced_dim=var_dim)
-  return x * mtf.rsqrt(variance + layer_stack.norm_epsilon) * scale
+  return x * mtf.rsqrt(variance + epsilon) * scale
 
 
 @gin.configurable
@@ -521,8 +555,20 @@ def sublayer_residual(x, layer_stack, context):
 
 
 @gin.configurable
-def sublayer_dropout(x, layer_stack, context):
-  return layer_stack.dropout(context, x)
+def sublayer_dropout(x, layer_stack, context, dropout_rate=0.0):
+  del layer_stack
+  if context.train and dropout_rate > 0:
+    return mtf.dropout(
+        x, rate=dropout_rate,
+        noise_shape=mtf.Shape(context.batch_dims + [context.model.model_dim]))
+  else:
+    return x
+
+
+@gin.configurable
+def sublayer_legacy_dropout(x, layer_stack, context):
+  return sublayer_dropout(x, layer_stack, context,
+                          dropout_rate=layer_stack.dropout_rate)
 
 
 @gin.configurable
@@ -544,6 +590,9 @@ class ReversibleLayerStack(LayerStack):
 
   This should be very memory-efficient if LayerStack.recompute_grads
   is set to True.
+
+  Also, sublayers_per_layer should be overridden in gin, so as to remove the
+  residual.
 
   "Reformer" https://arxiv.org/abs/2001.04451 uses something like this.
   """
@@ -569,14 +618,6 @@ class ReversibleLayerStack(LayerStack):
     context.layer_outputs.append(x)
     return x
 
-  @property
-  def _default_sublayers_per_layer(self):
-    """No residual, which is handled separately."""
-    return [sublayer_mask_padding,
-            sublayer_layer_norm,
-            sublayer_call_layer,
-            sublayer_dropout]
-
 
 @gin.configurable
 def sublayer_true_layer_norm(x, layer_stack, context):
@@ -584,34 +625,6 @@ def sublayer_true_layer_norm(x, layer_stack, context):
   model_dim = context.model.model_dim
   with tf.variable_scope("true_layer_norm"):
     return mtf.layers.layer_norm(x, model_dim, layer_stack.norm_epsilon)
-
-
-@gin.configurable
-def layer_norm(context, x, norm_epsilon, name=None, model_dim=None):
-  """RMS normalization.
-
-  Args:
-    context: a Context
-    x: a Tensor
-    norm_epsilon: a float
-    name: an optional string
-    model_dim: an optional mtf.Dimension to use in place of the one attached to
-      the context
-
-  Returns:
-    a Tensor
-  """
-  if model_dim is None:
-    model_dim = context.model.model_dim
-  with tf.variable_scope(name, default_name="layer_norm"):
-    scale = mtf.get_variable(
-        context.mesh,
-        "scale",
-        mtf.Shape(context.model.ensemble_dims + [model_dim]),
-        initializer=tf.ones_initializer(),
-        dtype=context.variable_dtype)
-    variance = mtf.reduce_mean(mtf.square(x), reduced_dim=model_dim)
-  return x * mtf.rsqrt(variance + norm_epsilon) * scale
 
 
 @gin.configurable

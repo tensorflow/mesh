@@ -2,6 +2,7 @@
 
 import mesh_tensorflow.optimize
 import mesh_tensorflow.transformer.learning_rate_schedules
+import mesh_tensorflow.transformer.transformer
 import mesh_tensorflow.transformer.transformer_layers
 import mesh_tensorflow.transformer.learning_rate_schedules
 
@@ -22,6 +23,20 @@ decoder/transformer.make_layer_stack.layers = [
     @mesh_tensorflow.transformer.transformer_layers.DenseReluDense,
 ]
 
+transformer.LayerStack.sublayers_initial = [
+    @transformer.sublayer_dropout,
+]
+transformer.LayerStack.sublayers_per_layer = [
+    @transformer.sublayer_rms_norm,
+    @transformer.sublayer_call_layer,
+    @transformer.sublayer_dropout,
+    @transformer.sublayer_residual,
+]
+transformer.LayerStack.sublayers_final = [
+    @transformer.sublayer_rms_norm,
+    @transformer.sublayer_dropout,
+]
+
 Unitransformer.shared_embedding_and_softmax_weights = True
 
 # Model sizes
@@ -30,6 +45,11 @@ d_model = 1024
 d_ff = 4096
 num_heads = 8
 d_kv = 128
+
+# These are deprecated hyperparameters that trigger legacy behavior
+# for compatibility with old checkpoints.
+LayerStack.dropout_rate = None
+LayerStack.norm_epsilon = None
 
 transformer.make_layer_stack.num_layers = %num_layers
 Unitransformer.d_model = %d_model
@@ -42,7 +62,9 @@ dropout_rate = 0.1
 DenseReluDense.dropout_rate = %dropout_rate
 SelfAttention.dropout_rate = %dropout_rate
 LocalSelfAttention.dropout_rate = %dropout_rate
-LayerStack.dropout_rate = %dropout_rate
+TalkingHeadsSelfAttention.dropout_rate = %dropout_rate
+GeneralBilinearSelfAttention.dropout_rate = %dropout_rate
+transformer.sublayer_dropout.dropout_rate = %dropout_rate
 
 # No label smoothing by default
 decoder/Unitransformer.label_smoothing = 0.0
