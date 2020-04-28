@@ -1455,6 +1455,14 @@ class Bitransformer(object):
       logits: a Tensor with shape [<batch_dims>, output_vocab_dim]
       loss: an optional Scalar (if compute_loss=True)
     """
+    # encoder_sequene_id and decoder_sequence_id are used to delineate packed
+    # examples but are also necessary to indicate padding where sequence_id==0.
+    # If they are absent, then we assume that padding is indicated by zeros in
+    # the inputs/targets, and we make up sequence_id tensors to indicate this.
+    if encoder_sequence_id is None:
+      encoder_sequence_id = mtf.minimum(inputs, 1)
+    if decoder_sequence_id is None:
+      decoder_sequence_id = mtf.minimum(targets, 1)
     encoder_layer_outputs = []
     shared_params = self._shared_params(inputs.mesh, variable_dtype)
     encoder_output, encoder_loss = self.encoder.call_simple(
