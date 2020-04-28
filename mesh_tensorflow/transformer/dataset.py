@@ -752,3 +752,9 @@ EvalDataset = collections.namedtuple(
         "metric_fns",  # list of metric_fn(targets, predictions) returning dicts
     ]
 )
+
+
+def pad_dataset_with_zeroed_out_examples(ds):
+  def _zero_out(x):
+    return {k: tf.zeros_like(v) for k, v in x.items()}
+  return ds.concatenate(ds.map(_zero_out).repeat())

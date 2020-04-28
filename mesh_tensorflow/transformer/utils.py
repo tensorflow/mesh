@@ -684,7 +684,11 @@ def tpu_estimator_model_fn(model_type,
                 "token_accuracy": tf.metrics.mean(token_correct, weights),
                 "sequence_accuracy": tf.metrics.mean(
                     sequence_correct, sequence_weights),
-                "mean_label": tf.metrics.mean(tf.cast(labels, tf.float32))}
+                "mean_label": tf.metrics.mean(tf.cast(labels, tf.float32)),
+                "num_eval_tokens": metric_sum(weights, name="num_eval_tokens"),
+                "max_targets_length": metric_max(tf.reduce_sum(
+                    weights, axis=-1), name="max_targets_length"),
+               }
 
       labels = lowering.export_to_tf_tensor(anon_targets)
       eval_metrics = (simple_metrics, [tf_logits, labels])
@@ -697,6 +701,29 @@ def tpu_estimator_model_fn(model_type,
           eval_metrics=eval_metrics)
 
   return my_model_fn
+
+
+def metric_sum(values, name=None, **kwargs):
+  del kwargs
+  with tf.variable_scope(name, "metric_sum", [values]):
+    accum = tf.get_variable(
+        "accum", shape=[], dtype=tf.float32, trainable=False,
+        collections=[tf.GraphKeys.LOCAL_VARIABLES],
+        initializer=tf.zeros_initializer())
+    update_op = tf.assign_add(accum, tf.reduce_sum(tf.cast(values, tf.float32)))
+    return accum, update_op
+
+
+def metric_max(values, name=None, **kwargs):
+  del kwargs
+  with tf.variable_scope(name, "metric_max", [values]):
+    accum = tf.get_variable(
+        "accum", shape=[], dtype=tf.float32, trainable=False,
+        collections=[tf.GraphKeys.LOCAL_VARIABLES],
+        initializer=tf.zeros_initializer())
+    update_op = tf.assign(
+        accum, tf.maximum(accum, tf.reduce_max(tf.cast(values, tf.float32))))
+    return accum, update_op
 
 
 def _dynamic_text2self(mtf_features):
@@ -1767,12 +1794,11 @@ def run(tpu_job_name,
       )
     def _input_fn(params, eval_dataset):
       del params
-      return (eval_dataset.dataset_fn()
-              .map(_filter_features)
-              .repeat()
-              .batch(batch_size * (ensemble_inputs or 1),
-                     drop_remainder=True)
-              .prefetch(tf.data.experimental.AUTOTUNE))
+      ds = eval_dataset.dataset_fn().map(_filter_features)
+      ds = transformer_dataset.pad_dataset_with_zeroed_out_examples(ds)
+      ds = (ds.batch(batch_size * (ensemble_inputs or 1), drop_remainder=True)
+            .prefetch(tf.data.experimental.AUTOTUNE))
+      return ds
     checkpoint_paths = get_checkpoint_iterator(eval_checkpoint_step, model_dir)
     for checkpoint_path in checkpoint_paths:
       for eval_dataset in eval_datasets:
