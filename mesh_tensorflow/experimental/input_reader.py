@@ -64,6 +64,8 @@ import collections
 import threading
 import time
 import numpy as np
+from six.moves import range
+from six.moves import zip
 import tensorflow.compat.v1 as tf
 
 # pylint: disable=g-direct-tensorflow-import

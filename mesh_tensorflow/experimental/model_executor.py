@@ -25,6 +25,9 @@ from __future__ import print_function
 import re
 import mesh_tensorflow as mtf
 import numpy as np
+import six
+from six.moves import range
+from six.moves import zip
 import tensorflow.compat.v1 as tf
 
 # pylint: disable=g-direct-tensorflow-import
@@ -254,7 +257,7 @@ def _get_model_fn(train_or_eval, mesh_context):
         sum_loss = contrib_summary.scalar(
             '{}_loss'.format(train_or_eval), tf_loss, step=gs)
         sum_ops = [sum_loss.op]
-        for description, tf_metric in scalars.iteritems():
+        for description, tf_metric in six.iteritems(scalars):
           sum_metric = contrib_summary.scalar(
               '{}_{}'.format(train_or_eval, description), tf_metric, step=gs)
           sum_ops.append(sum_metric)
