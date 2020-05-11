@@ -1116,15 +1116,12 @@ def score_with_estimator(estimator,
   if isinstance(targets, str):
     tf.logging.info("loading targets from file %s" % targets)
     targets = get_inputs_from_file(targets)
-  all_target_ids = encode_inputs(
-      targets, vocabulary, model_type, batch_size,
-      sequence_length["targets"], eos_id=eos_id if score_eos else 0)
   has_inputs = inputs is not None
   if has_inputs:
     if isinstance(inputs, str):
-      tf.logging.info("loading inputs from file %s" % targets)
+      tf.logging.info("loading inputs from file %s" % inputs)
       inputs = get_inputs_from_file(inputs)
-    if len(inputs) != len(targets):
+    if len(inputs) < len(targets):
       # We assume that the targets file contains n targets for each input.
       # So we repeat each input n times.
       if len(targets) % len(inputs):
@@ -1132,8 +1129,16 @@ def score_with_estimator(estimator,
                          % (len(inputs), len(targets)))
       repeats = len(targets) // len(inputs)
       inputs = [inputs[i // repeats] for i in range(len(targets))]
+    elif len(targets) < len(inputs):
+      # `targets` is a list of one string.  Use it as a target for all inputs.
+      if len(targets) != 1:
+        raise ValueError("Expected only one target string")
+      targets = targets * len(inputs)
     all_input_ids = encode_inputs(inputs, vocabulary, model_type, batch_size,
                                   sequence_length["inputs"], eos_id=eos_id)
+  all_target_ids = encode_inputs(
+      targets, vocabulary, model_type, batch_size,
+      sequence_length["targets"], eos_id=eos_id if score_eos else 0)
 
   def input_fn(params):
     del params
