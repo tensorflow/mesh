@@ -32,7 +32,7 @@ from tensorflow.python.framework import test_util  # pylint:disable=g-direct-ten
 def initialize_by_shape(shape_to_value):
   """Create an initializer with values specified by tensor shape."""
 
-  def initialize(shape, dtype):
+  def initialize(shape, dtype, **unused_kwargs):
     shape = tuple(shape)
     if shape not in shape_to_value:
       raise ValueError(

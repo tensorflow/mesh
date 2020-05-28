@@ -289,6 +289,9 @@ class LayoutRules(object):
           (self, tensor_shape, mesh_shape))
     return TensorLayout(ret)
 
+  def mesh_dimension_name_to_tensor_dimension_names(self, mesh_dimension_name):
+    return [tdn for tdn, mdn in self._pairs if mdn == mesh_dimension_name]
+
 
 def convert_to_layout_rules(x):
   """Converts input to a LayoutRules.
@@ -436,7 +439,7 @@ class Graph(object):
     return name
 
   def rewrite_stack_variables(self,
-                              max_combined_variable_size=2 ** 30,
+                              max_combined_variable_size=2 ** 33,
                               max_combined_slice_size=2 ** 27,
                               mesh_to_impl=None):
     """Rewrite the current graph to combine variables.
@@ -1141,6 +1144,9 @@ class MeshImpl(object):
       mesh_axis: an integer
       offset: an integer
       wrap: a boolean. If True, then wrap around. Otherwise, pad with zeros.
+
+    Returns:
+      a LaidOutTensor
     """
     n = self.shape[mesh_axis].size
     source_pcoord = []
@@ -2362,7 +2368,7 @@ def _tf_upscale(x, dim_idx_start, dim_idx_end, xscales):
   trailing_shape = x_shape[dim_idx_end:]
   x = tf.reshape(x, x_shape[:dim_idx_end] + [-1])
   x = _tf_upscale_one_trailing_dim(x)
-  x = tf.reshape(x, x.shape[:-1] + trailing_shape)
+  x = tf.reshape(x, x.shape.as_list()[:-1] + trailing_shape)
 
   return x
 
@@ -4491,17 +4497,21 @@ class ReshapeOperation(Operation):
 
     laid_out_size = mesh_impl.laid_out_size(old_shape)
 
+    # list of (mesh_axis, tensor_axis) pairs to allsplit after the reshape
+    # typically we do the allsplit before the reshape, to save communication,
+    # but sometimes we need to delay it.
+    allsplit_after_reshape = []
     for mesh_axis in mesh_axes_allsplit:
       tensor_axis = old_shape.cumprod_to_tensor_axis(
           mesh_axis_to_cumprod_new[mesh_axis])
       if tensor_axis is None:
-        # TODO(noam): try to handle this case
-        raise NotImplementedError(
-            "Try first reshaping to insert a new tf dimension,"
-            " then changing layout. input_shape=%s output_shape=%s"
-            % (self.inputs[0].shape, self.outputs[0].shape))
-      slices = mesh_impl.allsplit(slices, mesh_axis, tensor_axis)
-      laid_out_size //= mesh_impl.shape[mesh_axis].size
+        # delay allsplit until after reshape
+        tensor_axis = new_shape.cumprod_to_tensor_axis(
+            mesh_axis_to_cumprod_new[mesh_axis])
+        allsplit_after_reshape.append((mesh_axis, tensor_axis))
+      else:
+        slices = mesh_impl.allsplit(slices, mesh_axis, tensor_axis)
+        laid_out_size //= mesh_impl.shape[mesh_axis].size
     for mesh_axis in mesh_axes_alltoall:
       split_tensor_axis = old_shape.cumprod_to_tensor_axis(
           mesh_axis_to_cumprod_new[mesh_axis])
@@ -4528,12 +4538,14 @@ class ReshapeOperation(Operation):
       lowering.add_counter(
           "allconcat/%s/reshape_op" % mesh_axis, laid_out_size)
     # now reshape the slices
-    old_slice_shape = mesh_impl.slice_shape(old_shape)
     new_slice_shape = mesh_impl.slice_shape(new_shape)
-    if new_slice_shape != old_slice_shape:
-      def reshape_fn(x):
-        return tf.reshape(x, new_slice_shape)
-      slices = mesh_impl.slicewise(reshape_fn, slices)
+    for mesh_axis, tensor_axis in allsplit_after_reshape:
+      new_slice_shape[tensor_axis] *= mesh_impl.shape[mesh_axis].size
+    def reshape_fn(x):
+      return tf.reshape(x, new_slice_shape)
+    slices = mesh_impl.slicewise(reshape_fn, slices)
+    for mesh_axis, tensor_axis in allsplit_after_reshape:
+      slices = mesh_impl.allsplit(slices, mesh_axis, tensor_axis)
     lowering.set_tensor_lowering(self.outputs[0], slices)
 
   def gradient(self, grad_ys):
@@ -5037,6 +5049,8 @@ def sample_with_temperature(x, dim, temperature=1.0, name=None):
   Returns:
     a Tensor with type tf.int32.
   """
+  # The numerics are unstable in bfloat16 - use float32.
+  x = cast(x, tf.float32)
   dim = convert_to_dimension(dim)
   with tf.name_scope(name, default_name="sample_with_temperature"):
     if temperature != 0.0:
@@ -5044,7 +5058,6 @@ def sample_with_temperature(x, dim, temperature=1.0, name=None):
       # Note: we don't want to generate 0 or 1 because:
       # * -log(-log(0)) is -infinity
       # * -log(-log(1)) is +infinity.
-      # np.finfo(x.dtype.as_numpy_dtype).tiny doesn't work on bfloat16
       tiny_val = 1e-9
       g = -log(-log(
           random_uniform(
