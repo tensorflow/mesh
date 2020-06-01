@@ -1918,6 +1918,7 @@ def run(tpu_job_name,
         dataset_split="train",
         autostack=True,
         eval_checkpoint_step=None,
+        export_checkpoint_step=None,
         export_path="",
         mode="train",
         iterations_per_loop=100,
@@ -1957,6 +1958,8 @@ def run(tpu_job_name,
     autostack: boolean, see `get_estimator` docstring for details.
     eval_checkpoint_step: int, list of ints, or None, see `eval_model` doc
       string for details.
+    export_checkpoint_step: int or None, see `export_model` doc string for
+      details.
     export_path: a string, path to export the saved model
     mode: string, train/eval/perplexity_eval/infer
       perplexity_eval computes the perplexity of the dev set.
@@ -2121,8 +2124,18 @@ def run(tpu_job_name,
     score_from_dataset(estimator, vocabulary, batch_size, sequence_length,
                        model_dir, eval_checkpoint_step, dataset_split)
   elif mode == "export":
+    if export_checkpoint_step:
+      checkpoint_path = get_checkpoint_iterator(
+          export_checkpoint_step, model_dir)
+      if isinstance(checkpoint_path, list):
+        checkpoint_path = checkpoint_path[0]
+      else:
+        checkpoint_path = next(checkpoint_path)
+    else:
+      # Use the latest checkpoint in the model directory.
+      checkpoint_path = None
     export_model(estimator, export_path, vocabulary, sequence_length,
-                 batch_size)
+                 batch_size, checkpoint_path)
 
   else:
     raise ValueError(
