@@ -219,7 +219,7 @@ def tpu_mesh_shape(tpu_topology=gin.REQUIRED,
   function `run`.
 
   Args:
-    tpu_topology: a string - e.g. "2x2"
+    tpu_topology: a string - e.g. "2x2" or "v3-8"
     model_parallelism: an integer - the number of cores per model replica
     ensemble_parallelism: an optional integer - if present then create an
       "ensemble" mesh-dimension as well, for splitting the models in an
@@ -227,8 +227,11 @@ def tpu_mesh_shape(tpu_topology=gin.REQUIRED,
   Returns:
     a mtf.Shape
   """
-  x, y = tpu_topology.split("x")
-  num_cores = int(x) * int(y) * 2
+  if tpu_topology.startswith("v"):
+    num_cores = int(tpu_topology.split("-")[-1])
+  else:
+    x, y = tpu_topology.split("x")
+    num_cores = int(x) * int(y) * 2
   data_parallelism = num_cores // model_parallelism
   if ensemble_parallelism:
     data_parallelism //= ensemble_parallelism
