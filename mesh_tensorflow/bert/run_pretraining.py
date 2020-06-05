@@ -142,29 +142,34 @@ def model_fn_builder(bert_config, init_checkpoint, learning_rate,
     mesh_shape = mtf.convert_to_shape(FLAGS.mesh_shape)
     layout_rules = mtf.convert_to_layout_rules(FLAGS.layout)
 
-    ctx = params["context"]
-    num_hosts = ctx.num_hosts
-    host_placement_fn = ctx.tpu_host_placement_function
-    device_list = [host_placement_fn(host_id=t) for t in range(num_hosts)]
-    tf.logging.info("device_list = %s" % device_list,)
-    replica_cache_size = 300 * 1000000  # 300M per replica
-    # Worker 0 caches all the TPU binaries.
-    worker0_mem = replica_cache_size * ctx.num_replicas
-    devices_memeory_usage = [worker0_mem] + [0] * (num_hosts - 1)
-    var_placer = mtf.utils.BalancedVariablePlacer(device_list,
-                                                  devices_memeory_usage)
-    mesh_devices = [""] * mesh_shape.size
-    physical_shape = list(ctx.device_assignment.topology.mesh_shape)
-    logical_to_physical = mtf.simd_mesh_impl.auto_logical_to_physical_tpu(
-        mesh_shape.to_integer_list, physical_shape)
-    mesh_impl = mtf.simd_mesh_impl.SimdMeshImpl(
-        mesh_shape,
-        layout_rules,
-        mesh_devices,
-        ctx.device_assignment,
-        logical_to_physical=logical_to_physical)
-    mesh = mtf.Mesh(graph, "bert_mesh", var_placer)
+    if FLAGS.use_tpu:
+      ctx = params["context"]
+      num_hosts = ctx.num_hosts
+      host_placement_fn = ctx.tpu_host_placement_function
+      device_list = [host_placement_fn(host_id=t) for t in range(num_hosts)]
+      tf.logging.info("device_list = %s" % device_list,)
+      replica_cache_size = 300 * 1000000  # 300M per replica
+      # Worker 0 caches all the TPU binaries.
+      worker0_mem = replica_cache_size * ctx.num_replicas
+      devices_memeory_usage = [worker0_mem] + [0] * (num_hosts - 1)
+      var_placer = mtf.utils.BalancedVariablePlacer(device_list,
+                                                    devices_memeory_usage)
+      mesh_devices = [""] * mesh_shape.size
+      physical_shape = list(ctx.device_assignment.topology.mesh_shape)
+      logical_to_physical = mtf.simd_mesh_impl.auto_logical_to_physical_tpu(
+          mesh_shape.to_integer_list, physical_shape)
+      mesh_impl = mtf.simd_mesh_impl.SimdMeshImpl(
+          mesh_shape,
+          layout_rules,
+          mesh_devices,
+          ctx.device_assignment,
+          logical_to_physical=logical_to_physical)
+    else:
+      mesh_impl = mtf.placement_mesh_impl.PlacementMeshImpl(
+          mesh_shape, layout_rules, [""] * mesh_shape.size)
+      var_placer = None
 
+    mesh = mtf.Mesh(graph, "bert_mesh", var_placer)
     input_ids = features["input_ids"]
     input_mask = features["input_mask"]
     segment_ids = features["segment_ids"]
