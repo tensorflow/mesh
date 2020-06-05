@@ -156,6 +156,12 @@ def build_model(model_type="bitransformer",
      there is no encoder.  Requires a text2self dataset, with targets, but no
      inputs.
 
+  "delimited_lm": an autoregressive language model trained on a text2text
+     dataset.  Each training example is expressed as
+     [<input_tokens>, EOS, <target_tokens>, EOS].  Model checkpoints are
+     compatible with "lm" models.  One strategy is to pretrain as "lm"
+     then fine-tune as "delimited_lm".
+
   "aligned": a non-autoregressive single-stack model (like BERT).  Requires
      a non-text2self dataset with inputs and targets.  The targets and inputs
      have the same length and each entry in the inputs is aligned to the
@@ -173,8 +179,8 @@ def build_model(model_type="bitransformer",
     target: 'bonjour'
 
   Args:
-    model_type: a string, one of "bitransformer", "lm", "aligned", or
-      "bi_teacher_student"
+    model_type: a string, one of "bitransformer", "lm", "delimited_lm",
+      "aligned", or "bi_teacher_student"
     input_vocab_size: an integer
     output_vocab_size: an integer
     layout_rules: optional, input to mtf.convert_to_layout_rules
@@ -194,9 +200,9 @@ def build_model(model_type="bitransformer",
         output_vocab_size=output_vocab_size,
         mesh_shape=mesh_shape,
         layout=layout_rules)
-  elif model_type == "lm" or model_type == "aligned":
+  elif model_type in ["lm", "delimited_lm", "aligned"]:
     return transformer.Unitransformer(
-        autoregressive=model_type == "lm",
+        autoregressive=model_type in ["lm", "delimited_lm"],
         layer_stack=transformer.make_layer_stack(),
         input_vocab_size=input_vocab_size,
         output_vocab_size=output_vocab_size,
@@ -277,8 +283,8 @@ def tpu_estimator_model_fn(model_type,
   """Create a TPUEstimator model function.
 
   Args:
-    model_type: a string. One of "bitransformer", "lm", "aligned", or
-      "bi_teacher_student"
+    model_type: a string. One of "bitransformer", "lm", "delimited_lm",
+      "aligned", or "bi_teacher_student"
     transformer_model: a transformer.Unitransformer or transformer.Bitransformer
     vocabulary: a vocabulary.Vocabulary or (inputs_vocabulary,
       targets_vocabulary) tuple. Used for decoding in predict mode.
@@ -339,6 +345,8 @@ def tpu_estimator_model_fn(model_type,
       a TPUEstimatorSpec
     """
     del labels, config
+    if mode == tf.estimator.ModeKeys.PREDICT and score_in_predict_mode:
+      mode = "score"
     global_step = tf.train.get_global_step()
     if use_tpu and "context" in params:
       ctx = params["context"]
@@ -367,10 +375,19 @@ def tpu_estimator_model_fn(model_type,
     graph = mtf.Graph()
     mesh = mtf.Mesh(graph, "my_mesh", var_placer)
 
-    mtf_features = {}
-    for key, x in features.items():
+    if (outer_batch_size and
+        mode not in [tf.estimator.ModeKeys.PREDICT, "score"]):
       outer_batch_dim = mtf.Dimension("outer_batch", outer_batch_size)
       batch_dim = mtf.Dimension("batch", batch_size // outer_batch_size)
+      batch_dims = [outer_batch_dim, batch_dim]
+    else:
+      batch_dim = mtf.Dimension("batch", batch_size)
+      batch_dims = [batch_dim]
+    ensemble_dims = ([mtf.Dimension("ensemble", ensemble_inputs)]
+                     if ensemble_inputs else [])
+
+    mtf_features = {}
+    for key, x in features.items():
       # Some auxiliary features may have been generated in packing.
       # The names of these new features are of the form
       #   "<original_feature_name>_<suffix>", e.g. "inputs_segmentation".
@@ -378,10 +395,8 @@ def tpu_estimator_model_fn(model_type,
       #   the "_<suffix>".
       feature_length = sequence_length[key.split("_")[0]]
       length_dim = mtf.Dimension("length", feature_length)
-      ensemble_dims = ([mtf.Dimension("ensemble", ensemble_inputs)]
-                       if ensemble_inputs else [])
       feature_shape = mtf.Shape(
-          ensemble_dims + [outer_batch_dim, batch_dim, length_dim])
+          ensemble_dims + batch_dims + [length_dim])
       x = tf.cast(features[key], tf.int32)
       x = tf.reshape(x, feature_shape.to_integer_list)
       if not use_tpu:
@@ -390,95 +405,112 @@ def tpu_estimator_model_fn(model_type,
             x, [x], "import feature %s" % key, summarize=1000, first_n=10)
       mtf_features[key] = mtf.import_fully_replicated(
           mesh, x, feature_shape, name=key)
-      if key == "targets":
-        anon_targets = mtf.anonymize(mtf_features[key])
 
+    def _verify_feature_exists(feature_name, should_exist):
+      if should_exist != (feature_name in mtf_features):
+        message = (
+            "mode=%s model_type=%s should%s have feature %s" %
+            (mode, model_type, "" if should_exist else " not", feature_name))
+        if "lm" in model_type:
+          message += (
+              "\nA common mistake is that model_type=\"lm\" should be used "
+              "with tasks that produce inputs and targets, while "
+              "model_type=\"delimited_lm\" should be used with tasks that "
+              "produce targets only.")
+        raise ValueError(message)
+
+    # Verify that the right features exist, and transform them if necessary
     if mode == tf.estimator.ModeKeys.PREDICT:
-      def _feature_shape(key):
-        feature_length = sequence_length[key.split("_")[0]]
-        return mtf.Shape([
-            mtf.Dimension("batch", batch_size),
-            mtf.Dimension("length", feature_length)
-        ])
-      mtf_features = {
-          k: mtf.reshape(v, _feature_shape(k))
-          for k, v in six.iteritems(mtf_features)
-      }
-      if score_in_predict_mode:
-        # compute log-likelihoods per sequence
+      _verify_feature_exists("inputs", True)
+      _verify_feature_exists("targets", False)
+    else:
+      _verify_feature_exists("targets", True)
+      _verify_feature_exists("inputs", model_type != "lm")
+      if model_type == "delimited_lm":
+        mtf_features = _dynamic_text2self(mtf_features)
+
+    if mode == "score":
+      # compute log-likelihoods per sequence
+      if predict_fn:
+        # predict_fn contains a custom scoring function
+        # this code-path has not been tested
+        scores = predict_fn(
+            model=transformer_model,
+            features=mtf_features,
+            variable_dtype=get_variable_dtype())
+      targets = mtf_features["targets"]
+      if isinstance(transformer_model, transformer.Unitransformer):
+        length_dim = targets.shape.dims[-1]
+        inputs = mtf.shift(mtf_features["targets"], offset=1,
+                           dim=length_dim, wrap=False)
+      elif isinstance(transformer_model,
+                      (transformer.Bitransformer,
+                       transformer.StudentTeacher)):
         inputs = mtf_features["inputs"]
-        targets = mtf_features["targets"]
-        if predict_fn:
-          # predict_fn contains a custom scoring function
-          # this code-path has not been tested
-          scores = predict_fn(
-              model=transformer_model,
-              features=mtf_features,
-              variable_dtype=get_variable_dtype())
-        elif isinstance(transformer_model, transformer.Unitransformer):
-          raise NotImplementedError("not implemented yet")
-        elif isinstance(transformer_model,
-                        (transformer.Bitransformer,
-                         transformer.StudentTeacher)):
-          logits, _ = transformer_model.call_simple(
-              inputs=inputs,
-              targets=targets,
-              compute_loss=False,
-              mode=mode,
-              variable_dtype=get_variable_dtype())
-          batch_dim, length_dim, vocab_dim = logits.shape.dims
-          cross_entropy = mtf.layers.softmax_cross_entropy_with_logits(
-              logits, mtf_features["targets"], vocab_dim)
-          cross_entropy *= mtf.cast(
-              mtf.not_equal(targets, 0), cross_entropy.dtype)
-          scores = -mtf.reduce_sum(cross_entropy, reduced_dim=length_dim)
-        else:
-          raise ValueError("unrecognized class")
-        scores = mtf.anonymize(scores)
-        lowering = mtf.Lowering(graph, {mesh: mesh_impl}, autostack=autostack)
-        predictions = {
-            "scores": lowering.export_to_tf_tensor(scores)
-        }
+        weights = None
       else:
-        inputs = mtf_features["inputs"]
-        if predict_fn:
-          mtf_samples = predict_fn(
-              model=transformer_model,
-              features=mtf_features,
-              variable_dtype=get_variable_dtype())
-        elif isinstance(transformer_model, transformer.Unitransformer):
-          # pad so that there is enough room for the targets
-          inputs = mtf.pad(
-              inputs, [0, sequence_length["targets"]], length_dim.name)
-          mtf_samples = transformer_model.sample_autoregressive(
-              inputs, variable_dtype=get_variable_dtype(),
-              remove_partial_sequences=True)
-        elif isinstance(
-            transformer_model,
-            (transformer.Bitransformer, transformer.StudentTeacher)):
-          mtf_samples = transformer_model.decode(
-              inputs, variable_dtype=get_variable_dtype())
-        else:
-          raise ValueError("unrecognized class")
-        mtf_samples = mtf.anonymize(mtf_samples)
-        inputs = mtf.anonymize(inputs)
-        lowering = mtf.Lowering(graph, {mesh: mesh_impl}, autostack=autostack)
-        inputs = clean_decodes(lowering.export_to_tf_tensor(inputs))
-        outputs = clean_decodes(lowering.export_to_tf_tensor(mtf_samples))
+        raise ValueError("unrecognized class")
+      logits, _ = transformer_model.call_simple(
+          inputs=inputs,
+          targets=targets,
+          compute_loss=False,
+          mode=mode,
+          variable_dtype=get_variable_dtype())
+      batch_dim, length_dim, vocab_dim = logits.shape.dims
+      cross_entropy = mtf.layers.softmax_cross_entropy_with_logits(
+          logits, mtf_features["targets"], vocab_dim)
+      cross_entropy *= mtf.cast(
+          mtf.not_equal(targets, 0), cross_entropy.dtype)
+      if mode == "delimited_lm":
+        cross_entropy *= mtf.cast(mtf.logical_not(
+            transformer.delimited_lm_inputs_mask(targets)), cross_entropy.dtype)
+      scores = -mtf.reduce_sum(cross_entropy, reduced_dim=length_dim)
+      scores = mtf.anonymize(scores)
+      lowering = mtf.Lowering(graph, {mesh: mesh_impl}, autostack=autostack)
+      predictions = {
+          "scores": lowering.export_to_tf_tensor(scores)
+      }
+    elif mode == tf.estimator.ModeKeys.PREDICT:
+      inputs = mtf_features["inputs"]
+      if predict_fn:
+        mtf_samples = predict_fn(
+            model=transformer_model,
+            features=mtf_features,
+            variable_dtype=get_variable_dtype())
+      elif isinstance(transformer_model, transformer.Unitransformer):
+        # pad so that there is enough room for the targets
+        inputs = mtf.pad(
+            inputs, [0, sequence_length["targets"]], length_dim.name)
+        mtf_samples = transformer_model.sample_autoregressive(
+            inputs, variable_dtype=get_variable_dtype(),
+            remove_partial_sequences=True)
+      elif isinstance(
+          transformer_model,
+          (transformer.Bitransformer, transformer.StudentTeacher)):
+        mtf_samples = transformer_model.decode(
+            inputs, variable_dtype=get_variable_dtype())
+      else:
+        raise ValueError("unrecognized class")
+      mtf_samples = mtf.anonymize(mtf_samples)
+      inputs = mtf.anonymize(inputs)
+      lowering = mtf.Lowering(graph, {mesh: mesh_impl}, autostack=autostack)
+      inputs = clean_decodes(lowering.export_to_tf_tensor(inputs))
+      outputs = clean_decodes(lowering.export_to_tf_tensor(mtf_samples))
 
-        # Detokenize in the graph if supported by vocabulary and accelerator.
-        def _maybe_detokenize(ids, vocab):
-          if not use_tpu and hasattr(vocab, "decode_tf"):
-            return vocab.decode_tf(ids)
-          return ids
+      # Detokenize in the graph if supported by vocabulary and accelerator.
+      def _maybe_detokenize(ids, vocab):
+        if not use_tpu and hasattr(vocab, "decode_tf"):
+          return vocab.decode_tf(ids)
+        return ids
 
-        inputs = _maybe_detokenize(inputs, inputs_vocabulary(vocabulary))
-        outputs = _maybe_detokenize(outputs, targets_vocabulary(vocabulary))
+      inputs = _maybe_detokenize(inputs, inputs_vocabulary(vocabulary))
+      outputs = _maybe_detokenize(outputs, targets_vocabulary(vocabulary))
 
-        predictions = {
-            "inputs": inputs,
-            "outputs": outputs}
+      predictions = {
+          "inputs": inputs,
+          "outputs": outputs}
 
+    if mode in ["score", tf.estimator.ModeKeys.PREDICT]:
       # When exporting a model, we need to communicate to TF-Serving that
       # master variables need to be copied to their slave slice variables.
       # Estimator uses a Scaffold's "local_init_op" for this purpose, so we
@@ -521,9 +553,7 @@ def tpu_estimator_model_fn(model_type,
         logits: a mtf.Tensor
         loss: a mtf.Tensor
       """
-      if model_type == "lm":
-        if "inputs" in mtf_features:
-          mtf_features = _dynamic_text2self(mtf_features)
+      if model_type in ["lm", "delimited_lm"]:
         _, _, length_dim = mtf_features["targets"].shape
         inputs = mtf.shift(mtf_features["targets"], offset=1,
                            dim=length_dim, wrap=False)
@@ -700,14 +730,20 @@ def tpu_estimator_model_fn(model_type,
       # perplexity eval
       logits, loss = logits_and_loss(mtf_features)
       anon_logits = mtf.anonymize(logits)
+      anon_targets = mtf.anonymize(mtf_features["targets"])
+      anon_weights = mtf.layers.weights_nonzero(anon_targets, dtype=tf.float32)
+      if model_type == "delimited_lm":
+        anon_weights *= mtf.cast(
+            mtf.logical_not(transformer.delimited_lm_inputs_mask(anon_targets)),
+            dtype=tf.float32)
+
       lowering = mtf.Lowering(graph, {mesh: mesh_impl}, autostack=autostack)
       tf_loss = tf.cast(lowering.export_to_tf_tensor(loss), tf.float32)
       tf_loss = tf.cast(tf_loss, tf.float32)
       tf_logits = tf.cast(lowering.export_to_tf_tensor(anon_logits), tf.float32)
 
-      def simple_metrics(logits, labels):
+      def simple_metrics(logits, labels, weights):
         """Simple metrics for teacher-forced eval."""
-        weights = tf.cast(tf.not_equal(labels, 0), tf.float32)
         xent = tf.nn.sparse_softmax_cross_entropy_with_logits(
             labels=labels, logits=logits)
         predictions = tf.cast(tf.argmax(logits, axis=-1), labels.dtype)
@@ -733,7 +769,8 @@ def tpu_estimator_model_fn(model_type,
                }
 
       labels = lowering.export_to_tf_tensor(anon_targets)
-      eval_metrics = (simple_metrics, [tf_logits, labels])
+      weights = lowering.export_to_tf_tensor(anon_weights)
+      eval_metrics = (simple_metrics, [tf_logits, labels, weights])
       with mtf.utils.outside_all_rewrites():
         restore_hook = mtf.MtfRestoreHook(lowering)
       return tpu_estimator.TPUEstimatorSpec(
@@ -770,6 +807,8 @@ def metric_max(values, name=None, **kwargs):
 
 def _dynamic_text2self(mtf_features):
   """Convert a packed feature dictionary from text2text into text2self.
+
+  This conversion is used when training a "delimited_lm" model.
 
   This allows us to train a text2self model on data that has been tokenized and
   packed in text2text format.
@@ -856,7 +895,7 @@ def _dynamic_text2self(mtf_features):
   return mtf_features
 
 
-def get_inputs_from_file(input_filename, ignore_comments=True):
+def get_inputs_from_file(input_filename, ignore_comments=False):
   """Read data from file and strip new lines."""
   inputs = [line.rstrip() for line in tf.io.gfile.GFile(input_filename)]
 
@@ -876,7 +915,7 @@ def encode_inputs(inputs,
                   batch_size,
                   sequence_length,
                   eos_id=1):
-  """Encode inputs.
+  """Encode string inputs for inference/scoring.
 
   Args:
     inputs: list of strings
@@ -908,6 +947,46 @@ def encode_inputs(inputs,
   all_input_ids = np.array(all_input_ids, dtype=np.int32)
 
   return all_input_ids
+
+
+def encode_delimited_lm(inputs,
+                        targets,
+                        vocabulary,
+                        batch_size,
+                        sequence_length,
+                        eos_id=1,
+                        include_final_eos=True):
+  """Encode inputs and targets for scoring a delimited langauge model.
+
+  Args:
+    inputs: list of strings
+    targets: list of strings
+    vocabulary: a mtf.transformer.vocabulary.Vocabulary
+    batch_size: an integer
+    sequence_length: an integer (maximum decode length)
+    eos_id: EOS id
+    include_final_eos: a boolean
+
+  Returns:
+    all_ids: encoded inputs
+  """
+  n = len(inputs)
+  all_ids = []
+  for inp, tgt in zip(inputs, targets):
+    input_ids = inputs_vocabulary(vocabulary).encode(inp.strip()) + [eos_id]
+    target_ids = targets_vocabulary(vocabulary).encode(tgt.strip())
+    if include_final_eos:
+      target_ids.append(eos_id)
+    ids = input_ids + target_ids
+    if len(ids) > sequence_length:
+      ids = ids[:sequence_length]
+    else:
+      ids.extend([0] * (sequence_length - len(ids)))
+    all_ids.append(ids)
+  # pad to make an integral number of batches
+  all_ids.extend([all_ids[0]] * (-n % batch_size))
+  all_ids = np.array(all_ids, dtype=np.int32)
+  return all_ids
 
 
 @gin.configurable
@@ -1102,86 +1181,6 @@ def _score_with_estimator(estimator, input_fn, eval_checkpoint_step, model_dir,
 
 
 @gin.configurable
-def score_from_files(estimator, vocabulary, model_type, batch_size,
-                     sequence_length, model_dir, eval_checkpoint_step,
-                     inputs_filename=gin.REQUIRED,
-                     targets_filename=gin.REQUIRED,
-                     scores_filename=gin.REQUIRED,
-                     eos_id=1, score_eos=True):
-  """Compute log likelihoods per example and write to a text file.
-
-  inputs & targets must either be the same length (in lines) or have inputs
-  evenly divide targets N times, where each input has N decodes sequentially
-  in targets.
-
-  The function returns a list of floats represnenting the log-likelihood of the
-  target given the input.  If `scores_filename` is present, then these are also
-  written out as a text file, one per line.
-
-  Args:
-    estimator: a TPUEstimator
-    vocabulary: a mtf.transformer.vocabulary.Vocabulary
-    model_type: a string
-    batch_size: an integer
-    sequence_length: an integer or a dict from feature-key to integer
-      the (packed) sequence length, e.g. {"inputs": 512, "targets": 128}
-    model_dir: string, estimator model_dir
-    eval_checkpoint_step: int, list of ints, or None, see `eval_model`
-      docstring.
-    inputs_filename: optional - a string (filename) with one input per line
-    targets_filename: a string (filename) with one target per line
-    scores_filename: a string (path of file to write)
-    eos_id: EOS id
-    score_eos: a boolean - whether to score the final eos token of each line If
-      this is set to false, the scores can be interpreted as prefix
-      log-likelihoods
-
-  Returns:
-    a list of floats
-  """
-  tf.logging.info("loading targets from file %s" % targets_filename)
-  targets = get_inputs_from_file(targets_filename)
-  all_target_ids = encode_inputs(
-      targets,
-      vocabulary,
-      model_type,
-      batch_size,
-      sequence_length["targets"],
-      eos_id=eos_id if score_eos else 0)
-  has_inputs = inputs_filename is not None
-  if has_inputs:
-    tf.logging.info("loading inputs from file %s" % inputs_filename)
-    inputs = get_inputs_from_file(inputs_filename)
-    if len(inputs) != len(targets):
-      # We assume that the targets file contains n targets for each input.
-      # So we repeat each input n times.
-      if len(targets) % len(inputs):
-        raise ValueError("len(inputs) must divide len(targets), got %d and %d" %
-                         (len(inputs), len(targets)))
-      repeats = len(targets) // len(inputs)
-      inputs = [inputs[i // repeats] for i in range(len(targets))]
-    all_input_ids = encode_inputs(
-        inputs,
-        vocabulary,
-        model_type,
-        batch_size,
-        sequence_length["inputs"],
-        eos_id=eos_id)
-
-  def input_fn(params):
-    del params
-    m = ({"inputs": all_input_ids, "targets": all_target_ids} if has_inputs
-         else {"targets": all_target_ids})
-    dataset = tf.data.Dataset.from_tensor_slices(m)
-    dataset = dataset.flat_map(tf.data.Dataset.from_tensors)
-    dataset = dataset.batch(batch_size, drop_remainder=True)
-    return dataset.prefetch(tf.data.experimental.AUTOTUNE)
-
-  return _score_with_estimator(estimator, input_fn, eval_checkpoint_step,
-                               model_dir, scores_filename, len(targets))
-
-
-@gin.configurable
 def score_from_strings(estimator, vocabulary, model_type, batch_size,
                        sequence_length, model_dir, eval_checkpoint_step,
                        inputs=gin.REQUIRED, targets=gin.REQUIRED,
@@ -1207,7 +1206,9 @@ def score_from_strings(estimator, vocabulary, model_type, batch_size,
     eval_checkpoint_step: int, list of ints, or None, see `eval_model`
       docstring.
     inputs: optional - a list of strings (inputs) the same length as targets
+      alternatively, a string filepath for a text file (one string per line)
     targets: a list of strings (targets)
+      alternatively, a string filepath for a text file (one string per line)
     scores_filename: a string (path of file to write)
     eos_id: EOS id
     score_eos: a boolean - whether to score the final eos token of each line
@@ -1216,6 +1217,10 @@ def score_from_strings(estimator, vocabulary, model_type, batch_size,
   Returns:
     a list of floats
   """
+  if isinstance(inputs, str):
+    inputs = get_inputs_from_file(inputs)
+  if isinstance(targets, str):
+    targets = get_inputs_from_file(targets)
   has_inputs = inputs is not None
   if has_inputs:
     if len(inputs) < len(targets):
@@ -1231,11 +1236,22 @@ def score_from_strings(estimator, vocabulary, model_type, batch_size,
       if len(targets) != 1:
         raise ValueError("Expected only one target string")
       targets = targets * len(inputs)
-    all_input_ids = encode_inputs(inputs, vocabulary, model_type, batch_size,
-                                  sequence_length["inputs"], eos_id=eos_id)
-  all_target_ids = encode_inputs(
-      targets, vocabulary, model_type, batch_size,
-      sequence_length["targets"], eos_id=eos_id if score_eos else 0)
+  if model_type == "delimited_lm":
+    all_target_ids = encode_delimited_lm(
+        inputs,
+        targets,
+        vocabulary,
+        batch_size,
+        sequence_length["targets"],
+        eos_id=eos_id)
+    has_inputs = False
+  else:
+    if has_inputs:
+      all_input_ids = encode_inputs(inputs, vocabulary, model_type, batch_size,
+                                    sequence_length["inputs"], eos_id=eos_id)
+    all_target_ids = encode_inputs(
+        targets, vocabulary, model_type, batch_size,
+        sequence_length["targets"], eos_id=eos_id if score_eos else 0)
 
   def input_fn(params):
     del params
@@ -2116,9 +2132,6 @@ def run(tpu_job_name,
   elif mode == "infer":
     infer_model(estimator, vocabulary, sequence_length, batch_size, model_type,
                 model_dir, eval_checkpoint_step)
-  elif mode == "score_from_files":
-    score_from_files(estimator, vocabulary, model_type, batch_size,
-                     sequence_length, model_dir, eval_checkpoint_step)
   elif mode == "score_from_strings":
     score_from_strings(estimator, vocabulary, model_type, batch_size,
                        sequence_length, model_dir, eval_checkpoint_step,

@@ -781,7 +781,7 @@ class Unitransformer(object):
     weights = mtf.layers.weights_nonzero(
         targets, dtype=context.activation_dtype)
     if self.loss_on_targets_only:
-      weights *= mtf.cast(mtf.logical_not(text2self_inputs_mask(targets)),
+      weights *= mtf.cast(mtf.logical_not(delimited_lm_inputs_mask(targets)),
                           dtype=context.activation_dtype)
     return (mtf.reduce_sum(loss * weights) /
             self.loss_denominator(targets, context.num_microbatches))
@@ -957,7 +957,7 @@ class Unitransformer(object):
       position_is_default = False
     if self.input_full_attention:
       # The inputs part of each sequence can fully attend within itself.
-      full_attention_region = text2self_inputs_mask(targets)
+      full_attention_region = delimited_lm_inputs_mask(targets)
       # We can include one additional position to the right - the position
       #   where the final EOS of the inputs is read and the first target token
       #   is predicted.
@@ -1909,7 +1909,7 @@ def _round_up_to_multiple(n, divisor):
   return n + -n % divisor
 
 
-def text2self_inputs_mask(ids, eos_id=1):
+def delimited_lm_inputs_mask(ids, eos_id=1):
   """Binary mask indicating which parts of the ids represent the inputs.
 
   Assumes that the ids consist of packed sequences where each example is
