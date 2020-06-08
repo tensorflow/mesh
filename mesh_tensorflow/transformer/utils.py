@@ -422,7 +422,8 @@ def tpu_estimator_model_fn(model_type,
     # Verify that the right features exist, and transform them if necessary
     if mode == tf.estimator.ModeKeys.PREDICT:
       _verify_feature_exists("inputs", True)
-      _verify_feature_exists("targets", False)
+      # "targets" may or may not exist depending on whether we are doing
+      # evaluation or open-ended inference.
     else:
       _verify_feature_exists("targets", True)
       _verify_feature_exists("inputs", model_type != "lm")
