@@ -620,11 +620,12 @@ class ReversibleLayerStack(LayerStack):
 
 
 @gin.configurable
-def sublayer_true_layer_norm(x, layer_stack, context):
+def sublayer_true_layer_norm(x, layer_stack, context, epsilon=1e-6):
   """True (aka normal) Normalization."""
+  del layer_stack
   model_dim = context.model.model_dim
   with tf.variable_scope("true_layer_norm"):
-    return mtf.layers.layer_norm(x, model_dim, layer_stack.norm_epsilon)
+    return mtf.layers.layer_norm(x, model_dim, epsilon)
 
 
 @gin.configurable
