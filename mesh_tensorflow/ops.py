@@ -2603,6 +2603,7 @@ class SplitOperation(Operation):
             "splittable", [split_dim.name]))
 
   def gradient(self, grad_ys):
+    grad_ys = [g or zeros_like(o) for g, o in zip(grad_ys, self._outputs)]
     return [concat(grad_ys, self._split_dim.name)]
 
   def lower(self, lowering):
