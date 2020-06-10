@@ -730,8 +730,17 @@ def tpu_estimator_model_fn(model_type,
     elif mode == tf.estimator.ModeKeys.EVAL:
       # perplexity eval
       logits, loss = logits_and_loss(mtf_features)
-      anon_logits = mtf.anonymize(logits)
-      anon_targets = mtf.anonymize(mtf_features["targets"])
+      # compute cross-entropy while still on TPU to avoid having to outfeed the
+      # logits, which might be big.
+      logits = mtf.cast(logits, tf.float32)
+      vocab_dim = logits.shape.dims[-1]
+      targets = mtf_features["targets"]
+      cross_entropy = mtf.layers.softmax_cross_entropy_with_logits(
+          logits, targets, vocab_dim)
+      anon_cross_entropy = mtf.anonymize(cross_entropy)
+      predictions = mtf.cast(mtf.argmax(logits, vocab_dim), targets.dtype)
+      anon_predictions = mtf.anonymize(predictions)
+      anon_targets = mtf.anonymize(targets)
       anon_weights = mtf.layers.weights_nonzero(anon_targets, dtype=tf.float32)
       if model_type == "delimited_lm":
         anon_weights *= mtf.cast(
@@ -741,13 +750,11 @@ def tpu_estimator_model_fn(model_type,
       lowering = mtf.Lowering(graph, {mesh: mesh_impl}, autostack=autostack)
       tf_loss = tf.cast(lowering.export_to_tf_tensor(loss), tf.float32)
       tf_loss = tf.cast(tf_loss, tf.float32)
-      tf_logits = tf.cast(lowering.export_to_tf_tensor(anon_logits), tf.float32)
+      tf_predictions = lowering.export_to_tf_tensor(anon_predictions)
+      tf_cross_entropy = lowering.export_to_tf_tensor(anon_cross_entropy)
 
-      def simple_metrics(logits, labels, weights):
+      def simple_metrics(xent, predictions, labels, weights):
         """Simple metrics for teacher-forced eval."""
-        xent = tf.nn.sparse_softmax_cross_entropy_with_logits(
-            labels=labels, logits=logits)
-        predictions = tf.cast(tf.argmax(logits, axis=-1), labels.dtype)
         token_correct = tf.cast(
             tf.equal(predictions, labels), tf.float32) * weights
         sequence_correct = tf.cast(
@@ -771,7 +778,8 @@ def tpu_estimator_model_fn(model_type,
 
       labels = lowering.export_to_tf_tensor(anon_targets)
       weights = lowering.export_to_tf_tensor(anon_weights)
-      eval_metrics = (simple_metrics, [tf_logits, labels, weights])
+      eval_metrics = (simple_metrics, [
+          tf_cross_entropy, tf_predictions, labels, weights])
       with mtf.utils.outside_all_rewrites():
         restore_hook = mtf.MtfRestoreHook(lowering)
       return tpu_estimator.TPUEstimatorSpec(
