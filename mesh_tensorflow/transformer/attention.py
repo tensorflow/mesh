@@ -33,7 +33,8 @@ def attention(q,
               bias=None,
               dropout_rate=0.0,
               dropout_broadcast_dims=None,
-              extra_logit=None):
+              extra_logit=None,
+              context=None):
   """Dot-product attention - doesn't use positional dimensions.
 
   key_dim is a Dimension representing the channels in the queries and keys
@@ -59,10 +60,14 @@ def attention(q,
     dropout_rate: a float.
     dropout_broadcast_dims: an optional list of mtf.Dimension
     extra_logit: an optional scalar or tensor
+    context: an optional Transformer.Context
 
   Returns:
     Tensor with shape q.shape - key_dim + value_dim
   """
+  orig_q_shape = q.shape
+  q, k, v, bias = _maybe_reshape_attention_input_for_2d_sharding(
+      context, q, k, v, bias, [key_dim, value_dim])
   logits = mtf.layers.us_einsum([q, k], reduced_dims=[key_dim])
   if bias is not None:
     logits += bias
@@ -73,6 +78,7 @@ def attention(q,
         noise_shape=weights.shape - dropout_broadcast_dims)
   outputs_shape = q.shape - key_dim + value_dim
   outputs = mtf.einsum([weights, v], outputs_shape)
+  outputs = mtf.reshape(outputs, orig_q_shape - key_dim + value_dim)
   return outputs
 
 
@@ -496,3 +502,85 @@ def visibility_mask_to_attention_bias(visible, dtype):
     a Tensor with the given dtype and the same shape as "visible"
   """
   return mtf.cast(mtf.logical_not(visible), dtype) * -1e9
+
+
+def _maybe_reshape_attention_input_for_2d_sharding(
+    context, q, k, v, bias, unsplittable_dims):
+  """Reshape the inputs to attention to split over an unused mesh dimension.
+
+  In the case where the attention computation is unnecessarily replicated,
+  this function reshapes the attention inputs to remove the unnecessary
+  replication.
+
+  This becomes relevent when doing 2-dimenional model parallelism.
+  d_model is sharded over one mesh dimension and [vocab, num_heads, d_ff] are
+  sharded over the other mesh dimension.  This fully distributes all of the
+  einsum operations, except for the internals of the attention computation.
+
+  To distribute that computation, this function creates a new tensor-dimension
+  from the low bits of either the batch dimension or the num_heads dimension,
+  and then splits that dimension over the unused mesh dimension.
+
+  Args:
+    context: a transformer.Context
+    q: a Tensor
+    k: a Tensor
+    v: a Tensor
+    bias: a Tensor
+    unsplittable_dims: a list of tensor-dimensions not to split.  The key/value
+      dimensions should be passed here.
+  Returns:
+    reshaped_q: a Tensor
+    reshaped_k: a Tensor
+    reshaped_v: a Tensor
+    reshaped_bias: a Tensor
+  """
+  original_inputs = q, k, v, bias
+  # we need to know the layout and mesh-shape to figure out what to do.
+  if not context or not context.model.layout or not context.model.mesh_shape:
+    return original_inputs
+  mesh_shape = mtf.convert_to_shape(context.model.mesh_shape)
+  layout_rules = mtf.convert_to_layout_rules(context.model.layout)
+  # find a mesh dim that is unused (no tensor-dimension is split across it)
+  mesh_axis_used = [False] * mesh_shape.ndims
+  for x in original_inputs:
+    for mesh_axis in layout_rules.tensor_layout(
+        x.shape, mesh_shape).tensor_axis_to_mesh_axis:
+      if mesh_axis is not None:
+        mesh_axis_used[mesh_axis] = True
+  if False not in mesh_axis_used:
+    return original_inputs
+  mesh_dim = mesh_shape.dims[mesh_axis_used.index(False)]
+  # Choose an appropriate name for the new tensor-dimension so that the layout
+  #   will know to split it across the unused mesh dimension.
+  tensor_dim_name = None
+  tensor_dim_name = layout_rules.mesh_dimension_name_to_tensor_dimension_names(
+      mesh_dim.name)
+  if tensor_dim_name:
+    tensor_dim_name = tensor_dim_name[0]
+  else:
+    return original_inputs
+  # Find a tensor-dimension that we can further split, by breaking off the
+  # lower bits into our new tensor-dimension.
+  # This resplittable tensor-dimension must be presnent in all of q, k, v
+  #   and must be large enough to be further split.
+  resplittable_dim = None
+  for d in q.shape.dims:
+    if d in k.shape.dims and d in v.shape.dims and d not in unsplittable_dims:
+      num_splits = mtf.tensor_dim_to_mesh_dim_size(
+          context.model.layout, context.model.mesh_shape, d)
+      if d.size % (num_splits * mesh_dim.size) == 0:
+        resplittable_dim = d
+        break
+  if not resplittable_dim:
+    return original_inputs
+  new_dim_high = mtf.Dimension(resplittable_dim.name, num_splits)
+  new_dim_low = mtf.Dimension(tensor_dim_name,
+                              resplittable_dim.size // num_splits)
+  def _my_reshape(x):
+    if x and resplittable_dim in x.shape.dims:
+      return mtf.replace_dimensions(
+          x, resplittable_dim, [new_dim_high, new_dim_low])
+    else:
+      return x
+  return _my_reshape(q), _my_reshape(k), _my_reshape(v), _my_reshape(bias)

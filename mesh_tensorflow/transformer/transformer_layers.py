@@ -254,6 +254,7 @@ class SelfAttention(transformer.TransformerLayer):
           q, k, v, memory_length, self.kv_dim, self.kv_dim,
           self.compute_bias(context, memory_position, x,
                             params.query_heads_dims, q),
+          context=context,
           **self.attention_kwargs_from_context(context))
 
     attention_output_shape = self.expected_attention_output_shape(x, params)
@@ -511,6 +512,7 @@ def enc_dec_attention(self_attention_layer, memory_antecedent, context, x,
   a = attention.attention(
       q, k, v, memory_length, self_attention_layer.kv_dim,
       self_attention_layer.kv_dim, bias,
+      context=context,
       **self_attention_layer.attention_kwargs_from_context(context))
   attention_output_shape = self_attention_layer.expected_attention_output_shape(
       x, params)
