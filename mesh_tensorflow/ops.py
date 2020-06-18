@@ -1020,12 +1020,33 @@ class MeshImpl(object):
     Args:
       fn: function from tf.Tensors to tf.Tensor or a tuple of tf.Tensors.
       *inputs: list of inputs.  Each input is either a LaidOutTensor or
-        is convertible to a tf.Tensor.
+        has a to_laid_out_tensor method or is convertible to a tf.Tensor.
 
     Returns:
       LaidOutTensor, or a tuple of LaidOutTensors if fn returns a tuple.
     """
     raise NotImplementedError("Slicewise not implemented")
+
+  def slicewise_delay_allreduce(self, fn, *inputs):
+    """If all the arguments are compatible LazyAllreduceSums, then stay lazy.
+
+    Args:
+      fn: function from tf.Tensors to tf.Tensor or a tuple of tf.Tensors.
+      *inputs: list of inputs.  Each input is either a LaidOutTensor or
+        has a to_laid_out_tensor method or is convertibleto a tf.Tensor.
+
+    Returns:
+      LaidOutTensor or LazyAllreduceSum
+    """
+    if compatible_lazy_allreduce_sums(inputs):
+      return LazyAllreduceSum(
+          self,
+          self.slicewise(
+              fn, *[x.laid_out_input for x in inputs]),
+          inputs[0].mesh_axes,
+          add_counter_fn=inputs[0].add_counter_fn)
+    else:
+      return self.slicewise(fn, *inputs)
 
   def Print(self, x, data, message, **kwargs):  # pylint: disable=invalid-name
     """Calls tf.Print.
@@ -1352,30 +1373,30 @@ class LazyAllreduceSum(object):
         self.add_counter_fn()
     return self._reduced
 
-  def __add__(self, other):
-    """Add to another LazyAllreduceSum.
-
-    Args:
-      other: a LazyAllreduceSum or a LaidOutTensor
-    Returns:
-      a LazyAllreduceSum or a LaidOutTensor
-    """
-    if (isinstance(other, LazyAllreduceSum) and
-        self.mesh_impl == other.mesh_impl and
-        self.mesh_axes == other.mesh_axes):
-      return LazyAllreduceSum(
-          self.mesh_impl,
-          self.mesh_impl.slicewise(
-              tf.add, self.laid_out_input, other.laid_out_input),
-          self.mesh_axes,
-          add_counter_fn=self.add_counter_fn)
-    else:
-      return self.mesh_impl.slicewise(
-          tf.add, self.to_laid_out_tensor(), other.to_laid_out_tensor())
-
   @property
   def slice_shape(self):
     return self.laid_out_input.slice_shape
+
+
+def compatible_lazy_allreduce_sums(xs):
+  """"Are xs all compatible LazyAllreduceSum objects.
+
+  Args:
+    xs: a list
+  Returns:
+    a boolean
+  """
+  if not xs:
+    return False
+  if not all([isinstance(x, LazyAllreduceSum) for x in xs]):
+    return False
+  x = xs[0]
+  for y in xs[1:]:
+    if x.mesh_impl != y.mesh_impl:
+      return False
+    if x.mesh_axes != y.mesh_axes:
+      return False
+  return True
 
 
 def convert_args_to_laid_out_tensors(xs):
@@ -2051,10 +2072,12 @@ class BinaryOpWithBroadcasting(Operation):
     if x2.shape != output.shape:
       laid_out_x2 = mesh_impl.slicewise(
           _expand_dims, laid_out_x2, x2.shape, output.shape)
-    lowering.set_tensor_lowering(
-        self.outputs[0],
-        mesh_impl.slicewise(
-            self._tf_fn, laid_out_x1, laid_out_x2))
+    if self._tf_fn == tf.add:
+      out = mesh_impl.slicewise_delay_allreduce(
+          self._tf_fn, laid_out_x1, laid_out_x2)
+    else:
+      out = mesh_impl.slicewise(self._tf_fn, laid_out_x1, laid_out_x2)
+    lowering.set_tensor_lowering(self.outputs[0], out)
 
 
 def binary_arguments_to_tensors(x1, x2):
@@ -4544,7 +4567,7 @@ class ReshapeOperation(Operation):
       new_slice_shape[tensor_axis] *= mesh_impl.shape[mesh_axis].size
     def reshape_fn(x):
       return tf.reshape(x, new_slice_shape)
-    slices = mesh_impl.slicewise(reshape_fn, slices)
+    slices = mesh_impl.slicewise_delay_allreduce(reshape_fn, slices)
     for mesh_axis, tensor_axis in allsplit_after_reshape:
       slices = mesh_impl.allsplit(slices, mesh_axis, tensor_axis)
     lowering.set_tensor_lowering(self.outputs[0], slices)
