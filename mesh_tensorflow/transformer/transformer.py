@@ -1980,7 +1980,7 @@ class VocabEmbedding(object):
   """A class to go from vocab ids to model states and model states to logits."""
 
   def __init__(self, mesh, vocab_dim, output_dim, variable_dtype, name,
-               ensemble_dim):
+               ensemble_dim, scale_variable_like_classifer_weights=False):
     """Embedding for the vocabulary.
 
     Most of the arguments get passed to `mtf.layers.embedding_weights`.
@@ -1992,23 +1992,36 @@ class VocabEmbedding(object):
       variable_dtype: a mtf.VariableDType
       name: a string
       ensemble_dim: a mtf.Dimension
+      scale_variable_like_classifer_weights: a boolean
     """
     self._vocab_dim = vocab_dim
     self._output_dim = output_dim
+    self._scale_variable_like_classifier_weights = (
+        scale_variable_like_classifer_weights)
+    if self._scale_variable_like_classifier_weights:
+      initializer = tf.random_normal_initializer(
+          stddev=self._output_dim.size ** -0.5)
+    else:
+      initializer = None
     self._embedding_weights = mtf.layers.embedding_weights(
         mesh=mesh,
         vocab_dim=vocab_dim,
         output_dim=output_dim,
         variable_dtype=variable_dtype,
         name=name,
-        ensemble_dim=ensemble_dim)
+        ensemble_dim=ensemble_dim,
+        initializer=initializer)
 
   def ids_to_embedding(self, ids):
-    return mtf.gather(self._embedding_weights, ids, self._vocab_dim)
+    ret = mtf.gather(self._embedding_weights, ids, self._vocab_dim)
+    if self._scale_variable_like_classifier_weights:
+      ret *= self._output_dim.size ** 0.5
+    return ret
 
   def hidden_to_logits(self, hidden, context):
     del context
-    hidden *= self._output_dim.size**-0.5
+    if not self._scale_variable_like_classifier_weights:
+      hidden *= self._output_dim.size**-0.5
     return mtf.einsum([hidden, self._embedding_weights],
                       reduced_dims=[self._output_dim])
 
