@@ -1980,7 +1980,7 @@ class VocabEmbedding(object):
   """A class to go from vocab ids to model states and model states to logits."""
 
   def __init__(self, mesh, vocab_dim, output_dim, variable_dtype, name,
-               ensemble_dim, scale_variable_like_classifer_weights=False):
+               ensemble_dim, scale_variable_like_classifier_weights=False):
     """Embedding for the vocabulary.
 
     Most of the arguments get passed to `mtf.layers.embedding_weights`.
@@ -1992,12 +1992,12 @@ class VocabEmbedding(object):
       variable_dtype: a mtf.VariableDType
       name: a string
       ensemble_dim: a mtf.Dimension
-      scale_variable_like_classifer_weights: a boolean
+      scale_variable_like_classifier_weights: a boolean
     """
     self._vocab_dim = vocab_dim
     self._output_dim = output_dim
     self._scale_variable_like_classifier_weights = (
-        scale_variable_like_classifer_weights)
+        scale_variable_like_classifier_weights)
     if self._scale_variable_like_classifier_weights:
       initializer = tf.random_normal_initializer(
           stddev=self._output_dim.size ** -0.5)
