@@ -168,7 +168,8 @@ class AttentionParams(object):
                shared_kv=False,
                combine_dims=True,
                ensemble_dim=None,
-               keep_query_heads_dims=False):
+               keep_query_heads_dims=False,
+               fold_scaling_into_initializer=True):
     """Create attention parameters.
 
     combine_dims is a hack for faster execution.  The heads and key/value
@@ -190,6 +191,7 @@ class AttentionParams(object):
       ensemble_dim: an optional Dimension
       keep_query_heads_dims: a boolean, if true keep the query_heads_dims in the
         output.
+      fold_scaling_into_initializer: a boolean
     """
     if shared_kv and key_dim != value_dim:
       raise ValueError("shared_kv requires key_dim == value_dim")
@@ -203,6 +205,7 @@ class AttentionParams(object):
     self.shared_kv = shared_kv
     self.combine_dims = combine_dims
     self.keep_query_heads_dims = keep_query_heads_dims
+    self.fold_scaling_into_initializer = fold_scaling_into_initializer
     if combine_dims:
       q_shape = [query_input_dim, _combined_dim(self.q_dims)]
       k_shape = [memory_input_dim, _combined_dim(self.k_dims)]
@@ -219,8 +222,10 @@ class AttentionParams(object):
       kv_init = init
       o_init = init
     else:
-      q_init = tf.random_normal_initializer(
-          stddev=(query_input_dim.size * key_dim.size) ** -0.5)
+      stddev = query_input_dim.size ** -0.5
+      if self.fold_scaling_into_initializer:
+        stddev *= key_dim.size ** -0.5
+      q_init = tf.random_normal_initializer(stddev=stddev)
       kv_init = tf.random_normal_initializer(
           stddev=memory_input_dim.size ** -0.5)
       o_init = tf.random_normal_initializer(
@@ -257,6 +262,8 @@ class AttentionParams(object):
         [query_antecedent, self.wq], reduced_dims=[self.query_input_dim])
     if self.combine_dims:
       ret = mtf.replace_dimensions(ret, ret.shape.dims[-1], self.q_dims)
+    if not self.fold_scaling_into_initializer:
+      ret *= self.key_dim.size ** -0.5
     return ret
 
   def compute_kv(self, memory_antecedent):

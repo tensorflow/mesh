@@ -81,7 +81,8 @@ def attention_params(context,
                      num_memory_heads=0,
                      shared_kv=False,
                      combine_dims=True,
-                     keep_query_heads_dims=False):
+                     keep_query_heads_dims=False,
+                     fold_scaling_into_initializer=True):
   """Attention Parameters for Transformer Layers.
 
   The num_heads argument indicates the number of read-heads.
@@ -105,6 +106,7 @@ def attention_params(context,
     shared_kv: a boolean
     combine_dims: a boolean
     keep_query_heads_dims: a boolean
+    fold_scaling_into_initializer: a boolean
   Returns:
     an attention.AttentionParams object
   """
@@ -136,7 +138,8 @@ def attention_params(context,
       shared_kv=shared_kv,
       ensemble_dim=context.model.ensemble_dim,
       combine_dims=combine_dims,
-      keep_query_heads_dims=keep_query_heads_dims)
+      keep_query_heads_dims=keep_query_heads_dims,
+      fold_scaling_into_initializer=fold_scaling_into_initializer)
 
 
 @gin.configurable
@@ -154,7 +157,8 @@ class SelfAttention(transformer.TransformerLayer):
                relative_attention_num_buckets=32,
                attention_func=None,
                combine_dims=True,
-               keep_query_heads_dims=False):
+               keep_query_heads_dims=False,
+               fold_scaling_into_initializer=True):
     """Create a SelfAttention Layer.
 
     Args:
@@ -170,6 +174,7 @@ class SelfAttention(transformer.TransformerLayer):
       attention_func: attention function: None/'hybrid'.
       combine_dims: a boolean
       keep_query_heads_dims: a boolean
+      fold_scaling_into_initializer: a boolean
     """
     self.num_heads = num_heads
     self.num_memory_heads = num_memory_heads
@@ -182,6 +187,7 @@ class SelfAttention(transformer.TransformerLayer):
     self.attention_func = attention_func
     self.combine_dims = combine_dims
     self.keep_query_heads_dims = keep_query_heads_dims
+    self.fold_scaling_into_initializer = fold_scaling_into_initializer
 
   def layer_output_from_attention_output(self, context, attention_output,
                                          losses):
@@ -207,7 +213,8 @@ class SelfAttention(transformer.TransformerLayer):
         num_memory_heads=self.num_memory_heads,
         shared_kv=self.shared_kv,
         combine_dims=self.combine_dims,
-        keep_query_heads_dims=self.keep_query_heads_dims)
+        keep_query_heads_dims=self.keep_query_heads_dims,
+        fold_scaling_into_initializer=self.fold_scaling_into_initializer)
 
   def call(self, context, x, losses=None):
     """Call the layer."""
