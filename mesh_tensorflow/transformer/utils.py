@@ -224,9 +224,14 @@ def tpu_mesh_shape(tpu_topology=gin.REQUIRED,
   This function is passed through gin to the argument `mesh_shape` inside the
   function `run`.
 
+  Alternatively, for model_parallelism, pass a mesh_spec (see simd_mesh_impl.py)
+  TODO(noam): describe
+
   Args:
     tpu_topology: a string - e.g. "2x2" or "v3-8"
     model_parallelism: an integer - the number of cores per model replica
+      alternatively a list that can be passed to
+      simd_mesh_impl.HierarchicalTiling
     ensemble_parallelism: an optional integer - if present then create an
       "ensemble" mesh-dimension as well, for splitting the models in an
       ensemble.
@@ -238,6 +243,11 @@ def tpu_mesh_shape(tpu_topology=gin.REQUIRED,
   else:
     x, y = tpu_topology.split("x")
     num_cores = int(x) * int(y) * 2
+  if isinstance(model_parallelism, list):
+    # model_parallelism is actually a spec used to
+    # construct a simd_mesh_impl.HierarchicalTiling object
+    return mtf.simd_mesh_impl.HierarchicalTiling.spec_to_mesh_shape(
+        model_parallelism, num_cores)
   data_parallelism = num_cores // model_parallelism
   if ensemble_parallelism:
     data_parallelism //= ensemble_parallelism
@@ -279,7 +289,8 @@ def tpu_estimator_model_fn(model_type,
                            init_checkpoint=None,
                            ensemble_inputs=None,
                            mesh_devices=None,
-                           model_info_file=None):
+                           model_info_file=None,
+                           hierarchical_tiling_spec=None):
   """Create a TPUEstimator model function.
 
   Args:
@@ -324,6 +335,8 @@ def tpu_estimator_model_fn(model_type,
       slice. Only required for GPU.
     model_info_file: an optional string, information about variables and
       operations will be logged to this file during the TRAIN mode.
+    hierarchical_tiling_spec: an optional list that can be passed as the
+      spec argument to simd_mesh_impl.HierarchicalTiling
   Returns:
     a function to be passed to TPUEstimator
   """
@@ -360,10 +373,18 @@ def tpu_estimator_model_fn(model_type,
       devices_memeory_usage = [worker0_mem] + [0] * (num_hosts - 1)
       var_placer = mtf.utils.BalancedVariablePlacer(device_list,
                                                     devices_memeory_usage)
-      physical_shape = list(
-          params["context"].device_assignment.topology.mesh_shape)
-      logical_to_physical = mtf.simd_mesh_impl.auto_logical_to_physical_tpu(
-          mesh_shape.to_integer_list, physical_shape)
+      physical_shape = [int(i) for i in
+                        params["context"].device_assignment.topology.mesh_shape]
+      physical_shape = (
+          mtf.simd_mesh_impl.physical_shape_3d_from_topology_proto_4d(
+              physical_shape))
+      if hierarchical_tiling_spec is not None:
+        logical_to_physical = mtf.simd_mesh_impl.HierarchicalTiling(
+            hierarchical_tiling_spec,
+            physical_shape).logical_to_physical
+      else:
+        logical_to_physical = mtf.simd_mesh_impl.auto_logical_to_physical_tpu(
+            mesh_shape.to_integer_list, physical_shape)
       mesh_impl = mtf.simd_mesh_impl.SimdMeshImpl(
           mesh_shape, layout_rules, mesh_devices, ctx.device_assignment,
           logical_to_physical=logical_to_physical)
