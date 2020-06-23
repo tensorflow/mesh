@@ -74,12 +74,12 @@ class DenseReluDense(transformer.TransformerLayer):
                             name="wo",
                             expert_dims=context.model.ensemble_dims)
 
-
 def attention_params(context,
                      kv_dim,
                      num_heads,
                      num_memory_heads=0,
                      shared_kv=False,
+                     no_query=False,
                      combine_dims=True,
                      keep_query_heads_dims=False,
                      fold_scaling_into_initializer=True):
@@ -98,12 +98,16 @@ def attention_params(context,
   write-heads.  A fraction of the read-heads read each write-head.
   num_memory_heads must divide num_heads. This behavior has not yet been tested.
 
+  no query flag is set to true when we do not want to create parameters
+  for query params (for synthesizer model).
+
   Args:
     context: a transformer.Context
     kv_dim: a dimension (for key and value channels)
     num_heads: an integer
     num_memory_heads: an optional integer
     shared_kv: a boolean
+    no_query: a boolean
     combine_dims: a boolean
     keep_query_heads_dims: a boolean
     fold_scaling_into_initializer: a boolean
@@ -136,6 +140,7 @@ def attention_params(context,
       memory_heads_dims=memory_heads_dims,
       variable_dtype=context.variable_dtype,
       shared_kv=shared_kv,
+      no_query=no_query,
       ensemble_dim=context.model.ensemble_dim,
       combine_dims=combine_dims,
       keep_query_heads_dims=keep_query_heads_dims,
@@ -371,6 +376,127 @@ class SelfAttention(transformer.TransformerLayer):
 
   def max_relative_position(self, context):
     return None
+
+@gin.configurable
+class Synthesizer(SelfAttention):
+  """Multi-head Synthesizer layer (https://arxiv.org/abs/2005.00743) """
+
+  def __init__(self,
+               num_heads=8,
+               num_memory_heads=0,
+               key_value_size=128,
+               shared_kv=False,
+               dropout_rate=0.0,
+               attention_kwargs=None,
+               relative_attention_type=None,
+               relative_attention_num_buckets=32,
+               attention_func=None,
+               combine_dims=True,
+               keep_query_heads_dims=False,
+               synthesize_mode="random_plus_alpha",
+               **kwargs):
+    """Create a Synthesizer Layer.
+
+    Args:
+      num_heads: an integer
+      num_memory_heads: an optional integer
+      key_value_size: an integer
+      shared_kv: a boolean
+      dropout_rate: a float
+      attention_kwargs: a dictionary of kwargs for attention.attention
+      relative_attention_type: an optional string - one of
+        (None, "bias", "bias_shared", "contextual")
+      relative_attention_num_buckets: an integer
+      attention_func: attention function: None/'hybrid'.
+      combine_dims: a boolean
+      keep_query_heads_dims: a boolean
+      synthesize_mode: a string to select synthesizer variant
+    """
+    super(SelfAttention,self).__init__(**kwargs)
+    self.num_heads = num_heads
+    self.num_memory_heads = num_memory_heads
+    self.key_value_size = key_value_size
+    self.shared_kv = shared_kv
+    self.dropout_rate = dropout_rate
+    self.attention_kwargs = attention_kwargs or {}
+    self.relative_attention_type = relative_attention_type
+    self.relative_attention_num_buckets = relative_attention_num_buckets
+    self.attention_func = attention_func
+    self.combine_dims = combine_dims
+    self.keep_query_heads_dims = keep_query_heads_dims
+    self.synthesize_mode = synthesize_mode
+    self.no_query = False
+    if "plus" in self.synthesize_mode:
+      self.shared_kv = False
+      self.no_query = False
+    elif "minus" in self.synthesize_mode:
+      # We still keep the query as first projection
+      self.shared_kv = True
+      self.no_query = False
+    else:
+      self.shared_kv = True
+      self.shared_q = True
+
+  def make_params(self, context):
+    return attention_params(context=context,
+                            kv_dim=self.kv_dim,
+                            num_heads=self.num_heads,
+                            num_memory_heads=self.num_memory_heads,
+                            shared_kv=self.shared_kv,
+                            no_query=self.no_query)
+
+  def call(self, context, x, losses=None):
+    """Call the layer."""
+    params = self.make_params(context)
+    q = params.compute_q(x)
+    memory_length = self.memory_length(context)
+    if context.mode == "incremental":
+      m = x
+    else:
+      m = mtf.replace_dimensions(x, context.length_dim, memory_length)
+    if self.shared_kv:
+      kv = params.compute_kv(m)
+    else:
+      k = params.compute_k(m)
+      v = params.compute_v(m)
+    if self.no_query:
+      # we don't use q for some synthesizer modes that don't use QKV at all.
+      q = x
+    else:
+      q = params.compute_q(x)
+    if context.mode == "incremental":
+      one_hot = mtf.one_hot(
+          context.position, memory_length, dtype=context.activation_dtype)
+      inv_one_hot = 1.0 - one_hot
+      if self.shared_kv:
+        old_kv = context.get_states(1)
+        kv = old_kv * inv_one_hot + kv * one_hot
+      else:
+        old_k, old_v = context.get_states(2)
+        k = old_k * inv_one_hot + k * one_hot
+        v = old_v * inv_one_hot + v * one_hot
+      memory_position = mtf.range(context.mesh, memory_length, tf.int32)
+    else:
+      memory_position = self.rename_length_to_memory_length(
+          context.position, context)
+    if context.mode == "incremental" or context.mode == "first_part":
+      context.record_new_states([kv] if self.shared_kv else [k, v])
+    if self.shared_kv:
+      k = kv
+      v = kv
+    o = attention.synthetic_attention(
+                      q, k, v, memory_length, self.kv_dim, self.kv_dim,
+                      self.compute_bias(context, memory_position, x,
+                                        params.query_heads_dims, q),
+                      synthesize=True, synthesize_mode=self.synthesize_mode,
+                      context=context,
+                      **self.attention_kwargs_from_context(context))
+    attention_output_shape = self.expected_attention_output_shape(x, params)
+    attention_output = params.compute_output(
+        o, output_shape=attention_output_shape)
+    return self.layer_output_from_attention_output(context, attention_output,
+                                                   losses)
+
 
 
 @gin.configurable
