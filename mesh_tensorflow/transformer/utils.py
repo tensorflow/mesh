@@ -1335,8 +1335,8 @@ def get_estimator(model_type, vocabulary, mesh_shape,
                   autostack, learning_rate_schedule, keep_checkpoint_max,
                   save_checkpoints_steps, optimizer, predict_fn,
                   variable_filter, ensemble_inputs, use_tpu, tpu_job_name,
-                  log_step_count_steps, save_summary_steps,
                   iterations_per_loop, cluster, init_checkpoint=None,
+                  log_step_count_steps=100, save_summary_steps=100,
                   mesh_devices=None):
   """Create TPU estimator for the transfomer Mesh-TF model.
 
@@ -1370,16 +1370,16 @@ def get_estimator(model_type, vocabulary, mesh_shape,
     ensemble_inputs: an integer, see `train_model` docstring for details.
     use_tpu: string, the Cloud TPU to use for training
     tpu_job_name: string, name of TPU worker binary
-    log_step_count_steps: an integer, the frequency, in number of global steps,
-      that the global step and the loss will be logged during training.
-      Also controls the frequency that the global steps / s will be logged
-      (and written to summary) during training
-    save_summary_steps: an integer, save summaries every this many steps
     iterations_per_loop: integer, steps per train loop
     cluster: a TPUClsuterResolver object
     init_checkpoint: a string, if not None then read in variables from this
       checkpoint path when initializing variables. Will only initialize
       variables that appear both in the current graph and the checkpoint.
+    log_step_count_steps: an integer, the frequency, in number of global steps,
+      that the global step and the loss will be logged during training.
+      Also controls the frequency that the global steps / s will be logged
+      (and written to summary) during training
+    save_summary_steps: an integer, save summaries every this many steps
     mesh_devices: a list of strings, the device names to use for each mesh
       slice. Only required for GPU.
   Returns:
