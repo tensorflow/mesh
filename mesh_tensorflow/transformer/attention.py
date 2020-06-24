@@ -152,6 +152,182 @@ def hybrid_attention(q,
   return outputs
 
 
+def synthetic_attention(q,
+                        k,
+                        v,
+                        memory_length_dim,
+                        key_dim,
+                        value_dim,
+                        bias=None,
+                        dropout_rate=0.0,
+                        dropout_broadcast_dims=None,
+                        extra_logit=None,
+                        synthesize=True,
+                        synthesize_mode="random_plus_alpha",
+                        factorized_dim=16,
+                        max_length=512,
+                        context=None):
+  """Synthetic Attention from Synthesizers (https://arxiv.org/abs/2005.00743).
+
+  key_dim is a Dimension representing the channels in the queries and keys
+  value_dim is a Dimension representing the channels in values
+  memory_length_dim is a Dimension representing the different key/value pairs.
+
+  Dimensions of q: other_query_dims + {key_dim}
+  Dimensions of k: other_memory_dims + {memory_length_dim, key_dim}
+  Dimensions of v: other_memory_dims + {memory_length_dim, value_dim}
+  other_memory_dims is a subset of other_query_dims
+
+  Typically, other_query_dims={batch, heads, length}
+  Typically, other_memory_dims={batch, heads}
+
+  Args:
+    q: a Tensor
+    k: a Tensor
+    v: a Tensor
+    memory_length_dim: a Dimension
+    key_dim: a Dimension
+    value_dim: a Dimension
+    bias: a Tensor to be added into the attention logits.
+    dropout_rate: a float.
+    dropout_broadcast_dims: an optional list of mtf.Dimension
+    extra_logit: an optional scalar or tensor
+    synthesize: flag to use synthetic attention or not
+    synthesize_mode: which variant of synthesizer to use
+    factorized_dim: factorized dim for synthesizers
+    max_length: max length of input sequence
+    context: context since we need context mode
+
+  Returns:
+    Tensor with shape q.shape - key_dim + value_dim
+  """
+
+  if synthesize:
+    num_heads = v.shape.get_dim_by_name("heads")
+    tf.logging.info("Using synthesizer")
+    if synthesize_mode == "random":
+      tf.logging.info("Using Random Synthesizers")
+      r_shape = mtf.Shape([mtf.Dimension("length", max_length),
+                           mtf.Dimension("heads", num_heads.size),
+                           mtf.Dimension("memory_length",
+                                         num_heads, max_length)])
+      initializer = tf.random_uniform_initializer()
+      r = mtf.get_variable(context.mesh, "R", r_shape,
+                           initializer=None,
+                           dtype=context.variable_dtype)
+      r = mtf.slice(r, 0, memory_length_dim.size, memory_length_dim.name)
+      if context.mode == "incremental":
+        r = mtf.gather(r, context.position, r.shape.get_dim_by_name("length"))
+      else:
+        length_dim = q.shape.get_dim_by_name("length")
+        r = mtf.slice(r, 0, length_dim.size, "length")
+      logits = r
+      r_shape = logits.shape
+    elif synthesize_mode == "factorized":
+      tf.logging.info("Using Factorized Random Synthesizers")
+      k = factorized_dim
+      r1_shape = mtf.Shape([mtf.Dimension("tmp", k),
+                            mtf.Dimension("heads", num_heads.size),
+                            mtf.Dimension("memory_length", 512)])
+      r2_shape = mtf.Shape([mtf.Dimension("tmp", k),
+                            mtf.Dimension("heads", num_heads.size),
+                            mtf.Dimension("memory_length", 512)])
+      r_shape = mtf.Shape([mtf.Dimension("length", 512),
+                           mtf.Dimension("heads", num_heads.size),
+                           mtf.Dimension("memory_length", 512)])
+      initializer = tf.random_normal_initializer()
+      r1 = mtf.get_variable(context.mesh, "R1", r1_shape,
+                            initializer=initializer,
+                            dtype=context.variable_dtype)
+      r2 = mtf.get_variable(context.mesh, "R2", r2_shape,
+                            initializer=initializer,
+                            dtype=context.variable_dtype)
+      r = mtf.einsum([r1, r2], r_shape)
+      r = mtf.slice(r, 0, memory_length_dim.size, memory_length_dim.name)
+      r = mtf.slice(r, 0, length_dim.size, length_dim.name)
+      logits = r
+    elif synthesize_mode == "dense_minus":
+      # Dense Synthesizer Model
+      tmp_dim = mtf.Dimension("memory_length", max_length)
+      logits = mtf.layers.dense(mtf.relu(q), [tmp_dim],
+                                use_bias=False,
+                                name="pi",
+                                reduced_dims=[key_dim],
+                                variable_dtype=None)
+      logits = mtf.slice(logits, 0, memory_length_dim.size,
+                         memory_length_dim.name)
+      if context.mode == "incremental":
+        pass
+      else:
+        length_dim = q.shape.get_dim_by_name("length")
+        logits = mtf.slice(logits, 0, length_dim.size, "length")
+    elif synthesize_mode == "random_plus_alpha":
+      # Mixture Random Synthesizer with learnable Alpha
+      tf.logging.info("Using Random Plus Alpha")
+      logits = mtf.einsum([q, k], reduced_dims=[key_dim])
+      num_heads = logits.shape.get_dim_by_name("heads")
+      r_shape = mtf.Shape([mtf.Dimension("length", 512),
+                           mtf.Dimension("heads", num_heads.size),
+                           mtf.Dimension("memory_length", 512)])
+      r = mtf.get_variable(context.mesh, "R", r_shape,
+                           initializer=None,
+                           dtype=context.variable_dtype)
+      r = mtf.slice(r, 0, memory_length_dim.size, memory_length_dim.name)
+      if context.mode == "incremental":
+        r = mtf.gather(r, context.position, r.shape.get_dim_by_name("length"))
+      else:
+        length_dim = q.shape.get_dim_by_name("length")
+        r = mtf.slice(r, 0, length_dim.size, length_dim.name)
+      alpha = mtf.get_variable(context.mesh,
+                               "alpha",
+                               mtf.Shape([mtf.Dimension("alpha", 1)]),
+                               initializer=tf.zeros_initializer(),
+                               dtype=context.variable_dtype)
+      alpha = mtf.sigmoid(alpha)
+      logits = ((1-alpha) * logits) + (alpha * r)
+    elif synthesize_mode == "dense_plus_alpha":
+      # Mixture Dense Synthesizer with learnable alpha
+      tf.logging.info("Using Dense Plus Alpha Scaling")
+      logits = mtf.einsum([q, k], reduced_dims=[key_dim])
+      tmp_dim = mtf.Dimension("memory_length", 512)
+      r = mtf.layers.dense(mtf.relu(q), [tmp_dim],
+                           use_bias=False,
+                           name="pi",
+                           reduced_dims=[key_dim],
+                           variable_dtype=None)
+      r = mtf.slice(r, 0, memory_length_dim.size, memory_length_dim.name)
+      if context.mode == "incremental":
+        pass
+      else:
+        length_dim = q.shape.get_dim_by_name("length")
+        r = mtf.slice(r, 0, length_dim.size, "length")
+      alpha = mtf.get_variable(context.mesh,
+                               "alpha",
+                               mtf.Shape([mtf.Dimension("alpha", 1)]),
+                               initializer=tf.zeros_initializer(),
+                               dtype=context.variable_dtype)
+      alpha = mtf.sigmoid(alpha)
+      logits = ((1-alpha) * logits) + (alpha * r)
+  if bias is not None:
+    logits += bias
+
+  weights = mtf.softmax(logits, memory_length_dim, extra_logit=extra_logit)
+  if dropout_rate != 0.0:
+    weights = mtf.dropout(
+        weights, 1.0 - dropout_rate,
+        noise_shape=weights.shape - dropout_broadcast_dims)
+
+  if synthesize and "plus" not in synthesize_mode:
+    if synthesize_mode == "dense_minus":
+      outputs_shape = mtf.Shape(q.shape.dims[:-1] + [value_dim])
+    else:
+      outputs_shape = mtf.Shape(q.shape.dims[:-1] + [num_heads, value_dim])
+  else:
+    outputs_shape = q.shape - [key_dim] + value_dim
+  outputs = mtf.einsum([weights, v], outputs_shape)
+  return outputs
+
+
 class AttentionParams(object):
   """A set of parameters used for (multihead) attention."""
 
@@ -166,6 +342,7 @@ class AttentionParams(object):
                memory_heads_dims,
                variable_dtype,
                shared_kv=False,
+               no_query=False,
                combine_dims=True,
                ensemble_dim=None,
                keep_query_heads_dims=False,
@@ -187,6 +364,7 @@ class AttentionParams(object):
       memory_heads_dims: a list of Dimension
       variable_dtype: a mtf.VariableDType
       shared_kv: a boolean
+      no_query: a boolean
       combine_dims: a boolean
       ensemble_dim: an optional Dimension
       keep_query_heads_dims: a boolean, if true keep the query_heads_dims in the
@@ -203,6 +381,7 @@ class AttentionParams(object):
     self.query_heads_dims = query_heads_dims or []
     self.memory_heads_dims = memory_heads_dims or []
     self.shared_kv = shared_kv
+    self.no_query = no_query
     self.combine_dims = combine_dims
     self.keep_query_heads_dims = keep_query_heads_dims
     self.fold_scaling_into_initializer = fold_scaling_into_initializer
@@ -235,8 +414,9 @@ class AttentionParams(object):
       k_shape = [ensemble_dim] + k_shape
       v_shape = [ensemble_dim] + v_shape
       o_shape = [ensemble_dim] + o_shape
-    self.wq = mtf.get_variable(
-        mesh, "q", q_shape, initializer=q_init, dtype=variable_dtype)
+    if not self.no_query:
+      self.wq = mtf.get_variable(
+          mesh, "q", q_shape, initializer=q_init, dtype=variable_dtype)
     if shared_kv:
       self.wkv = mtf.get_variable(
           mesh, "kv", k_shape, initializer=kv_init, dtype=variable_dtype)
