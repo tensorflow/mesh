@@ -5,7 +5,7 @@ from setuptools import setup
 
 setup(
     name='mesh-tensorflow',
-    version='0.1.15',
+    version='0.1.16',
     description='Mesh TensorFlow',
     author='Google Inc.',
     author_email='no-reply@google.com',

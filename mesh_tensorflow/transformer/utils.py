@@ -375,9 +375,10 @@ def tpu_estimator_model_fn(model_type,
                                                     devices_memeory_usage)
       physical_shape = [int(i) for i in
                         params["context"].device_assignment.topology.mesh_shape]
-      physical_shape = (
-          mtf.simd_mesh_impl.physical_shape_3d_from_topology_proto_4d(
-              physical_shape))
+      if len(physical_shape) == 4:
+        physical_shape = (
+            mtf.simd_mesh_impl.physical_shape_3d_from_topology_proto_4d(
+                physical_shape))
       if hierarchical_tiling_spec is not None:
         logical_to_physical = mtf.simd_mesh_impl.HierarchicalTiling(
             hierarchical_tiling_spec,
