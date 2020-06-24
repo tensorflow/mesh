@@ -5,7 +5,7 @@ from setuptools import setup
 
 setup(
     name='mesh-tensorflow',
-    version='0.1.14',
+    version='0.1.15',
     description='Mesh TensorFlow',
     author='Google Inc.',
     author_email='no-reply@google.com',
@@ -14,7 +14,7 @@ setup(
     packages=find_packages(),
     package_data={
         # Include gin files.
-        'transformer': ['transformer/gin/*.gin'],
+        '': ['*.gin'],
     },
     scripts=[],
     install_requires=[
