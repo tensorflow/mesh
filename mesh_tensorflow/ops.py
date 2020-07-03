@@ -5181,10 +5181,10 @@ def mtf_slice(x, begin, size, slice_dim_name, name=None):
 
 
 def pad(x, paddings, dim_name, name=None):
-  """Slice operation.
+  """Pad operation.
 
   Args:
-    x: a list of Tensors
+    x: a Tensor
     paddings: list of integers of size 2, padding size before and after for dim.
     dim_name: string, name for the padding dim
     name: an optional string
