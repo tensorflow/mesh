@@ -5043,17 +5043,23 @@ def argmax(x, reduced_dim, name=None):
   return top_1(x, reduced_dim, name=name)[1]
 
 
-def sample_with_temperature(x, dim, temperature=1.0, name=None):
-  """Either argmax or random sampling.
+def sample_with_temperature(logits, dim, temperature=1.0, name=None):
+  """Sample from a probability distribution.
+
+  If temperature=0.0, then we compute argmax(logits, dim)
+  If temperature=1.0, then we sample with probability proportional to
+    exp(logits).  So you can pass in the log(probablity) as the logits.
+  `dim` is one the dimension of `logits` which represents the set of choices.
+  The other dimensions of `logits` are treated as batch-dimensions.
 
   Args:
-    x: a Tensor.
-    dim: a Dimension in x.shape.dims
+    logits: a Tensor.
+    dim: a Dimension in logits.shape.dims
     temperature: a float  0.0=argmax 1.0=random
     name: an optional string
 
   Returns:
-    a Tensor with type tf.int32.
+    a Tensor with type tf.int32 and shape (logits.shape - dim)
   """
   dim = convert_to_dimension(dim)
   with tf.name_scope(name, default_name="sample_with_temperature"):
@@ -5063,17 +5069,17 @@ def sample_with_temperature(x, dim, temperature=1.0, name=None):
       # * -log(-log(0)) is -infinity
       # * -log(-log(1)) is +infinity.
       # The numerics may be weird in bfloat16 - use float32.
-      x = cast(x, tf.float32)
+      logits = cast(logits, tf.float32)
       tiny_val = 1e-9
       g = -log(-log(
           random_uniform(
-              x.mesh,
-              x.shape,
+              logits.mesh,
+              logits.shape,
               minval=tiny_val,
               maxval=1.,
-              dtype=x.dtype)))
-      x += g * temperature
-    return argmax(x, dim, name)
+              dtype=logits.dtype)))
+      logits += g * temperature
+    return argmax(logits, dim, name)
 
 
 def add(x1, x2, output_shape=None, name=None):
