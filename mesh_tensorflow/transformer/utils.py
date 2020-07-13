@@ -446,6 +446,10 @@ def tpu_estimator_model_fn(model_type,
       _verify_feature_exists("inputs", True)
       # "targets" may or may not exist depending on whether we are doing
       # evaluation or open-ended inference.
+    elif model_type == "delimited_lm" and mode == "score":
+      # in scoring mode the inputs and targets may already be combined.
+      if "inputs" in mtf_features:
+        mtf_features = _dynamic_text2self(mtf_features)
     else:
       _verify_feature_exists("targets", True)
       _verify_feature_exists("inputs", model_type != "lm")
@@ -484,7 +488,7 @@ def tpu_estimator_model_fn(model_type,
           logits, mtf_features["targets"], vocab_dim)
       cross_entropy *= mtf.cast(
           mtf.not_equal(targets, 0), cross_entropy.dtype)
-      if mode == "delimited_lm":
+      if model_type == "delimited_lm":
         cross_entropy *= mtf.cast(mtf.logical_not(
             transformer.delimited_lm_inputs_mask(targets)), cross_entropy.dtype)
       scores = -mtf.reduce_sum(cross_entropy, reduced_dim=length_dim)
@@ -859,12 +863,23 @@ def _dynamic_text2self(mtf_features):
       "_dynamic_text2self: Converting text2text problem to text2self")
   inputs = mtf_features["inputs"]
   targets = mtf_features["targets"]
-  inputs_segmentation = mtf_features["inputs_segmentation"]
-  targets_segmentation = mtf_features["targets_segmentation"]
-  inputs_position = mtf_features["inputs_position"]
-  targets_position = mtf_features["targets_position"]
   inputs_length_dim = inputs.shape.dims[-1]
   targets_length_dim = targets.shape.dims[-1]
+  is_packed = "inputs_segmentation" in mtf_features
+  if is_packed:
+    inputs_segmentation = mtf_features["inputs_segmentation"]
+    targets_segmentation = mtf_features["targets_segmentation"]
+    inputs_position = mtf_features["inputs_position"]
+    targets_position = mtf_features["targets_position"]
+  else:
+    inputs_segmentation = mtf.cast(
+        mtf.not_equal(inputs, 0), tf.int32)
+    targets_segmentation = mtf.cast(
+        mtf.not_equal(targets, 0), tf.int32)
+    inputs_position = mtf.range(
+        inputs.mesh, inputs_length_dim, dtype=tf.int32) * inputs_segmentation
+    targets_position = mtf.range(
+        targets.mesh, targets_length_dim, dtype=tf.int32) * targets_segmentation
   # compute lengths of inputs and targets portions of each segment
   # segments_dim must be larger than the maximum number of segments.
   segments_dim = mtf.Dimension("segments", targets_length_dim.size)
@@ -912,18 +927,20 @@ def _dynamic_text2self(mtf_features):
   targets = (
       _convert(inputs, inputs_permutation) +
       _convert(targets, targets_permutation))
-  targets_segmentation = (
-      _convert(inputs_segmentation, inputs_permutation) +
-      _convert(targets_segmentation, targets_permutation))
-  targets_position = (
-      _convert(inputs_position, inputs_permutation) +
-      _convert(targets_position, targets_permutation))
-  mtf_features = {
-      "targets": targets,
-      "targets_segmentation": targets_segmentation,
-      "targets_position": targets_position,
-  }
-  return mtf_features
+  if is_packed:
+    targets_segmentation = (
+        _convert(inputs_segmentation, inputs_permutation) +
+        _convert(targets_segmentation, targets_permutation))
+    targets_position = (
+        _convert(inputs_position, inputs_permutation) +
+        _convert(targets_position, targets_permutation))
+    return {
+        "targets": targets,
+        "targets_segmentation": targets_segmentation,
+        "targets_position": targets_position,
+    }
+  else:
+    return {"targets": targets}
 
 
 def get_inputs_from_file(input_filename, ignore_comments=False):
@@ -1089,7 +1106,7 @@ def write_lines_to_file(lines, filename):
     tf.io.gfile.remove(filename)
   with tf.io.gfile.GFile(filename, "w") as output_file:
     for line in lines:
-      output_file.write("{}\n".format(line))
+      output_file.write("{}\n".format(line.replace("\n", " ")))
 
 
 def get_step_from_checkpoint_path(checkpoint_path):
@@ -1267,22 +1284,12 @@ def score_from_strings(estimator, vocabulary, model_type, batch_size,
       if len(targets) != 1:
         raise ValueError("Expected only one target string")
       targets = targets * len(inputs)
-  if model_type == "delimited_lm":
-    all_target_ids = encode_delimited_lm(
-        inputs,
-        targets,
-        vocabulary,
-        batch_size,
-        sequence_length["targets"],
-        eos_id=eos_id)
-    has_inputs = False
-  else:
-    if has_inputs:
-      all_input_ids = encode_inputs(inputs, vocabulary, model_type, batch_size,
-                                    sequence_length["inputs"], eos_id=eos_id)
-    all_target_ids = encode_inputs(
-        targets, vocabulary, model_type, batch_size,
-        sequence_length["targets"], eos_id=eos_id if score_eos else 0)
+  if has_inputs:
+    all_input_ids = encode_inputs(inputs, vocabulary, model_type, batch_size,
+                                  sequence_length["inputs"], eos_id=eos_id)
+  all_target_ids = encode_inputs(
+      targets, vocabulary, model_type, batch_size,
+      sequence_length["targets"], eos_id=eos_id if score_eos else 0)
 
   def input_fn(params):
     del params
@@ -2164,9 +2171,13 @@ def run(tpu_job_name,
     infer_model(estimator, vocabulary, sequence_length, batch_size, model_type,
                 model_dir, eval_checkpoint_step)
   elif mode == "score_from_strings":
-    score_from_strings(estimator, vocabulary, model_type, batch_size,
-                       sequence_length, model_dir, eval_checkpoint_step,
-                       dataset_split)
+    score_from_strings(estimator=estimator,
+                       vocabulary=vocabulary,
+                       model_type=model_type,
+                       batch_size=batch_size,
+                       sequence_length=sequence_length,
+                       model_dir=model_dir,
+                       eval_checkpoint_step=eval_checkpoint_step)
   elif mode == "score_from_dataset":
     score_from_dataset(estimator, vocabulary, batch_size, sequence_length,
                        model_dir, eval_checkpoint_step, dataset_split)
