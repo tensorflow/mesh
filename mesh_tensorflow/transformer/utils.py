@@ -1106,7 +1106,7 @@ def write_lines_to_file(lines, filename):
     tf.io.gfile.remove(filename)
   with tf.io.gfile.GFile(filename, "w") as output_file:
     for line in lines:
-      output_file.write("{}\n".format(line.replace("\n", " ")))
+      output_file.write("{}\n".format(str(line).replace("\n", " ")))
 
 
 def get_step_from_checkpoint_path(checkpoint_path):
