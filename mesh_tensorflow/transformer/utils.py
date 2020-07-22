@@ -634,6 +634,9 @@ def tpu_estimator_model_fn(model_type,
 
       if tpu_summaries:
         mtf.scalar_summary("loss", loss)
+        for g in var_grads:
+          grad_norm = mtf.sqrt(mtf.reduce_sum(mtf.square(g)))
+          mtf.scalar_summary("grads/norm" + g.name[:-2], grad_norm)
 
       if callable(learning_rate_schedule):
         # the following happens on CPU since TPU can't handle summaries.
