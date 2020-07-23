@@ -41,7 +41,7 @@ class SimdMeshImpl(mtf.MeshImpl):
                devices=None,
                device_assignment=None,
                logical_to_physical=None,
-               allreduce_in_bfloat16_max_group_size=0):
+               allreduce_in_bfloat16_max_group_size=8):
     """Create a SimdMeshImpl.
 
     Args:
