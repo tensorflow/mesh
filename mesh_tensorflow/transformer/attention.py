@@ -209,9 +209,7 @@ def synthetic_attention(q,
       tf.logging.info("Using Random Synthesizers")
       r_shape = mtf.Shape([mtf.Dimension("length", max_length),
                            mtf.Dimension("heads", num_heads.size),
-                           mtf.Dimension("memory_length",
-                                         num_heads, max_length)])
-      initializer = tf.random_uniform_initializer()
+                           mtf.Dimension("memory_length", max_length)])
       r = mtf.get_variable(context.mesh, "R", r_shape,
                            initializer=None,
                            dtype=context.variable_dtype)
@@ -235,12 +233,11 @@ def synthetic_attention(q,
       r_shape = mtf.Shape([mtf.Dimension("length", 512),
                            mtf.Dimension("heads", num_heads.size),
                            mtf.Dimension("memory_length", 512)])
-      initializer = tf.random_normal_initializer()
       r1 = mtf.get_variable(context.mesh, "R1", r1_shape,
-                            initializer=initializer,
+                            initializer=None,
                             dtype=context.variable_dtype)
       r2 = mtf.get_variable(context.mesh, "R2", r2_shape,
-                            initializer=initializer,
+                            initializer=None,
                             dtype=context.variable_dtype)
       r = mtf.einsum([r1, r2], r_shape)
       r = mtf.slice(r, 0, memory_length_dim.size, memory_length_dim.name)
@@ -324,6 +321,7 @@ def synthetic_attention(q,
       outputs_shape = mtf.Shape(q.shape.dims[:-1] + [num_heads, value_dim])
   else:
     outputs_shape = q.shape - [key_dim] + value_dim
+
   outputs = mtf.einsum([weights, v], outputs_shape)
   return outputs
 

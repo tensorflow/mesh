@@ -438,7 +438,7 @@ class Synthesizer(SelfAttention):
       self.no_query = False
     else:
       self.shared_kv = True
-      self.shared_q = True
+      self.no_query = True
 
   def make_params(self, context):
     return attention_params(context=context,
@@ -451,7 +451,6 @@ class Synthesizer(SelfAttention):
   def call(self, context, x, losses=None):
     """Call the layer."""
     params = self.make_params(context)
-    q = params.compute_q(x)
     memory_length = self.memory_length(context)
     if context.mode == "incremental":
       m = x
@@ -467,26 +466,23 @@ class Synthesizer(SelfAttention):
       q = x
     else:
       q = params.compute_q(x)
+    if self.shared_kv:
+      k = kv
+      v = kv
     if context.mode == "incremental":
       one_hot = mtf.one_hot(
           context.position, memory_length, dtype=context.activation_dtype)
       inv_one_hot = 1.0 - one_hot
-      if self.shared_kv:
-        old_kv = context.get_states(1)
-        kv = old_kv * inv_one_hot + kv * one_hot
-      else:
-        old_k, old_v = context.get_states(2)
-        k = old_k * inv_one_hot + k * one_hot
-        v = old_v * inv_one_hot + v * one_hot
+      old_k, old_v = context.get_states(2)
+      k = old_k * inv_one_hot + k * one_hot
+      v = old_v * inv_one_hot + v * one_hot
       memory_position = mtf.range(context.mesh, memory_length, tf.int32)
     else:
       memory_position = self.rename_length_to_memory_length(
           context.position, context)
     if context.mode == "incremental" or context.mode == "first_part":
-      context.record_new_states([kv] if self.shared_kv else [k, v])
-    if self.shared_kv:
-      k = kv
-      v = kv
+      context.record_new_states([k, v])
+
     o = attention.synthetic_attention(q, k, v, memory_length,
                                       self.kv_dim, self.kv_dim,
                                       self.compute_bias(context,
