@@ -124,7 +124,7 @@ def create_host_call(model_dir):
       assert len(args) == len(summaries)
       for i, tensor in enumerate(args):
         name = summaries[i][0]
-        tf.summary.scalar(
+        tf2.summary.scalar(
             name, tf.reduce_mean(tensor), step=global_step)
       return tf.summary.all_v2_summary_ops()
 
