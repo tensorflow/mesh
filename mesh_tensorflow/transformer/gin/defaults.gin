@@ -102,3 +102,7 @@ utils.tpu_mesh_shape.model_parallelism = 1
 # this if you want to run on CPU. It can also cause some numerical
 # instabilities, but it is often significantly faster.
 utils.get_variable_dtype.activation_dtype = "bfloat16"
+
+utils.alt_lr_schedule.learning_rate_schedule = @learning_rate_schedules.learning_rate_schedule_noam
+utils.alt_lr_schedule.var_filter = ''
+utils.alt_lr_schedule.use_schedule = False

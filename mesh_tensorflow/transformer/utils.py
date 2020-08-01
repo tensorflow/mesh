@@ -267,6 +267,14 @@ def variable_filter_max_size(v, max_size=1e7):
 
 
 @gin.configurable
+def alt_lr_schedule(learning_rate_schedule=gin.REQUIRED,
+                    var_filter=gin.REQUIRED,
+                    use_schedule=gin.REQUIRED):
+  """Get second lr schedule."""
+  return learning_rate_schedule, var_filter, use_schedule
+
+
+@gin.configurable
 def tpu_estimator_model_fn(model_type,
                            transformer_model,
                            vocabulary,
@@ -672,6 +680,57 @@ def tpu_estimator_model_fn(model_type,
       update_ops = optimizer(learning_rate=learning_rate).apply_grads(
           trainable_var_grads, trainable_vars
       )
+
+      # For models that uses a different LR schedule for some variables
+      # For example, Weighted Transformer.
+      alt_learning_rate_schedule, alt_var_filter, use_alt = alt_lr_schedule()
+
+      if use_alt:
+        tf.logging.info("Using alternate learning scheduler")
+        if isinstance(alt_learning_rate_schedule, list):
+          alt_learning_rate_schedule = functools.partial(
+              learning_rate_schedules.product_learning_rate,
+              factors=alt_learning_rate_schedule)
+        if callable(alt_learning_rate_schedule):
+          train_steps = auto_train_steps(batch_size, sequence_length)
+          alt_learning_rate_schedule = functools.partial(
+              alt_learning_rate_schedule, total_train_steps=train_steps)
+        if callable(alt_learning_rate_schedule):
+          # the following happens on CPU since TPU can't handle summaries.
+          with mtf.utils.outside_all_rewrites():
+            alt_learning_rate = alt_learning_rate_schedule(
+                step=tf.train.get_global_step())
+            tf.summary.scalar("alt_learning_rate", alt_learning_rate)
+        else:
+          alt_learning_rate = alt_learning_rate_schedule
+
+        if isinstance(alt_var_filter, str):
+          pattern = re.compile(alt_var_filter)
+          alt_var_filter_fn = lambda v: pattern.search(v.name)
+        elif alt_var_filter is None:
+          alt_var_filter_fn = lambda v: True
+        elif callable(alt_var_filter):
+          alt_var_filter_fn = alt_var_filter
+        else:
+          raise ValueError(
+              "variable_filter must be None, a string, or a callable function")
+        alt_vars = [
+            v for v in graph.trainable_variables if alt_var_filter_fn(v)]
+        alt_vars_grad = [
+            g for g, v in zip(var_grads, graph.trainable_variables)
+            if alt_var_filter_fn(v)]
+        if alt_vars:
+          tf.logging.info("Alternate variables being trained:")
+          tf.logging.info([v.name for v in alt_vars])
+          tf.logging.info("Removing vars from secondary from primary")
+          trainable_vars = [x for x in trainable_vars if x not in alt_vars]
+          trainable_var_grads = [x for x in trainable_var_grads \
+                                 if x not in alt_vars_grad]
+          tf.logging.info("New Variables being trained:")
+          tf.logging.info([v.name for v in trainable_vars])
+      alt_update_ops = optimizer(learning_rate=alt_learning_rate).apply_grads(
+          alt_vars_grad, alt_vars)
+      update_ops += alt_update_ops
 
       lowering = mtf.Lowering(
           graph, {mesh: mesh_impl},

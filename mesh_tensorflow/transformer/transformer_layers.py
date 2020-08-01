@@ -1403,7 +1403,7 @@ class BranchedSelfAttention(SelfAttention):
 
     kappa = mtf.get_variable(
         context.mesh,
-        "kappa",
+        "branched/kappa",
         mtf.Shape([heads_dim]),
         initializer=self.kappa_init,
         dtype=context.variable_dtype,
@@ -1411,7 +1411,7 @@ class BranchedSelfAttention(SelfAttention):
 
     alpha = mtf.get_variable(
         context.mesh,
-        "alpha",
+        "branched/alpha",
         mtf.Shape([heads_dim]),
         initializer=self.alpha_init,
         dtype=context.variable_dtype,
