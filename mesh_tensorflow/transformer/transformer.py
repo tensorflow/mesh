@@ -1508,6 +1508,7 @@ class Bitransformer(object):
              beam_size=1,
              alpha=0.6,
              temperature=0.0,
+             sampling_keep_top_k=-1,
              decode_length_multiplier=1.5,
              decode_length_constant=10,
              max_decode_length=None):
@@ -1523,6 +1524,8 @@ class Bitransformer(object):
       alpha: a floating point value (length bonus for beam search)
       temperature: a value between 0 and 1 (must be 0 if beam_size > 1)
         0.0 means argmax, 1.0 means sample according to predicted distribution.
+      sampling_keep_top_k: a value between 1 and vocab_size used to sample from
+        only the k most likely logits. Set to -1 to sample from all logits.
       decode_length_multiplier: a float
       decode_length_constant: a float
       max_decode_length: an optional integer
@@ -1558,6 +1561,7 @@ class Bitransformer(object):
       return self.decoder.sample_autoregressive(
           partial_sequences,
           temperature=temperature,
+          sampling_keep_top_k=sampling_keep_top_k,
           variable_dtype=variable_dtype,
           encoder_output=encoder_output,
           encoder_sequence_id=encoder_sequence_id,
@@ -1569,6 +1573,9 @@ class Bitransformer(object):
       if temperature != 0:
         raise ValueError(
             "don't know how to beam search with nonzero temperature")
+      if sampling_keep_top_k != -1:
+        raise ValueError(
+            "don't know how to beam search with top-k value other than -1.")
       # beam search
       beam_dim = mtf.Dimension("beam", beam_size)
       ids_shape = mtf.Shape(batch_dims + [beam_dim, decode_length_dim])
