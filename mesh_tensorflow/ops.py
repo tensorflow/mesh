@@ -6108,9 +6108,7 @@ def while_loop(cond_fn, body_fn, inputs, num_loop_vars=None,
   num_loop_vars=k, then all of the loop variables except for the first k
   are handled as mtf Variables instead of loop variables, using explicit
   updates and control dependencies.  In this case, we only return the
-  first num_loop_vars outputs.  Do not use this option on TPU, since it
-  is unnecessary and also produces incorrect results, since xla does not
-  respect control dependencies.
+  first num_loop_vars outputs.
 
   Args:
     cond_fn: a function from n Tensors to scalar boolean Tensor
