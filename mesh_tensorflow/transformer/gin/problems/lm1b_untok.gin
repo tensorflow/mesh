@@ -5,7 +5,7 @@
 import mesh_tensorflow.transformer.t2t_vocabulary
 
 # Dataset
-dataset_name = "lm1b/plain_text"
+dataset_name = "lm1b"
 utils.run.train_dataset_fn = @mesh_tensorflow.transformer.dataset.untokenized_tfds_dataset
 dataset.untokenized_tfds_dataset.dataset_name = %dataset_name
 dataset.untokenized_tfds_dataset.text2self = True
