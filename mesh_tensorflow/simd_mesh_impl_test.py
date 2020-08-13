@@ -28,21 +28,24 @@ import tensorflow.compat.v1 as tf
 class SimdMeshImplTest(parameterized.TestCase):
 
   @parameterized.parameters(
-      ([8, 8, 2], [2, 2]),
-      ([2, 2, 2], [1, 1]),
-      ([8, 8, 2], [1, 8]),
-      ([9, 15, 7], [3, 5]),
+      ([8, 8, 2], [("dp", None)]),
+      ([8, 8, 2], [("dp", None), ("mp", [1, 1, 2])]),
+      ([8, 8, 2], [("dp", [8, 8, 1]), ("mp", [1, 1, 2])]),
+      ([8, 8, 2], [("dp", None), ("mp", [2, 8, 1])]),
+      ([8, 8, 2], [("dp", None), ("mp1", [1, 8, 1]), ("mp2", [8, 1, 2])]),
+      ([8, 8, 2], [("dp", None), ("mp1", [2, 2, 1]), ("mp2", [2, 2, 1])]),
+      ([9, 15, 7], [("d1", [3, 5, 1]), ("d2", [3, 3, 7])]),
   )
-  def testTile2d(self, physical_shape, tile_shape):
-    mesh_shape, logical_to_physical = mtf.simd_mesh_impl.tile_2d(
-        physical_shape, tile_shape)
+  def testHierarchicalTiling(self, physical_shape, spec):
+    hierarchical_tiling = mtf.simd_mesh_impl.HierarchicalTiling(
+        spec, physical_shape)
+    mesh_shape = hierarchical_tiling.mesh_shape
+    logical_to_physical = hierarchical_tiling.logical_to_physical
     num_cores = physical_shape[0] * physical_shape[1] * physical_shape[2]
-    expected_inner_dim = mtf.Dimension(
-        "inner", tile_shape[0] * tile_shape[1] * physical_shape[2])
-    expected_outer_dim = mtf.Dimension(
-        "outer", num_cores // expected_inner_dim.size)
-    self.assertEqual(mesh_shape,
-                     mtf.Shape([expected_outer_dim, expected_inner_dim]))
+    expected_mesh_shape = (
+        mtf.simd_mesh_impl.HierarchicalTiling.spec_to_mesh_shape(
+            spec, num_cores))
+    self.assertEqual(mesh_shape, expected_mesh_shape)
     self.assertCountEqual(logical_to_physical, list(range(num_cores)))
 
   @parameterized.parameters(

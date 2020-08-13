@@ -25,6 +25,7 @@ import os
 
 import mesh_tensorflow as mtf
 import numpy as np
+from six.moves import range
 import tensorflow.compat.v1 as tf  # tf
 
 # pylint: disable=g-direct-tensorflow-import,g-direct-third-party-import

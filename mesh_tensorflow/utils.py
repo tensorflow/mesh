@@ -24,7 +24,9 @@ import heapq
 
 import tensorflow.compat.v1 as tf
 import tensorflow.compat.v2 as tf2
+# pylint: disable=g-direct-tensorflow-import
 from tensorflow.python.framework import ops  # pylint: disable=g-direct-tensorflow-import
+from tensorflow.python.tpu.topology import Topology
 
 
 @contextlib.contextmanager
@@ -122,12 +124,24 @@ def create_host_call(model_dir):
       assert len(args) == len(summaries)
       for i, tensor in enumerate(args):
         name = summaries[i][0]
-        tf.summary.scalar(
+        tf2.summary.scalar(
             name, tf.reduce_mean(tensor), step=global_step)
       return tf.summary.all_v2_summary_ops()
 
   global_step_t = tf.reshape(tf.to_int32(tf.train.get_global_step()), [1])
   return host_call_fn, [global_step_t] + reshaped_tensors
+
+
+def topology_rank(topology):
+  # Deserialize the Topology proto, if it is a string.
+  if isinstance(topology, bytes):
+    topology = Topology(serialized=topology)
+
+  if not isinstance(topology, Topology):
+    raise ValueError('`topology` is not a Topology object; got {}'.format(
+        type(topology)))
+
+  return len(topology.mesh_shape)
 
 
 def remove_summaries():

@@ -50,13 +50,22 @@ class MoE1D(transformer.TransformerLayer):
                second_threshold_train=0.2,
                second_threshold_eval=0.2,
                dropout_rate=0.0,
-               activation="relu"):
+               activation="relu",
+               moe_gating="top_2",
+               min_expert_capacity=4,
+               rand_1_policy_train="input_jitter",
+               rand_1_policy_eval="input_jitter",
+               rand_1_dropout=0.1,
+               rand_1_temperature=1.0,
+               rand_1_jitter=1e-2,
+               switch_top_k=4):
     self._hparams = HParams(
-        moe_gating="top_2",
+        moe_gating=moe_gating,
         moe_num_experts=num_experts,
         moe_loss_coef=loss_coef,
         moe_hidden_size=hidden_size,
         moe_group_size=group_size,
+        moe_min_expert_capacity=min_expert_capacity,
         moe_capacity_factor_train=capacity_factor_train,
         moe_capacity_factor_eval=capacity_factor_eval,
         moe_use_second_place_loss=use_second_place_loss,
@@ -64,7 +73,13 @@ class MoE1D(transformer.TransformerLayer):
         moe_second_policy_eval=second_policy_eval,
         moe_second_threshold_train=second_threshold_train,
         moe_second_threshold_eval=second_threshold_eval,
-        moe_dropout_rate=dropout_rate)
+        moe_dropout_rate=dropout_rate,
+        moe_rand_1_policy_train=rand_1_policy_train,
+        moe_rand_1_policy_eval=rand_1_policy_eval,
+        moe_rand_1_dropout=rand_1_dropout,
+        moe_rand_1_temperature=rand_1_temperature,
+        moe_rand_1_jitter=rand_1_jitter,
+        moe_switch_top_k=switch_top_k)
     self._activation = activation
 
   def call(self, context, x, losses=None):
@@ -333,8 +348,9 @@ def transformer_moe_layer_v1(
   expert_capacity = min(
       group_size_dim.size,
       int((group_size_dim.size * capacity_factor) / experts_dim.size))
+  expert_capacity = max(expert_capacity, hparams.moe_min_expert_capacity)
+  tf.logging.info("expert_capacity: %d" % expert_capacity)
   expert_capacity_dim = mtf.Dimension("expert_capacity", expert_capacity)
-
   experts_dim_unsplit = mtf.Dimension("expert_unsplit", experts_dim.size)
   batch_dim_unsplit = mtf.Dimension("batch_unsplit", num_groups_dim.size)
   if nonpadding is not None:
@@ -346,6 +362,26 @@ def transformer_moe_layer_v1(
     # dispatch_tensor  OG`SEC Tensors
     # (G is generally split along mesh dim)
     dispatch_tensor, combine_tensor, loss = _top_2_gating(
+        inputs=inputs,
+        outer_expert_dims=None,
+        experts_dim=experts_dim_unsplit,
+        expert_capacity_dim=expert_capacity_dim,
+        hparams=hparams,
+        train=train,
+        variable_dtype=variable_dtype,
+        importance=nonpadding)
+  elif hparams.moe_gating == "rand_1":
+    dispatch_tensor, combine_tensor, loss = _rand_1_gating(
+        inputs=inputs,
+        outer_expert_dims=None,
+        experts_dim=experts_dim_unsplit,
+        expert_capacity_dim=expert_capacity_dim,
+        hparams=hparams,
+        train=train,
+        variable_dtype=variable_dtype,
+        importance=nonpadding)
+  elif hparams.moe_gating == "switch":
+    dispatch_tensor, combine_tensor, loss = _switch_gating(
         inputs=inputs,
         outer_expert_dims=None,
         experts_dim=experts_dim_unsplit,
@@ -548,7 +584,7 @@ def transformer_moe_layer_v2(
   else:
     capacity_factor = hparams.moe_capacity_factor_eval
   expert_capacity = min(s.size, int((s.size * capacity_factor) / x.size))
-  expert_capacity = max(expert_capacity, 4)
+  expert_capacity = max(expert_capacity, hparams.moe_min_expert_capacity)
   c = mtf.Dimension("expert_capacity_x", expert_capacity)
 
   # We "cheat" here and look at the mesh shape and layout. This is to ensure
@@ -565,7 +601,7 @@ def transformer_moe_layer_v2(
   expert_capacity = min(
       t.size,
       int((t.size * hparams.moe_capacity_factor_second_level) / y.size))
-  expert_capacity = max(expert_capacity, 4)
+  expert_capacity = max(expert_capacity, hparams.moe_min_expert_capacity)
   d = mtf.Dimension("expert_capacity_y", expert_capacity)
 
   # First level of expert routing
@@ -676,6 +712,244 @@ def transformer_moe_layer_v2(
   if insert_outer_batch_dim:
     output = mtf.reshape(output, [b1, l, n])
   return output, (loss_outer + loss_inner) * hparams.moe_loss_coef
+
+
+def _switch_gating(inputs,
+                   outer_expert_dims,
+                   experts_dim,
+                   expert_capacity_dim,
+                   hparams,
+                   train,
+                   variable_dtype,
+                   importance=None,
+                   name="switch_gating"):
+  """Compute a switch top-1 gating with no-token-left behind behavior."""
+  # SELECT EXPERT
+  if train:
+    policy = hparams.moe_rand_1_policy_train
+  else:
+    policy = hparams.moe_rand_1_policy_eval
+
+  # Input perturbations
+  if train and policy == "input_jitter":
+    inputs = mtf.layers.multiplicative_jitter(inputs, hparams.moe_rand_1_jitter)
+
+  gate_logits = mtf.layers.dense(
+      inputs,
+      experts_dim,
+      use_bias=False,
+      expert_dims=outer_expert_dims,
+      variable_dtype=variable_dtype,
+      name=name)
+  raw_gates = mtf.softmax(gate_logits, reduced_dim=experts_dim)
+
+  # The internals of this function run in float32.
+  #   bfloat16 seems to reduce quality.
+  raw_gates = mtf.to_float(raw_gates)
+
+  # Top-k operation
+  k_dim = mtf.Dimension("k", hparams.moe_switch_top_k)
+  expert_gate, expert_index = mtf.top_k(
+      raw_gates, reduced_dim=experts_dim, k_dim=k_dim)
+  expert_mask = mtf.one_hot(expert_index, experts_dim)
+
+  # LOAD BALANCING LOSS
+  outer_batch_dim = inputs.shape[0]
+  batch_dim = inputs.shape[1]
+  group_size_dim = inputs.shape[-2]
+  density_1 = mtf.reduce_mean(expert_mask, reduced_dim=group_size_dim)
+  density_1_proxy = mtf.reduce_mean(raw_gates, reduced_dim=group_size_dim)
+  if importance is not None:
+    expert_mask *= mtf.cast(mtf.equal(importance, 1.0), dtype=raw_gates.dtype)
+    expert_gate *= mtf.cast(mtf.equal(importance, 1.0), dtype=raw_gates.dtype)
+    density_1_proxy *= mtf.cast(
+        mtf.equal(importance, 1.0), dtype=raw_gates.dtype)
+  loss = (
+      mtf.reduce_mean(density_1_proxy * density_1) *
+      float(experts_dim.size * experts_dim.size))
+
+  # Logging
+  if train:
+    entropy = mtf.reduce_sum(
+        -raw_gates * mtf.log(raw_gates + 1e-9), reduced_dim=experts_dim)
+    batch_entropy = mtf.reduce_mean(entropy)
+    mtf.scalar_summary(name + "/entropy", batch_entropy)
+
+    mask_count_experts = mtf.reduce_sum(expert_mask, output_shape=[experts_dim])
+    total_routed = mtf.reduce_sum(mask_count_experts)
+    expert_fraction = mtf.to_float(mask_count_experts / total_routed)
+    split_fractions = mtf.split(
+        expert_fraction,
+        split_dim=experts_dim,
+        num_or_size_splits=experts_dim.size)
+    for fraction in split_fractions:
+      mtf.scalar_summary("experts/" + fraction.name.replace(":", "/"),
+                         mtf.reduce_mean(fraction))
+    mtf.scalar_summary("aux_loss", mtf.reduce_mean(loss))
+
+  # COMPUTE ASSIGNMENT TO EXPERT
+  # Iteratively route tokens (no-token-left-behind). The idea is to route as
+  # many tokens as possible to top-i before then trying top-(i+1).
+  top_k_masks = mtf.split(
+      expert_mask, split_dim=k_dim, num_or_size_splits=k_dim.size)
+  top_k_gates = mtf.split(
+      expert_gate, split_dim=k_dim, num_or_size_splits=k_dim.size)
+  top_k_indices = mtf.split(
+      expert_index, split_dim=k_dim, num_or_size_splits=k_dim.size)
+
+  # Tensors cumulative values over the iterative process.
+  combine_tensor = mtf.constant(
+      inputs.mesh,
+      value=0,
+      shape=[outer_batch_dim, batch_dim, experts_dim, expert_capacity_dim])
+  cum_tokens = mtf.constant(
+      inputs.mesh, value=0, shape=[outer_batch_dim, batch_dim, experts_dim])
+  tokens_left_to_route = mtf.constant(
+      inputs.mesh, value=1., shape=[outer_batch_dim, batch_dim, group_size_dim])
+
+  expert_capacity_float = float(expert_capacity_dim.size)
+  for (top_i_mask, top_i_gate, top_i_index) in zip(top_k_masks, top_k_gates,
+                                                   top_k_indices):
+    top_i_mask = mtf.reshape(
+        top_i_mask,
+        new_shape=[outer_batch_dim, batch_dim, group_size_dim, experts_dim])
+    # Operate only on the unrouted tokens.
+    top_i_mask *= tokens_left_to_route
+
+    # Record cumulative number of tokens to each expert across iterations.
+    cumulative_tokens_in_expert = cum_tokens + mtf.cumsum(
+        top_i_mask, group_size_dim)
+
+    expert_overflow = mtf.to_float(
+        mtf.less_equal(cumulative_tokens_in_expert, expert_capacity_float))
+    output_i_tokens = top_i_mask * expert_overflow
+
+    # Update the cumulative tokens routed to each expert.
+    cum_tokens += mtf.reduce_sum(output_i_tokens, reduced_dim=group_size_dim)
+    tokens_left_to_route -= (
+        mtf.reduce_sum(output_i_tokens, reduced_dim=experts_dim))
+
+    # Combine-tensor for this iteration
+    output_i_tokens_flat = mtf.reduce_sum(
+        output_i_tokens, reduced_dim=experts_dim)
+    position_in_expert = cumulative_tokens_in_expert - 1
+    top_i_combine_tensor = (
+        top_i_gate * output_i_tokens_flat *
+        mtf.one_hot(top_i_index, experts_dim) *
+        mtf.one_hot(mtf.to_int32(position_in_expert), expert_capacity_dim))
+    combine_tensor += top_i_combine_tensor
+
+  # Match the inputs dtype.
+  combine_tensor = mtf.cast(combine_tensor, inputs.dtype)
+  loss = mtf.cast(loss, inputs.dtype)
+  dispatch_tensor = mtf.cast(
+      mtf.cast(combine_tensor, tf.bool), combine_tensor.dtype)
+
+  return dispatch_tensor, combine_tensor, loss
+
+
+def _rand_1_gating(
+    inputs, outer_expert_dims, experts_dim, expert_capacity_dim,
+    hparams, train, variable_dtype, importance=None, name="rand_1_gating"):
+  """Compute a random top-1 gating."""
+  # SELECT EXPERT
+  if train:
+    policy = hparams.moe_rand_1_policy_train
+  else:
+    policy = hparams.moe_rand_1_policy_eval
+
+  # Input perturbations
+  if train and policy == "input_dropout":
+    inputs = mtf.dropout(inputs, 1.0 - hparams.moe_rand_1_dropout)
+  elif train and policy == "input_jitter":
+    inputs = mtf.layers.multiplicative_jitter(inputs, hparams.moe_rand_1_jitter)
+
+  gate_logits = mtf.layers.dense(inputs, experts_dim, use_bias=False,
+                                 expert_dims=outer_expert_dims,
+                                 variable_dtype=variable_dtype,
+                                 name=name)
+  raw_gates = mtf.softmax(gate_logits, reduced_dim=experts_dim)
+
+  # The internals of this function run in float32.
+  #   bfloat16 seems to reduce quality.
+  raw_gates = mtf.to_float(raw_gates)
+
+  if policy == "argmax" or policy == "input_dropout" or policy == "input_jitter":
+    expert_gate, expert_index = mtf.top_1(raw_gates, reduced_dim=experts_dim)
+  elif policy == "sample":
+    expert_index = mtf.sample_with_temperature(
+        gate_logits, experts_dim, temperature=hparams.moe_rand_1_temperature)
+    expert_gate = mtf.gather(raw_gates, expert_index, dim=experts_dim)
+  else:
+    raise ValueError("Unknown rand_1 policy %s" % policy)
+
+  expert_mask = mtf.one_hot(expert_index, experts_dim, dtype=raw_gates.dtype)
+
+  # LOAD BALANCING LOSS
+  # TODO(liamfedus): Check entropy loss.
+  group_size_dim = inputs.shape[-2]
+  density_1 = mtf.reduce_mean(expert_mask, reduced_dim=group_size_dim)
+  density_1_proxy = mtf.reduce_mean(raw_gates, reduced_dim=group_size_dim)
+  if importance is not None:
+    expert_mask *= mtf.cast(mtf.equal(importance, 1.0), dtype=raw_gates.dtype)
+    expert_gate *= mtf.cast(mtf.equal(importance, 1.0), dtype=raw_gates.dtype)
+    density_1_proxy *= mtf.cast(
+        mtf.equal(importance, 1.0), dtype=raw_gates.dtype)
+  loss = (
+      mtf.reduce_mean(density_1_proxy * density_1) *
+      float(experts_dim.size * experts_dim.size))
+
+  # Logging
+  if train:
+    entropy = mtf.reduce_sum(-raw_gates * mtf.log(raw_gates + 1e-9),
+                             reduced_dim=experts_dim)
+    batch_entropy = mtf.reduce_mean(entropy)
+    mtf.scalar_summary(name + "/entropy", batch_entropy)
+
+    mask_count_experts = mtf.reduce_sum(expert_mask, output_shape=[experts_dim])
+    total_routed = mtf.reduce_sum(mask_count_experts)
+    expert_fraction = mtf.to_float(mask_count_experts / total_routed)
+    split_fractions = mtf.split(
+        expert_fraction,
+        split_dim=experts_dim,
+        num_or_size_splits=experts_dim.size)
+    for fraction in split_fractions:
+      mtf.scalar_summary("experts/" + fraction.name.replace(":", "/"),
+                         mtf.reduce_mean(fraction))
+    mtf.scalar_summary("aux_loss", mtf.reduce_mean(loss))
+
+  # COMPUTE ASSIGNMENT TO EXPERT
+  # Experts have a limited capacity, ensure we do not exceed it. Construct
+  # the batch indices, to each expert, with position_in_expert
+  position_in_expert = mtf.cumsum(
+      expert_mask, group_size_dim, exclusive=True) * expert_mask
+  position_in_expert = mtf.cast(position_in_expert, dtype=raw_gates.dtype)
+  # Keep only tokens that fit within expert_capacity.
+  expert_capacity_float = float(expert_capacity_dim.size)
+  expert_mask *= mtf.cast(
+      mtf.less(position_in_expert, expert_capacity_float),
+      dtype=raw_gates.dtype)
+  expert_mask_flat = mtf.reduce_sum(expert_mask, reduced_dim=experts_dim)
+
+  # Mask out the experts that have overflowed expert capacity. Sparsify the
+  # expert_gate.
+  expert_gate *= expert_mask_flat
+
+  combine_tensor = (
+      expert_gate * expert_mask_flat *
+      mtf.one_hot(expert_index, experts_dim, dtype=raw_gates.dtype) *
+      mtf.one_hot(
+          mtf.to_int32(position_in_expert),
+          expert_capacity_dim,
+          dtype=raw_gates.dtype))
+
+  # Match the inputs dtype.
+  combine_tensor = mtf.cast(combine_tensor, inputs.dtype)
+  loss = mtf.cast(loss, inputs.dtype)
+  dispatch_tensor = mtf.cast(
+      mtf.cast(combine_tensor, tf.bool), combine_tensor.dtype)
+
+  return dispatch_tensor, combine_tensor, loss
 
 
 def _top_2_gating(

@@ -166,11 +166,6 @@ class PlacementMeshImpl(mtf.MeshImpl):
     Returns:
       a LaidOutTensor, or a tuple of LaidOutTensors if fn returns a tuple.
     """
-    if fn == tf.add:
-      assert len(inputs) == 2
-      if isinstance(inputs[0], mtf.LazyAllreduceSum):
-        # sum of LazyAllreduceSum (keep delaying the allreduce)
-        return inputs[0] + inputs[1]
     # convert all inputs to LaidOutTensor where possible
     inputs = mtf.convert_args_to_laid_out_tensors(inputs)
     inputs = [x.tensor_list if isinstance(x, self.LaidOutTensor)
@@ -194,6 +189,7 @@ class PlacementMeshImpl(mtf.MeshImpl):
       a LaidOutTensor
     """
     tf.logging.info("PlacementMeshImpl::Print")
+    x = x.to_laid_out_tensor()
     new_slices = x.tensor_list[:]
     with tf.device(self._devices[0]):
       new_slices[0] = tf.Print(

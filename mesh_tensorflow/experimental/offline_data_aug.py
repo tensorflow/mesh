@@ -25,6 +25,7 @@ import os
 from absl import app
 from absl import flags
 
+from six.moves import range
 import tensorflow.compat.v1 as tf  # tf
 
 # pylint: disable=g-direct-tensorflow-import,g-direct-third-party-import

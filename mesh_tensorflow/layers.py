@@ -27,6 +27,89 @@ from mesh_tensorflow import ops_with_redefined_builtins as mtf
 import tensorflow.compat.v1 as tf
 
 
+@gin.configurable
+def unit_scaling_convention(value=False):
+  """Turn this on with gin to enable the unit-scaling convention.
+
+  TODO(noam): turn this comment into a position paper and post to arxiv
+
+  Under the unit-scaling convention, all weights are initialized with unit
+  variance, and the outputs of most contractions (matmul/einsum operations) are
+  divided by the square-root of the sizes of the contracting dimensions.
+
+  This differs from the typical inverse-square-root weight-initalization
+  convention often attributed to
+  http://proceedings.mlr.press/v9/glorot10a.html
+  in which weights are typically initialized according to a distribution with
+  mean zero and standard-deviation equal to the inverse-square-root of the
+  contracting dimension(s).
+
+  Under both conventions, the purpose of the inverse-square-root scaling is so
+  that activations in a layer should be scaled similarly to the activations in
+  the previous layer.  (Typically, models are initialized so that activations in
+  all layers should have RMS=O(1)).
+
+  The difference between the two conventions is whether this scaling happens in
+  the parameters (their way), or as an explicit multiplier on the activations
+  (our way).
+
+  In our opinion, parameter-scaling (their way) has three main disadvantages:
+
+  1. Optimizers need to be aware of differently-scaled parameters.  This is
+  because the learning-rates of adaptive optimizers represent target step-sizes
+  for the parameters.  The desired step size for a parameter logically depends
+  on the scale of the parameter itself, and so one typically needs to lower the
+  learning-rate when the layers get bigger and the parameters get consequently
+  smaller.  Under the unit-scaling convention, this is unnecessary, since all
+  parameters are on the same unit scale.
+
+  2. It is often unwieldy from an engineering standpoint to communicate to both
+  the variable initializers and to the optimizer what the scale of the variable
+  should be.  Typically, the variable initializer guesses this by inferring from
+  the dimension order which dimension of the variable might represent
+  contracting dimensions.  This is highly error-prone.
+
+  3. Sometimes contractions happen without being associated with parameters, as
+  in neural attention.  It may be important here too to divide by the square
+  root of the contracting dimensions, in order to maintain activation scale.
+  See the discussion in section 3.2.1 of https://arxiv.org/abs/1706.03762
+  Being in the habit of scaling the outputs of contractions in this way makes
+  it more likely to remember to do the same thing in these circumstances.
+
+  Note: When switching to the unit-scaling convention, it is probably necessary
+  to raise the learning rate, since larger parameters need larger updates.  An
+  exception is when using Adafactor, which by default scales the updates
+  relative to the scale of the current parameter values.
+
+  Args:
+    value: a boolean
+  Returns:
+    a boolean
+  """
+  return value
+
+
+def us_einsum(xs, *args, **kwargs):
+  """Einsum with optional unit-scaling convention.
+
+  If the unit-scaling convention is enabled, then divide the output by
+  the square-root of the product of the contracting dimensions.
+
+  Args:
+    xs: a list of mtf.Tensor
+    *args: arguments to mtf.einsum
+    **kwargs: keyword arguments to mtf.einsum
+  Returns:
+    a mtf.Tensor
+  """
+  y = mtf.einsum(xs, *args, **kwargs)
+  if unit_scaling_convention():
+    all_input_dims = set(sum([x.shape.dims for x in xs], []))
+    reduced_dims = [d for d in all_input_dims if d not in y.shape.dims]
+    y *= mtf.Shape(reduced_dims).size ** -0.5
+  return y
+
+
 def dense(x,
           new_dims,
           reduced_dims=None,
@@ -37,6 +120,7 @@ def dense(x,
           slice_dtype=tf.float32,
           variable_dtype=None,
           kernel_initializer=None,
+          kernel_weights=None,
           name=None):
   """Dense layer doing (kernel*x + bias) computation.
 
@@ -53,6 +137,7 @@ def dense(x,
     slice_dtype: a tf.dtype (deprecated - use variable_dtype)
     variable_dtype: a mtf.VariableDType
     kernel_initializer: an initializer for kernel variable.
+    kernel_weights: mtf.Tensor weights matrix to use for dense computation
     name: a string used for tf.variable_scope.
 
   Returns:
@@ -63,6 +148,7 @@ def dense(x,
 
   if variable_dtype is None:
     variable_dtype = mtf.VariableDType(master_dtype, slice_dtype, x.dtype)
+
   if expert_dims is None:
     expert_dims = []
   if reduced_dims is None:
@@ -83,9 +169,59 @@ def dense(x,
       tmp_name = "_" + original_name
       reduced_dims[i] = mtf.Dimension(tmp_name, reduced_dims[i].size)
       x = mtf.rename_dimension(x, original_name, tmp_name)
-  w_shape = mtf.Shape(expert_dims + reduced_dims + new_dims)
   output_shape = mtf.Shape([d for d in x.shape.dims if d not in reduced_dims] +
                            new_dims)
+  if not kernel_weights:
+    kernel_weights = get_dense_kernel_weights(x, new_dims, reduced_dims,
+                                              expert_dims, kernel_initializer,
+                                              name, variable_dtype,
+                                              master_dtype, slice_dtype)
+
+  with tf.variable_scope(name, default_name="dense"):
+    y = us_einsum([x, kernel_weights], output_shape)
+    if use_bias:
+      b = mtf.get_variable(
+          x.mesh,
+          "bias",
+          mtf.Shape(expert_dims + new_dims),
+          initializer=tf.zeros_initializer(),
+          dtype=variable_dtype)
+      y += b
+    if activation is not None:
+      y = activation(y)
+    return y
+
+
+def get_dense_kernel_weights(x,
+                             new_dims,
+                             reduced_dims,
+                             expert_dims,
+                             kernel_initializer,
+                             name=None,
+                             variable_dtype=None,
+                             master_dtype=tf.float32,
+                             slice_dtype=tf.float32):
+  """Create w matrix variable.
+
+  Args:
+    x: a mtf.Tensor.
+    new_dims: a list of mtf.Dimension.
+    reduced_dims: a list of mtf.Dimensions of x to be reduced.
+    expert_dims: an optional list of mtf.Dimension which represent different
+      experts. Different experts get different weights.
+    kernel_initializer: an initializer for kernel variable.
+    name: a string used for tf.variable_scope.
+    variable_dtype: a mtf.VariableDType
+    master_dtype: a tf.dtype (deprecated - use variable_dtype)
+    slice_dtype: a tf.dtype (deprecated - use variable_dtype)
+
+  Returns:
+    a mtf.Tensor.
+  """
+  if variable_dtype is None:
+    variable_dtype = mtf.VariableDType(master_dtype, slice_dtype, x.dtype)
+  w_shape = mtf.Shape(expert_dims + reduced_dims + new_dims)
+
   with tf.variable_scope(name, default_name="dense"):
     if kernel_initializer is None:
       kernel_initializer = VarianceScalingInitializer()
@@ -98,18 +234,7 @@ def dense(x,
         initializer=kernel_initializer,
         dtype=variable_dtype)
     w = mtf.cast(w, x.dtype)
-    y = mtf.einsum([x, w], output_shape)
-    if use_bias:
-      b = mtf.get_variable(
-          x.mesh,
-          "bias",
-          mtf.Shape(expert_dims + new_dims),
-          initializer=tf.zeros_initializer(),
-          dtype=variable_dtype)
-      y += b
-    if activation is not None:
-      y = activation(y)
-    return y
+  return w
 
 
 def dense_product(x,
@@ -172,9 +297,11 @@ class VarianceScalingInitializer(DenseInitializer):
   With `distribution="normal"`, samples are drawn from a truncated normal
   distribution centered on zero, with `stddev = sqrt(scale / n)` where n is:
 
-      - number of input units in the weight tensor, if mode = "fan_in"
-      - number of output units, if mode = "fan_out"
-      - average of the numbers of input and output units, if mode = "fan_avg"
+    1.0 if unit_scaling_convention() is turned on
+    otherwise:
+      number of input units in the weight tensor, if mode = "fan_in"
+      number of output units, if mode = "fan_out"
+      average of the numbers of input and output units, if mode = "fan_avg"
 
   With `distribution="uniform"`,
   samples are drawn from a uniform distribution
@@ -199,10 +326,15 @@ class VarianceScalingInitializer(DenseInitializer):
     fan_out = mtf.list_product(d.size for d in new_dims)
     scale = self.scale
     if self.mode == "fan_in":
-      scale /= max(1., fan_in)
+      if not unit_scaling_convention():
+        scale /= max(1., fan_in)
     elif self.mode == "fan_out":
+      if unit_scaling_convention():
+        raise ValueError("Unit scaling convention only works with \"fan_in\"")
       scale /= max(1., fan_out)
     elif self.mode == "fan_avg":
+      if unit_scaling_convention():
+        raise ValueError("Unit scaling convention only works with \"fan_in\"")
       scale /= max(1., float(fan_in + fan_out) / 2)
     else:
       raise ValueError(
@@ -219,6 +351,145 @@ class VarianceScalingInitializer(DenseInitializer):
       raise ValueError("Invalid `distribution` argument: "
                        "expected one of {\"normal\", \"uniform\"} "
                        "but got %s" % (self.distribution,))
+
+
+def conv1d(x, output_dim, filter_size=3, stride=1, **kw_args):
+  """1D Convolution.
+
+  Args:
+    x: a mtf.Tensor of format NWC.
+    output_dim: a mtf.Dimension, indicating the output channel dimension.
+    filter_size: a positive integer, the filter width.
+    stride: a positive integer, the stride.
+    **kw_args: optional keyword arguments to mtf.layers.conv2d.
+
+  Returns:
+    a mtf.Tensor of format NWO, where O is the output dimension.
+  """
+  fake_height_dim = mtf.Dimension("fake_height", 1)
+  x = mtf.reshape(
+      x, mtf.Shape(x.shape.dims[:-2] + [fake_height_dim] + x.shape.dims[-2:]))
+  output = conv2d(
+      x,
+      output_dim,
+      filter_size=(1, filter_size),
+      strides=(1, stride),
+      **kw_args)
+  return mtf.reshape(
+      output,
+      mtf.Shape([
+          d for d in x.shape.dims
+          if d != fake_height_dim and d != x.shape.dims[-1]
+      ] + [output_dim]))
+
+
+def _depthwise_conv1d_hack(x,
+                           depth_dim,
+                           length_dim,
+                           min_relative_pos=-1,
+                           max_relative_pos=1,
+                           name=None,
+                           use_bias=True,
+                           initializer_scale=1.0,
+                           kernel_depth_weights=None):
+  """Hacky version of a 1d depthwise convolution.
+
+  Args:
+    x: a mtf.Tensor
+    depth_dim: mtf.Dimension,
+    length_dim: mtf.Dimension,
+    min_relative_pos: int, min relative position,
+    max_relative_pos: int, max relative position,
+    name: str, variable_scope name,
+    use_bias: Bool, whether to use bias,
+    initializer_scale: int, initalizer scale,
+    kernel_depth_weights: an optional list of kernel weight tensors. The list
+    contains one element for each relative position in the kernel. Each element
+    has a width equal to the depth over which the separable conv operation is
+    being "separated"
+
+  Returns:
+    an mtf.Tensor
+  """
+
+  ret = 0
+  kernel_size = max_relative_pos - min_relative_pos + 1
+
+  with tf.variable_scope(name, default_name="depthwise_conv_hack"):
+    for i in range(kernel_size):
+      relative_pos = min_relative_pos + i
+      shifted_input = mtf.shift(x, -relative_pos, length_dim, wrap=False)
+      ret += dense(
+          shifted_input,
+          new_dims=[],
+          reduced_dims=[],
+          expert_dims=[depth_dim],
+          kernel_weights=kernel_depth_weights[i]
+          if kernel_depth_weights else None,
+          name="depthwise_dense_%d" % i,
+          use_bias=use_bias and (i == 0),
+          kernel_initializer=VarianceScalingInitializer(
+              scale=initializer_scale / kernel_size))
+
+  return ret
+
+
+def separable_conv1d(x,
+                     output_dim,
+                     min_relative_pos=-1,
+                     max_relative_pos=1,
+                     depthwise_filter_initializer_scale=1.0,
+                     pointwise_filter_initializer_scale=1.0,
+                     name=None,
+                     use_bias=True,
+                     kernel_depth_weights=None):
+  """1-D convolution with separable filters.
+
+  The filter size will be `max_relative_pos - min_relative_pos + 1`.
+
+  Args:
+    x: a mtf.Tensor of format NWC.
+    output_dim: a mtf.Dimension, indicating the output channel dimension.
+    min_relative_pos: an integer, the inclusive minimum relative positive of the
+      depthwise filter, where a relative position of zero means the left end of
+      the filter aligns with the left end of the input.
+    max_relative_pos: an integer, the inclusive maximum relative position of the
+      depthwise filter, where a relative position of zero means the right end of
+      the filter aligns with the right end of the input.
+    depthwise_filter_initializer_scale: a positive float, the scale of the
+      initializer for the depthwise filter.
+    pointwise_filter_initializer_scale: a positive float, the scale of the
+      initializer for the pointwise filter.
+    name: a string used for tf.variable_scope.
+    use_bias: a bool, whether to use bias in the convolutions.
+    kernel_depth_weights: an optional list of kernel weight tensors. The list
+    contains one element for each relative position in the kernel. Each element
+    has a width equal to the dimension over which the separable conv operation
+    is being "separated"
+
+  Returns:
+    a mtf.Tensor of format NWO, where O is the output dimension.
+  """
+  depth_dim = x.shape.dims[-1]
+  length_dim = x.shape.dims[-2]
+  with tf.variable_scope(name, default_name="separable_conv1d"):
+    depthwise = _depthwise_conv1d_hack(
+        x,
+        depth_dim=depth_dim,
+        length_dim=length_dim,
+        min_relative_pos=min_relative_pos,
+        max_relative_pos=max_relative_pos,
+        use_bias=use_bias,
+        initializer_scale=depthwise_filter_initializer_scale,
+        kernel_depth_weights=kernel_depth_weights)
+    return dense(
+        depthwise,
+        new_dims=[output_dim],
+        reduced_dims=[depth_dim],
+        name="pointwise_dense",
+        use_bias=use_bias,
+        kernel_initializer=VarianceScalingInitializer(
+            scale=pointwise_filter_initializer_scale))
 
 
 def conv2d(x, output_dim, filter_size=(3, 3),
@@ -1740,8 +2011,11 @@ def embedding_weights(mesh,
                       ensemble_dim=None,
                       initializer=None):
   """Embedding weights."""
-  shape = mtf.Shape(
-      [ensemble_dim] if ensemble_dim else []) + [vocab_dim, output_dim]
+  if not ensemble_dim:
+    ensemble_dim = []
+  elif not isinstance(ensemble_dim, list):
+    ensemble_dim = [ensemble_dim]
+  shape = mtf.Shape(ensemble_dim) + [vocab_dim, output_dim]
   if initializer is None:
     initializer = tf.random_normal_initializer()
   ret = mtf.get_variable(
@@ -1836,3 +2110,89 @@ def avg_pool3d(x, ksize=(2, 2, 2), name="avg_pool3d"):
   """
   return x if tuple(ksize) == (1, 1, 1) else mtf.PoolOperation(
       x, ksize, strides=ksize, pool_fn_string="AVG_3D", name=name).outputs[0]
+
+
+def _reversible_half_residual_grad(
+    explicit_inputs, all_inputs, forward_operations, outputs, output_grads):
+  """Backpropagation function for a revnet."""
+  x1, _, x2, _ = explicit_inputs
+  extra_inputs = all_inputs[len(explicit_inputs):]
+  _, _, y1, _ = outputs
+  dy2, dy2_backwards, dy1, dy1_backwards = output_grads
+  # last operation should be an addition to produce y1
+  if not isinstance(forward_operations[-1], mtf.AddOperation):
+    raise ValueError("expected an addition here")
+  f_ops = forward_operations[:-1]
+  orig_fx2 = f_ops[-1].outputs[0]
+  orig_x2 = x2
+  if dy2_backwards is not None:
+    x2 = dy2_backwards
+  if dy1_backwards is not None:
+    y1 = dy1_backwards
+  graph = all_inputs[0].graph
+  f_again_ops, mapping = graph.clone_operations(f_ops, {orig_x2: x2})
+  fx2 = mapping[orig_fx2]
+  x1 = y1 - fx2
+  grads = mtf.gradients(ys=[fx2], xs=[x2] + extra_inputs, grad_ys=[dy1],
+                        operations=f_again_ops)
+  dx2 = dy2 + grads[0]
+  extra_inputs_grads = grads[1:]
+  dx1 = dy1
+  return [dx1, x1, dx2, x2] + extra_inputs_grads
+
+
+def _half_residual_and_swap(x1, x1_backwards, x2, x2_backwards, f=None):
+  return x2, x2_backwards, x1 + f(x2), x1_backwards
+
+
+def reversible_half_residual_and_swap(x1,
+                                      x1_backwards,
+                                      x2,
+                                      x2_backwards,
+                                      f,
+                                      recompute_grads=True):
+  """Building block of a revnet.
+
+  https://arxiv.org/abs/1707.04585
+
+  All the inputs and output Tensors have the same shape and dtype.
+
+  The forward computation is:
+    y1 = x1 + f(x2)
+    y2 = x2
+
+  The x1_backwards and x2_backwards tensors are used by backpropagation.
+  None should be passed for the first layer, then the outputs of each layer
+  should be passed to the next.
+
+  Example usage:
+  x1, x1_backwards, x2, x2_backwards = x, None, x, None
+  for f in my_functions:
+    x1, x1_backwards, x2, x2_backwards = mtf.layers.reversible_half_residual(
+      x1, x1_backwards, x2, x2_backwards)
+  y = (x1 + x2) / 2
+
+  Args:
+    x1: a Tensor
+    x1_backwards: a Tensor or None
+    x2: a Tensor
+    x2_backwards: a Tensor or None
+    f: a function from Tensor to Tensor
+    recompute_grads: a boolean
+  Returns:
+    y2: a Tensor
+    y2_backwards: a Tensor
+    y1: a Tensor
+    y1_backwards: a Tensor
+  """
+  if recompute_grads:
+    if x1_backwards is None:
+      x1_backwards = mtf.zeros_like(x1)
+    if x2_backwards is None:
+      x2_backwards = mtf.zeros_like(x2)
+    return mtf.custom_gradient(
+        functools.partial(_half_residual_and_swap, f=f),
+        _reversible_half_residual_grad,
+        [x1, x1_backwards, x2, x2_backwards])
+  else:
+    return _half_residual_and_swap(x1, x1_backwards, x2, x2_backwards, f)

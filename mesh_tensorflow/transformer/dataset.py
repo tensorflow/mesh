@@ -116,7 +116,7 @@ def pack_or_pad(
   Returns:
     a tf.data.Dataset where all features have fixed shape [length].
   """
-  feature_keys = feature_keys or list(dataset.output_shapes.keys())
+  feature_keys = feature_keys or list(tf.data.get_output_shapes(dataset).keys())
   if pack:
     dataset = pack_dataset(dataset, length=length, keys=feature_keys)
   # Pad/trim length of each example to length.
@@ -137,7 +137,7 @@ def ensure_dataset_eos(dataset, feature_keys=None):
   Returns:
     a tf.data.Dataset where all specified features end with PAD=0 or EOS=1.
   """
-  feature_keys = feature_keys or dataset.output_shapes.keys()
+  feature_keys = feature_keys or tf.data.get_output_shapes(dataset).keys()
   def _ensure_eos(k, v):
     if k not in feature_keys:
       return v
@@ -261,8 +261,8 @@ def packed_parallel_tsv_dataset(dataset=gin.REQUIRED,
     inputs_enc = inputs_vocabulary.encode_tf(features["inputs"])
     targets_enc = targets_vocabulary.encode_tf(features["targets"])
     if append_eos:
-      inputs_enc = tf.concat([tf.to_int64(inputs_enc), [eos_id]], 0)
-      targets_enc = tf.concat([tf.to_int64(targets_enc), [eos_id]], 0)
+      inputs_enc = tf.concat([tf.cast(inputs_enc, tf.int64), [eos_id]], 0)
+      targets_enc = tf.concat([tf.cast(targets_enc, tf.int64), [eos_id]], 0)
     return {"inputs": inputs_enc, "targets": targets_enc}
 
   dataset = dataset.map(
@@ -366,7 +366,7 @@ def encode_all_features(dataset, vocabulary):
     for k, v in features.items():
       if v.dtype == tf.string:
         v = vocabulary.encode_tf(v)
-        v = tf.concat([tf.to_int64(v), [1]], 0)
+        v = tf.concat([tf.cast(v, tf.int64), [1]], 0)
         ret[k] = v
       else:
         tf.logging.info(
@@ -380,7 +380,8 @@ def pretokenized_tfrecord_dataset(filenames,
                                   eos_included,
                                   repeat,
                                   batch_size,
-                                  sequence_length):
+                                  sequence_length,
+                                  vocab_shift=0):
   """Reads tensor2tensor-style data files.
 
   The dataset is defined by sets of TFRecord files of TFExample protos.
@@ -398,6 +399,7 @@ def pretokenized_tfrecord_dataset(filenames,
     repeat: a boolean
     batch_size: an integer, DEPRECATED
     sequence_length: an integer
+    vocab_shift: an optional integer - add this value to all ids
   Returns:
     A tf.data.Dataset of batches
   """
@@ -412,6 +414,8 @@ def pretokenized_tfrecord_dataset(filenames,
         serialized=[serialized_example],
         features={k: tf.VarLenFeature(tf.int64) for k in keys})
     decoded = {k: v.values for k, v in decoded.items()}
+    if vocab_shift:
+      decoded = {k: v + vocab_shift for k, v in decoded.items()}
     if not eos_included:
       decoded = {k: tf.concat([v, [1]], 0) for k, v in decoded.items()}
     return decoded
@@ -427,7 +431,9 @@ def pretokenized_t2t_dataset(dataset_name=gin.REQUIRED,
                              dataset_split="train",
                              batch_size=None,
                              sequence_length=gin.REQUIRED,
-                             vocabulary=None):
+                             vocabulary=None,
+                             eos_included=True,
+                             vocab_shift=0):
   """Loads the Tensor2tensor dataset specified by dataset_name.
 
   Args:
@@ -438,6 +444,8 @@ def pretokenized_t2t_dataset(dataset_name=gin.REQUIRED,
     batch_size: an integer, DEPRECATED
     sequence_length: an integer
     vocabulary: ignored
+    eos_included: a boolean
+    vocab_shift: an optional integer - add this value to all ids read
 
   Returns:
     A tf.data.Dataset of batches
@@ -452,10 +460,11 @@ def pretokenized_t2t_dataset(dataset_name=gin.REQUIRED,
   dataset = pretokenized_tfrecord_dataset(
       filenames=filenames,
       text2self=text2self,
-      eos_included=True,
+      eos_included=eos_included,
       repeat=dataset_split == "train",
       batch_size=batch_size,
-      sequence_length=sequence_length)
+      sequence_length=sequence_length,
+      vocab_shift=vocab_shift)
   if dataset_split == "train":
     dataset = dataset.shuffle(1000)
   return dataset
@@ -510,7 +519,7 @@ def pack_dataset(dataset, length, keys=None, use_custom_ops=False):
   Returns:
     a tf.data.Dataset
   """
-  shapes = dataset.output_shapes
+  shapes = tf.data.get_output_shapes(dataset)
   if keys is None:
     keys = list(shapes.keys())
   for k in keys:
@@ -743,3 +752,9 @@ EvalDataset = collections.namedtuple(
         "metric_fns",  # list of metric_fn(targets, predictions) returning dicts
     ]
 )
+
+
+def pad_dataset_with_zeroed_out_examples(ds):
+  def _zero_out(x):
+    return {k: tf.zeros_like(v) for k, v in x.items()}
+  return ds.concatenate(ds.map(_zero_out).repeat())

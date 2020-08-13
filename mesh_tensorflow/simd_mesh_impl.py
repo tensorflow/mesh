@@ -41,8 +41,7 @@ class SimdMeshImpl(mtf.MeshImpl):
                devices=None,
                device_assignment=None,
                logical_to_physical=None,
-               allreduce_in_bfloat16_max_group_size=32,
-              ):
+               allreduce_in_bfloat16_max_group_size=8):
     """Create a SimdMeshImpl.
 
     Args:
@@ -484,11 +483,6 @@ class SimdMeshImpl(mtf.MeshImpl):
     Returns:
       a LaidOutTensor, or a tuple of LaidOutTensors if fn returns a tuple.
     """
-    if fn == tf.add:
-      assert len(inputs) == 2
-      if isinstance(inputs[0], mtf.LazyAllreduceSum):
-        # sum of LazyAllreduceSum (keep delaying the allreduce)
-        return inputs[0] + inputs[1]
     # convert all inputs to LaidOutTensor where possible
     inputs = mtf.convert_args_to_laid_out_tensors(inputs)
     ret = fn(*[
@@ -619,86 +613,220 @@ def _ring_2d(m, n):
   return ret
 
 
-def tile_2d(physical_shape, tile_shape,
-            outer_name="outer",
-            inner_name="inner",
-            cores_name=None):
-  """2D tiling of a 3d physical mesh.
+def _logical_1d_to_physical_subspace_auto(sizes_and_strides, physical_shape):
+  """Maps logical 1d mesh to subspace of physical nd mesh.
 
-  The "outer" mesh dimension corresponds to which tile.
-  The "inner" mesh dimension corresponds to the position within a tile
-  of processors.
+  We are mapping a 1d logical mesh to a subspace (a strided slice containing the
+  origin) of a n-dimensional physical mesh.
 
-  Optionally, if cores_name is specified, then a 3 dimensional logical mesh
-  is returned, with the third dimension representing the two different
-  cores within a chip.  If cores_name is not specified, then the
-  cores-in-a-chip dimension is folded into the inner dimension.
+  output[i] contains the coordinate-tuple in the physical mesh for the i-th
+  logical processor.
 
-  TODO(noam): explain this better.
+  sizes_and_strides is a list of (size, stride) pairs specifying the dimensions
+  of the strided slice. For example,
+    sizes_and_strides=[(2, 16), (4, 1)] would represent the slice containing
+    [(0, 0), (0, 1), (0, 2), (0, 3),
+     (16, 0), (16, 1), (16, 2), (16, 3)]
 
-  Example:
-
-  tile_2d(physical_shape=[8, 16, 2], tile_shape=[4, 4])
-
-  The "inner" dimension has size 4x4x2=32 and corresponds to the position
-  within a 4x4 tile of processors.
-
-  The "outer" dimension has size 8/4 * 16/4 = 8, and corresponds to the 8
-  tiles in the mesh.
+  This function heuristically picks an order, with the goal of optimizing
+  allreduce performance.
 
   Args:
-    physical_shape: a triple of integers [X, Y, cores]
-    tile_shape: a pair
-    outer_name: a string
-    inner_name: a string
-    cores_name: an optional string
-
+    sizes_and_strides: a list of n (size, stride) pairs
+    physical_shape: ignored
   Returns:
-    mesh_shape: a mtf.Shape
-    logical_to_physical: a list
+    a list of coordinate-lists
   """
-  logical_to_physical = []
-  p0, p1, p2 = physical_shape
-  t0, t1 = tile_shape
-  tile_ring = _ring_2d(t0, t1)
-  tiles_ring = _ring_2d(p0 // t0, p1 // t1)
-  for logical_pnum in range(p0 * p1 * p2):
-    logical_tile_num = logical_pnum // (t0 * t1 * p2)
-    if p2 == 2 and not cores_name:
-      # Go through all chips using core 0, then go through all chips
-      #   backwards using core 1.  This is better in the case where
-      #   one of the tile dimensions is 1, so the last chip is not adjacent
-      #   to the first chip.
-      core_in_tile = logical_pnum % (t0 * t1 * p2)
-      core_on_chip = core_in_tile // (t0 * t1)
-      if core_on_chip == 0:
-        logical_pos_in_tile = core_in_tile
-      else:
-        logical_pos_in_tile = t0 * t1 * p2 - 1 - core_in_tile
-    else:
-      # Go through all chips once, using both cores on each chip.
-      core_on_chip = logical_pnum % p2
-      logical_chip_num = logical_pnum // p2
-      logical_pos_in_tile = logical_chip_num % (t0 * t1)
-    tile_i, tile_j = tile_ring[logical_pos_in_tile]
-    tiles_i, tiles_j = tiles_ring[logical_tile_num]
-    physical_pnum = core_on_chip + p2 * (
-        tile_i * p1 + tile_j +
-        tiles_i * p1 * t0 + tiles_j * t1)
-    logical_to_physical.append(physical_pnum)
-  assert sorted(logical_to_physical) == list(range(p0 * p1  * p2))
-  tile_size = t0 * t1 * p2
-  num_tiles = p0 * p1 // (t0 * t1)
-  if cores_name:
-    mesh_shape = mtf.Shape(
-        [mtf.Dimension(outer_name, int(num_tiles)),
-         mtf.Dimension(inner_name, int(t0 * t1)),
-         mtf.Dimension(cores_name, int(p2))])
+  del physical_shape
+  ndims = len(sizes_and_strides)
+  sizes = [p[0] for p in sizes_and_strides]
+  strides = [p[1] for p in sizes_and_strides]
+  n = mtf.list_product(sizes)
+  if ndims >= 2 and sizes[0] > 1 and sizes[1] > 1:
+    ring = _ring_2d(sizes[0], sizes[1])
+    ret = []
+    sizes_combined = [sizes[0] * sizes[1]] + sizes[2:]
+    for logical_pnum in range(n):
+      logical_coord = mtf.pnum_to_processor_coordinates(
+          sizes_combined, logical_pnum)
+      ret.append(list(ring[logical_coord[0]]) + logical_coord[1:])
   else:
-    mesh_shape = mtf.Shape(
-        [mtf.Dimension(outer_name, int(num_tiles)),
-         mtf.Dimension(inner_name, int(tile_size))])
-  return mesh_shape, logical_to_physical
+    ret = [mtf.pnum_to_processor_coordinates(sizes, logical_pnum)
+           for logical_pnum in range(n)]
+  # multiply by strides
+  ret = [[x * stride for x, stride in zip(pcoord, strides)] for pcoord in ret]
+  return ret
+
+
+def _logical_to_physical_v1(
+    sizes_and_strides, physical_shape,
+    fn_1d=_logical_1d_to_physical_subspace_auto):
+  """Maps logical m-dimensional mesh to physical n-dimensional mesh.
+
+  Also see comments to _logical_1d_to_physical_subspace_auto.
+
+  We are mapping a m-dimensonal logical mesh to a n-dimensional physical mesh.
+
+  output[i] contains the coordinate-tuple in the physical mesh for the i-th
+  logical processor (if the logical processors are ordered lexicographically).
+
+  sizes_and_strides is a list of m lists of n (size, stride) pairs.
+
+  sizes_and_strides[i] specifies the subspace (strided slice containing the
+  origin) of the physical mesh covered by axis i of the logical mesh.  See
+  comments to _logical_1d_to_physical_subspace_auto for more detail.
+
+  For example, say we have a physical mesh with shape [4, 4, 2] and a logical
+  mesh with shape [4, 8].  We want to divide the physical mesh into 4 tiles,
+  each with shape [2, 2, 2].  The first logical dimension corresponds to which
+  tile, and the second logical dimension corresponds to position within a tile.
+  This would correspond to:
+     physical_shape=[4, 4, 2]
+     sizes_and_strides=[[(2, 2), (2, 2), (1, 2)], [(2, 1), (2, 1), (2, 1)]]
+
+  physical_shape can be inferred from sizes_and_strides, but is passed in for
+  error checking.
+
+  Args:
+    sizes_and_strides: a list of m list of n (size, stride) pairs
+    physical_shape: a list of integers
+    fn_1d: a function like _logical_1d_to_physical_subspace_auto
+  Returns:
+    a list of coordinate-lists
+  """
+  pndims = len(physical_shape)
+  logical_shape = [
+      mtf.list_product([p[0] for p in l]) for l in sizes_and_strides]
+  n = mtf.list_product(physical_shape)
+  if n != mtf.list_product(logical_shape):
+    raise ValueError(
+        "logical size and physical size must match "
+        "- got sizes_and_strides=%s physical_shape=%s"
+        % (sizes_and_strides, physical_shape))
+  dimension_layouts = [fn_1d(l, physical_shape) for l in sizes_and_strides]
+  tf.logging.info("physical_shape: %s" % physical_shape)
+  tf.logging.info("sizes_and_strides: %s" % sizes_and_strides)
+  for i, l in enumerate(dimension_layouts):
+    tf.logging.info("dimension_layout %s: %s" % (i, l))
+  ret = []
+  for logical_pnum in range(n):
+    logical_coordinates = mtf.pnum_to_processor_coordinates(
+        logical_shape, logical_pnum)
+    physical_coordinates = [0] * pndims
+    for logical_axis, logical_coord in enumerate(logical_coordinates):
+      for physical_axis in range(pndims):
+        physical_coordinates[physical_axis] += (
+            dimension_layouts[logical_axis][logical_coord][physical_axis])
+    ret.append(physical_coordinates)
+  # verify that we have indeed covered all the processors
+  l2p = [mtf.processor_coordinates_to_pnum(physical_shape, c) for c in ret]
+  if sorted(l2p) != list(range(n)):
+    raise ValueError(
+        "logical_to_physical produced something that was not a permutation."
+        " sizes_and_strides=%s physical_shape=%s ret=%s"
+        % (sizes_and_strides, physical_shape, ret))
+  return ret
+
+
+class HierarchicalTiling(object):
+  """One kind of mapping of a logical mesh to a physical mesh."""
+
+  def __init__(self, spec, physical_shape):
+    """Constructs a HierarchicalTiling.
+
+    spec is a list corresponding to the logical dimensions.
+
+    spec[i] corresponds to the i-th logical dimension and consists of a name
+      and a list of integers, the list being the shape of logical axis i when
+      it is physically projected to the physical mesh and then compacted.
+
+    Striding information is omitted.  By convention, the earlier dimensions
+      get more strided. so the axis corresponding to the last dimension always
+      gets projected to the tile specified by its shape.
+
+    Args:
+      spec: a list of (string, list-of-integers) pairs
+      physical_shape: a list of integers
+    """
+    self._names = [p[0] for p in spec]
+    logical_ndims = len(spec)
+    physical_ndims = len(physical_shape)
+    projected_shapes = [p[1] for p in spec]
+    if logical_ndims > 0 and projected_shapes[0] is None:
+      # fill in missing value
+      projected_shapes[0] = list(physical_shape)
+      for s in projected_shapes[1:]:
+        for i, x in enumerate(s):
+          projected_shapes[0][i] //= x
+    # compute strides, and verify that the spec is valid.
+    products = [1] * physical_ndims
+    sizes_and_strides = []
+    for s in reversed(projected_shapes):
+      sizes_and_strides.append(
+          [(size, stride) for size, stride in zip(s, products)])
+      for i, x in enumerate(s):
+        products[i] *= x
+    if products != physical_shape:
+      raise ValueError("mesh spec multiplies to the wrong size"
+                       "spec=%s physical_shape=%s products=%s" %
+                       (spec, physical_shape, products))
+    sizes_and_strides.reverse()
+    self._physical_coordinates = _logical_to_physical_v1(
+        sizes_and_strides, physical_shape)
+    self._logical_to_physical = [
+        mtf.processor_coordinates_to_pnum(physical_shape, c)
+        for c in self._physical_coordinates]
+    self._mesh_shape = mtf.Shape(
+        [mtf.Dimension(name, mtf.list_product(s))
+         for name, s in zip(self._names, projected_shapes)])
+
+  @property
+  def logical_to_physical(self):
+    """List of physical processor numbers."""
+    return list(self._logical_to_physical)
+
+  @property
+  def mesh_shape(self):
+    return self._mesh_shape
+
+  @classmethod
+  def spec_to_mesh_shape(cls, spec, num_processors):
+    """Compute mesh shape even without knowing the physical shape.
+
+    This is useful in cases where the mesh shape must be computed before
+    you know the physical_shape.
+
+    Args:
+      spec: a list of (string, list-of-integers) pairs
+      num_processors: an integer
+    Returns:
+      a mtf.Shape
+    """
+    logical_ndims = len(spec)
+    names = [p[0] for p in spec]
+    sizes = [p[1] for p in spec]
+    sizes = [None if s is None else mtf.list_product(s) for s in sizes]
+    if logical_ndims > 0 and sizes[0] is None:
+      sizes[0] = num_processors // mtf.list_product(sizes[1:])
+    if mtf.list_product(sizes) != num_processors:
+      raise ValueError("product of spec must be num_processors"
+                       " spec=%s num_processors=%s"
+                       % (spec, num_processors))
+    return mtf.Shape(
+        [mtf.Dimension(name, s) for name, s in zip(names, sizes)])
+
+
+def physical_shape_3d_from_topology_proto_4d(mesh_shape):
+  """Convert a 4d shape that we get from TPU estimator to a 3d shape.
+
+  Args:
+    mesh_shape: a list of length 4
+  Returns:
+    a list of length 3
+  """
+  if len(mesh_shape) != 4 or mesh_shape[2] != 1:
+    raise ValueError("Expected a 4d shape [x, y, 1, core]")
+  return [mesh_shape[1], mesh_shape[0], mesh_shape[3]]
 
 
 def auto_logical_to_physical_tpu(logical_shape,
@@ -711,19 +839,23 @@ def auto_logical_to_physical_tpu(logical_shape,
 
   Example:
 
-  auto_logical_to_physical_tpu(logical_shape=[16, 8], physical_shape=[8, 8, 2])
+  auto_logical_to_physical_tpu(
+    logical_shape=[16, 8], physical_shape=[8, 8, 1, 2])
 
   Heuristics in this function subject to change.
 
   Args:
     logical_shape: a list of integers
-    physical_shape: a list of integers - typically [X, Y, cores]
+    physical_shape: a list of integers - typically [X, Y, 1, cores]
     return_coordinates: a boolean - return a list of integer lists (coordinates)
        instead of a list of processor indices
 
   Returns:
     logical_to_physical: a permutation of range(product(physical_shape)))
   """
+  tf.logging.info("auto_logical_to_physical_tpu "
+                  "logical_shape=%s physical_shape=%s" %
+                  (logical_shape, physical_shape))
   if mtf.list_product(logical_shape) != mtf.list_product(physical_shape):
     raise ValueError(
         "physical and logical shapes must have the same product "
@@ -738,8 +870,12 @@ def auto_logical_to_physical_tpu(logical_shape,
     if return_coordinates:
       default = [mtf.pnum_to_processor_coordinates(i) for i in default]
     return default
-  if len(physical_shape) != 3:
+  if len(physical_shape) == 4 and physical_shape[2] == 1:
+    physical_shape = physical_shape_3d_from_topology_proto_4d(physical_shape)
+  elif len(physical_shape) != 3:
+    tf.logging.warning("Unrecognized format for tpu physical shape")
     return _default_value()
+  # physical_shape is a triple of rows, cols, cores
   p0, p1, p2 = physical_shape
   if p2 != 2:
     return _default_value
@@ -755,15 +891,8 @@ def auto_logical_to_physical_tpu(logical_shape,
     ring = _ring_2d(p0, p1)
     logical_to_physical = []
     for logical_pnum in range(num_cores):
-      # Go through all chips using core 0, then go through all chips
-      #   backwards using core 1.  This is better in the case where
-      #   one of the tile dimensions is 1, so the last chip is not adjacent
-      #   to the first chip.
-      core_on_chip = logical_pnum // (p0 * p1)
-      if core_on_chip == 0:
-        chip_num = logical_pnum
-      else:
-        chip_num = num_cores - 1 - logical_pnum
+      core_on_chip = logical_pnum % 2
+      chip_num = logical_pnum // 2
       i, j = ring[chip_num]
       logical_to_physical.append((i, j, core_on_chip))
   else:
@@ -803,6 +932,8 @@ def auto_logical_to_physical_tpu(logical_shape,
           tiles_ring[logical_tile_num][1] * t1 +
           tile_logical_to_physical[logical_pos_in_tile][1],
           tile_logical_to_physical[logical_pos_in_tile][2]))
+  tf.logging.info("auto_logical_to_physical_tpu logical_to_physical = %s"
+                  % logical_to_physical)
   if return_coordinates:
     return logical_to_physical
   else:

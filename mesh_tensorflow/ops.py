@@ -19,6 +19,7 @@ from __future__ import division
 from __future__ import print_function
 
 import collections
+import copy
 import functools
 import itertools
 import operator
@@ -288,6 +289,9 @@ class LayoutRules(object):
           (self, tensor_shape, mesh_shape))
     return TensorLayout(ret)
 
+  def mesh_dimension_name_to_tensor_dimension_names(self, mesh_dimension_name):
+    return [tdn for tdn, mdn in self._pairs if mdn == mesh_dimension_name]
+
 
 def convert_to_layout_rules(x):
   """Converts input to a LayoutRules.
@@ -382,6 +386,7 @@ class Graph(object):
     # Maps a name used in the graph to the next id to use for that name.
     self._names_in_use = {}
     self.name_to_variable = {}
+    self.captured_variable_scope = tf.get_variable_scope()
 
   def __repr__(self):
     return self.to_string
@@ -600,6 +605,71 @@ class Graph(object):
         v for v in self._trainable_variables if v not in variables
     ]
 
+  def clone_operations(self, ops, input_mapping):
+    """Clone a portion of the graph, but with different inputs.
+
+    The differnt inputs are specified by the `input_mapping` dictionary, which
+    maps from input Tensor in the original operations to input Tensor in the
+    cloned operations.  If an original operation uses an external input that is
+    not in `input_mapping`, then the original input is used for the cloned
+    operation.
+
+    The function returns a list of cloned operations as well an
+    `extended_mapping` dictionary which consits of the union of the input
+    mapping and the map from original-operation-output to
+    cloned-operation-output.
+
+    Variables and Random operations are not cloned.
+
+    Args:
+      ops: a list of operations
+      input_mapping: a dictionary from Tensor to Tensor
+    Returns:
+      cloned_operations: a list of operations
+      extended_mapping: a dictionary from Tensor to Tensor
+    """
+    # pylint: disable=protected-access
+    mapping = copy.copy(input_mapping)
+    prev_num_operations = len(self.operations)
+    for op in ops:
+      if isinstance(op, Variable):
+        continue
+      if isinstance(op, RandomOperation):
+        # The random values will be copied instead of recomputed.
+        # TODO(noam): Use stateless_random to allow for recompute.
+        tf.logging.warning(
+            "Not cloning random operation, so as to ensure the same values.")
+        continue
+      new_op = copy.copy(op)
+      # new_op._name = self.unique_name(op.name)
+      self._operations.append(new_op)
+      new_op._inputs = [mapping.get(t, t) for t in op._inputs]
+      new_op._outputs = []
+      for i, t in enumerate(op.outputs):
+        new_t = Tensor(new_op, t.shape, t.dtype, t.name, i)
+        new_t.usable = True
+        new_op._outputs.append(new_t)
+        if t in mapping:
+          raise ValueError(
+              "input mapping should not contain any of the outputs"
+              " of the cloned operations")
+        mapping[t] = new_t
+    # pylint: enable=protected-access
+    return self.operations[prev_num_operations:], mapping
+
+  def capture_operations(self, fn):
+    """Run a function and capture the list of operations it generates.
+
+    Args:
+      fn: a function taking no arguments
+    Returns:
+      fn_output: the function output
+      captured_operations: a list of Operation
+    """
+    n = len(self.operations)
+    y = fn()
+    return y, self.operations[n:]
+
 
 class Lowering(object):
   """Lowering of a Graph from Mesh-TensorFlow to TensorFlow.
@@ -625,7 +695,7 @@ class Lowering(object):
   ```
   """
 
-  def __init__(self, graph, mesh_to_impl, autostack=True):
+  def __init__(self, graph, mesh_to_impl, autostack=True, log_file=None):
     """Creates a Lowering of a Graph.
 
     Args:
@@ -638,6 +708,8 @@ class Lowering(object):
         This is a helpful performance optimization for large meshes.
         For more fine-grained control, you can call
         graph.rewrite_stack_variables() yourself before creating the Lowering.
+      log_file: an optional string. If provided, information about the variables
+        and operations will also be logged to this file.
     """
     # tf.logging.info("LOWERING GRAPH:\n%s" % graph.to_string)
     self.mesh_to_impl = mesh_to_impl   # {Mesh: MeshImpl}
@@ -656,13 +728,29 @@ class Lowering(object):
         self.add_counter(
             "output/%s" % type(op).__name__, self.laid_out_size(out))
         self.add_counter("output_unique/%s" % type(op).__name__, out.size)
-    log_variable_sizes(
-        graph.trainable_variables, "Trainable Variables", verbose=True,
-        mesh_to_impl=self.mesh_to_impl)
-    log_variable_sizes(
-        graph.all_variables, "All Variables", verbose=False,
-        mesh_to_impl=self.mesh_to_impl)
-    tf.logging.info("Counters:\n" + pretty_print_counters(self._counters))
+
+    def log_info(f=None):
+      """Log the variables and operations, possibly to file `f` as well."""
+      log_variable_sizes(
+          graph.trainable_variables,
+          "Trainable Variables",
+          verbose=True,
+          mesh_to_impl=self.mesh_to_impl,
+          log_file=f)
+      log_variable_sizes(
+          graph.all_variables,
+          "All Variables",
+          verbose=False,
+          mesh_to_impl=self.mesh_to_impl,
+          log_file=f)
+      _log_info_also_to_file(
+          "Counters:\n" + pretty_print_counters(self._counters), log_file=f)
+
+    if log_file:
+      with tf.io.gfile.GFile(log_file, mode="w") as f:
+        log_info(f)
+    else:
+      log_info()
 
   def mesh_impl(self, m):
     if not isinstance(m, Mesh):
@@ -932,12 +1020,33 @@ class MeshImpl(object):
     Args:
       fn: function from tf.Tensors to tf.Tensor or a tuple of tf.Tensors.
       *inputs: list of inputs.  Each input is either a LaidOutTensor or
-        is convertible to a tf.Tensor.
+        has a to_laid_out_tensor method or is convertible to a tf.Tensor.
 
     Returns:
       LaidOutTensor, or a tuple of LaidOutTensors if fn returns a tuple.
     """
     raise NotImplementedError("Slicewise not implemented")
+
+  def slicewise_delay_allreduce(self, fn, *inputs):
+    """If all the arguments are compatible LazyAllreduceSums, then stay lazy.
+
+    Args:
+      fn: function from tf.Tensors to tf.Tensor or a tuple of tf.Tensors.
+      *inputs: list of inputs.  Each input is either a LaidOutTensor or
+        has a to_laid_out_tensor method or is convertibleto a tf.Tensor.
+
+    Returns:
+      LaidOutTensor or LazyAllreduceSum
+    """
+    if compatible_lazy_allreduce_sums(inputs):
+      return LazyAllreduceSum(
+          self,
+          self.slicewise(
+              fn, *[x.laid_out_input for x in inputs]),
+          inputs[0].mesh_axes,
+          add_counter_fn=inputs[0].add_counter_fn)
+    else:
+      return self.slicewise(fn, *inputs)
 
   def Print(self, x, data, message, **kwargs):  # pylint: disable=invalid-name
     """Calls tf.Print.
@@ -1056,6 +1165,9 @@ class MeshImpl(object):
       mesh_axis: an integer
       offset: an integer
       wrap: a boolean. If True, then wrap around. Otherwise, pad with zeros.
+
+    Returns:
+      a LaidOutTensor
     """
     n = self.shape[mesh_axis].size
     source_pcoord = []
@@ -1261,30 +1373,30 @@ class LazyAllreduceSum(object):
         self.add_counter_fn()
     return self._reduced
 
-  def __add__(self, other):
-    """Add to another LazyAllreduceSum.
-
-    Args:
-      other: a LazyAllreduceSum or a LaidOutTensor
-    Returns:
-      a LazyAllreduceSum or a LaidOutTensor
-    """
-    if (isinstance(other, LazyAllreduceSum) and
-        self.mesh_impl == other.mesh_impl and
-        self.mesh_axes == other.mesh_axes):
-      return LazyAllreduceSum(
-          self.mesh_impl,
-          self.mesh_impl.slicewise(
-              tf.add, self.laid_out_input, other.laid_out_input),
-          self.mesh_axes,
-          add_counter_fn=self.add_counter_fn)
-    else:
-      return self.mesh_impl.slicewise(
-          tf.add, self.to_laid_out_tensor(), other.to_laid_out_tensor())
-
   @property
   def slice_shape(self):
     return self.laid_out_input.slice_shape
+
+
+def compatible_lazy_allreduce_sums(xs):
+  """"Are xs all compatible LazyAllreduceSum objects.
+
+  Args:
+    xs: a list
+  Returns:
+    a boolean
+  """
+  if not xs:
+    return False
+  if not all([isinstance(x, LazyAllreduceSum) for x in xs]):
+    return False
+  x = xs[0]
+  for y in xs[1:]:
+    if x.mesh_impl != y.mesh_impl:
+      return False
+    if x.mesh_axes != y.mesh_axes:
+      return False
+  return True
 
 
 def convert_args_to_laid_out_tensors(xs):
@@ -1328,6 +1440,9 @@ class Tensor(object):
     if name is None:
       name = self.operation.name + ":" + str(index)
     self._name = name
+    # A flag that we can turn off to assert that no one uses the tensor
+    #   as the input to an operation.
+    self.usable = True
 
   @property
   def shape(self):
@@ -1422,7 +1537,7 @@ class Operation(object):
       if not inputs:
         raise ValueError("mesh must be specified if no inputs")
       mesh = inputs[0].mesh
-    self._inputs = inputs
+    self._inputs = inputs[:]
     self._outputs = []
     self._mesh = mesh
     # In a default operation, all dimensions are splittable.
@@ -1431,6 +1546,9 @@ class Operation(object):
     assert name is not None
     self._name = mesh.graph.unique_name(name)
     mesh.graph.operations.append(self)
+    for t in inputs:
+      if not t.usable:
+        raise ValueError("Operation %s has unusable input %s" % (self, t))
 
   @property
   def graph(self):
@@ -1660,6 +1778,18 @@ def cwise(tf_fn, xs, output_dtype=None, grad_function=None, name=None):
       grad_function=grad_function, name=name or "cwise")
 
 
+def identity(x, name="identity"):
+  return cwise(tf.identity, [x], name=name)
+
+
+def sin(x, name="sin"):
+  return cwise(tf.sin, [x], name=name)
+
+
+def cos(x, name="cos"):
+  return cwise(tf.cos, [x], name=name)
+
+
 def square(x, name="square"):
   return cwise(
       tf.square, [x], name=name,
@@ -1738,6 +1868,39 @@ def gelu(x):
   """
   cdf = 0.5 * (1.0 + tanh((np.sqrt(2 / np.pi) * (x + 0.044715 * x * x * x))))
   return x * cdf
+
+
+def elu(x):
+  """Exponential Linear Unit.
+
+  This is a smoother version of the RELU.
+  Original paper: https://arxiv.org/abs/1511.07289
+  Args:
+    x: float Tensor to perform activation.
+
+  Returns:
+    'x' with the ELU activation applied.
+  """
+  return cwise(tf.nn.elu, [x], name="elu")
+
+
+def selu(x):
+  """Scaled Exponential Linear Unit.
+
+  This is a smoother version of the RELU.
+  Original paper: https://arxiv.org/abs/1706.02515
+  Args:
+    x: float Tensor to perform activation.
+
+  Returns:
+    'x' with the SELU activation applied.
+  """
+  return cwise(tf.nn.selu, [x], name="selu")
+
+
+def softplus(x):
+  """Softplus activation."""
+  return cwise(tf.math.softplus, [x], name="softplus")
 
 
 def reciprocal(x, name="reciprocal"):
@@ -1909,10 +2072,12 @@ class BinaryOpWithBroadcasting(Operation):
     if x2.shape != output.shape:
       laid_out_x2 = mesh_impl.slicewise(
           _expand_dims, laid_out_x2, x2.shape, output.shape)
-    lowering.set_tensor_lowering(
-        self.outputs[0],
-        mesh_impl.slicewise(
-            self._tf_fn, laid_out_x1, laid_out_x2))
+    if self._tf_fn == tf.add:
+      out = mesh_impl.slicewise_delay_allreduce(
+          self._tf_fn, laid_out_x1, laid_out_x2)
+    else:
+      out = mesh_impl.slicewise(self._tf_fn, laid_out_x1, laid_out_x2)
+    lowering.set_tensor_lowering(self.outputs[0], out)
 
 
 def binary_arguments_to_tensors(x1, x2):
@@ -2226,7 +2391,7 @@ def _tf_upscale(x, dim_idx_start, dim_idx_end, xscales):
   trailing_shape = x_shape[dim_idx_end:]
   x = tf.reshape(x, x_shape[:dim_idx_end] + [-1])
   x = _tf_upscale_one_trailing_dim(x)
-  x = tf.reshape(x, x.shape[:-1] + trailing_shape)
+  x = tf.reshape(x, x.shape.as_list()[:-1] + trailing_shape)
 
   return x
 
@@ -2461,6 +2626,7 @@ class SplitOperation(Operation):
             "splittable", [split_dim.name]))
 
   def gradient(self, grad_ys):
+    grad_ys = [g or zeros_like(o) for g, o in zip(grad_ys, self._outputs)]
     return [concat(grad_ys, self._split_dim.name)]
 
   def lower(self, lowering):
@@ -2538,6 +2704,8 @@ def stack(xs, dim_name, axis=0, name=None):
   Returns:
     a Tensor
   """
+  if axis < 0:
+    axis = xs[0].shape.ndims + 1 + axis
   ret = StackOperation(xs, dim_name, axis, name).outputs[0]
   return ret
 
@@ -3861,20 +4029,18 @@ class Variable(Operation):
     if trainable:
       self.graph.trainable_variables.append(self)
 
+  def __repr__(self):
+    return "Variable(%s)" % self.value
+
   def lower(self, lowering):
     mesh_impl = lowering.mesh_impl(self)
     with utils.outside_all_rewrites():
       sv = mesh_impl.LaidOutVariable(self, mesh_impl)
     lowering.variables[self] = sv
-    # Encourage re-decoding every time the slices are read.
-    # XLA should really be able to rematerilize without this.
-    def to_laid_out_tensor_fn():
-      return mesh_impl.slicewise(
-          tf.cast, sv.laid_out_tensor, self.activation_dtype)
     lowering.set_tensor_lowering(
         self.outputs[0],
-        LazyLaidOutTensor(to_laid_out_tensor_fn,
-                          mesh_impl.slice_shape(self.shape)))
+        mesh_impl.slicewise(
+            tf.cast, sv.laid_out_tensor, self.activation_dtype))
     if self._trainable:
       lowering.add_counter("variables/trainable", self.outputs[0].size)
     else:
@@ -4024,7 +4190,7 @@ def get_variable(mesh, name, shape, dtype=tf.float32,
     tf.logging.warning(
         "Using default tf glorot_uniform_initializer for variable %s "
         " The initialzer will guess the input and output dimensions "
-        " based on dimension order."  % full_name)
+        " based on dimension order." % full_name)
   if full_name in mesh.graph.name_to_variable:
     var = mesh.graph.name_to_variable[full_name]
   else:
@@ -4089,7 +4255,8 @@ def assign(var, new_val, assign_fn=assign_slice, name=None):
   """Assign a new value to a variable.
 
   Args:
-    var: either a Variable operation or its output Tensor.
+    var: either a Variable operation or its output Tensor,
+      or the output of a chain of unary operations starting with a Variable.
     new_val: a Tensor
     assign_fn: a function from
         (mtf.Variable, tf.Variable, tf.Tensor) -> tf.Operation
@@ -4099,8 +4266,11 @@ def assign(var, new_val, assign_fn=assign_slice, name=None):
   Raises:
     ValueError: if var is not a Variable and var.operation is not a Variable
   """
+  # find the original Variable operation.
   if isinstance(var, Tensor):
     var = var.operation
+  while not isinstance(var, Variable) and len(var.inputs) == 1:
+    var = var.inputs[0].operation
   if not isinstance(var, Variable):
     raise ValueError("var must be a mtf.Variable or its output Tensor.")
   return Assign([var], [new_val], assign_fn=assign_fn, name=name)
@@ -4351,17 +4521,21 @@ class ReshapeOperation(Operation):
 
     laid_out_size = mesh_impl.laid_out_size(old_shape)
 
+    # list of (mesh_axis, tensor_axis) pairs to allsplit after the reshape
+    # typically we do the allsplit before the reshape, to save communication,
+    # but sometimes we need to delay it.
+    allsplit_after_reshape = []
     for mesh_axis in mesh_axes_allsplit:
       tensor_axis = old_shape.cumprod_to_tensor_axis(
           mesh_axis_to_cumprod_new[mesh_axis])
       if tensor_axis is None:
-        # TODO(noam): try to handle this case
-        raise NotImplementedError(
-            "Try first reshaping to insert a new tf dimension,"
-            " then changing layout. input_shape=%s output_shape=%s"
-            % (self.inputs[0].shape, self.outputs[0].shape))
-      slices = mesh_impl.allsplit(slices, mesh_axis, tensor_axis)
-      laid_out_size //= mesh_impl.shape[mesh_axis].size
+        # delay allsplit until after reshape
+        tensor_axis = new_shape.cumprod_to_tensor_axis(
+            mesh_axis_to_cumprod_new[mesh_axis])
+        allsplit_after_reshape.append((mesh_axis, tensor_axis))
+      else:
+        slices = mesh_impl.allsplit(slices, mesh_axis, tensor_axis)
+        laid_out_size //= mesh_impl.shape[mesh_axis].size
     for mesh_axis in mesh_axes_alltoall:
       split_tensor_axis = old_shape.cumprod_to_tensor_axis(
           mesh_axis_to_cumprod_new[mesh_axis])
@@ -4388,12 +4562,14 @@ class ReshapeOperation(Operation):
       lowering.add_counter(
           "allconcat/%s/reshape_op" % mesh_axis, laid_out_size)
     # now reshape the slices
-    old_slice_shape = mesh_impl.slice_shape(old_shape)
     new_slice_shape = mesh_impl.slice_shape(new_shape)
-    if new_slice_shape != old_slice_shape:
-      def reshape_fn(x):
-        return tf.reshape(x, new_slice_shape)
-      slices = mesh_impl.slicewise(reshape_fn, slices)
+    for mesh_axis, tensor_axis in allsplit_after_reshape:
+      new_slice_shape[tensor_axis] *= mesh_impl.shape[mesh_axis].size
+    def reshape_fn(x):
+      return tf.reshape(x, new_slice_shape)
+    slices = mesh_impl.slicewise_delay_allreduce(reshape_fn, slices)
+    for mesh_axis, tensor_axis in allsplit_after_reshape:
+      slices = mesh_impl.allsplit(slices, mesh_axis, tensor_axis)
     lowering.set_tensor_lowering(self.outputs[0], slices)
 
   def gradient(self, grad_ys):
@@ -4754,7 +4930,12 @@ class TopKOperation(Operation):
     def _slicewise_top_k(t):
       t = tf.transpose(
           t, [i for i in range(ndims) if i != reduced_axis] + [reduced_axis])
-      return tf.math.top_k(t, min(self._k_dim.size, reduced_dim_per_shard))
+      if self._k_dim.size == 1:
+        # top_k seems to be slow on TPU - use reduce_max and argmax instead
+        return (tf.expand_dims(tf.math.reduce_max(t, -1), -1),
+                tf.expand_dims(tf.cast(tf.math.argmax(t, -1), tf.int32), -1))
+      else:
+        return tf.math.top_k(t, min(self._k_dim.size, reduced_dim_per_shard))
     values, indices = mesh_impl.slicewise(_slicewise_top_k, lowering.tensors[x])
     if reduced_mesh_axis is not None:
       # indices are now indices within a shard.  Make them global indices.
@@ -4792,8 +4973,42 @@ def top_k(x, reduced_dim, k_dim, name=None):
     values: a Tensor with same type as x.
     indices: a Tensor with dtype tf.int32
   """
-  op = TopKOperation(x, reduced_dim, k_dim, name=name)
-  return op.outputs[0], op.outputs[1]
+  if k_dim.size > 1 and k_dim.size < 5:
+    return _iterative_top_k(x, reduced_dim, k_dim, name=name)
+  else:
+    op = TopKOperation(x, reduced_dim, k_dim, name=name)
+    return op.outputs[0], op.outputs[1]
+
+
+def _iterative_top_k(x, reduced_dim, k_dim, name=None):
+  """Like tf.top_k.
+
+  Iterative implementation of top_k.
+  This is faster for small k on TPU for now, since the implementation of
+  tf.nn.top_k() seems to use sorting.
+
+  Args:
+    x: a Tensor
+    reduced_dim: a Dimension in x.shape.dims.
+    k_dim: a Dimension.  The size determines k.
+    name: optional string.
+  Returns:
+    values: a Tensor with same type as x.
+    indices: a Tensor with dtype tf.int32
+  """
+  reduced_dim = convert_to_dimension(reduced_dim)
+  k_dim = convert_to_dimension(k_dim)
+  indices = []
+  values = []
+  k = k_dim.size
+  with tf.name_scope(name, default_name="top_k"):
+    for i in xrange(k):
+      max_val, max_index = top_1(x, reduced_dim)
+      indices.append(max_index)
+      values.append(max_val)
+      if i + 1 < k:
+        x += one_hot(max_index, reduced_dim, on_value=-1e9, dtype=x.dtype)
+  return stack(values, k_dim.name, -1), stack(indices, k_dim.name, -1)
 
 
 def top_1(x, reduced_dim, name=None):
@@ -4805,7 +5020,7 @@ def top_1(x, reduced_dim, name=None):
     name: an optional string
   Returns:
     values: Tensor equal to mtf.reduce_max(x, reduced_dim=reduced_dim)
-    indices: a Tensor with given dtype
+    indices: a Tensor with dtype tf.int32
   """
   one_dim = Dimension("_one", 1)
   values, indices = top_k(x, reduced_dim, one_dim, name=name)
@@ -4828,17 +5043,23 @@ def argmax(x, reduced_dim, name=None):
   return top_1(x, reduced_dim, name=name)[1]
 
 
-def sample_with_temperature(x, dim, temperature=1.0, name=None):
-  """Either argmax or random sampling.
+def sample_with_temperature(logits, dim, temperature=1.0, name=None):
+  """Sample from a probability distribution.
+
+  If temperature=0.0, then we compute argmax(logits, dim)
+  If temperature=1.0, then we sample with probability proportional to
+    exp(logits).  So you can pass in the log(probablity) as the logits.
+  `dim` is one the dimension of `logits` which represents the set of choices.
+  The other dimensions of `logits` are treated as batch-dimensions.
 
   Args:
-    x: a Tensor.
-    dim: a Dimension in x.shape.dims
+    logits: a Tensor.
+    dim: a Dimension in logits.shape.dims
     temperature: a float  0.0=argmax 1.0=random
     name: an optional string
 
   Returns:
-    a Tensor with type tf.int32.
+    a Tensor with type tf.int32 and shape (logits.shape - dim)
   """
   dim = convert_to_dimension(dim)
   with tf.name_scope(name, default_name="sample_with_temperature"):
@@ -4847,17 +5068,18 @@ def sample_with_temperature(x, dim, temperature=1.0, name=None):
       # Note: we don't want to generate 0 or 1 because:
       # * -log(-log(0)) is -infinity
       # * -log(-log(1)) is +infinity.
-      # np.finfo(x.dtype.as_numpy_dtype).tiny doesn't work on bfloat16
+      # The numerics may be weird in bfloat16 - use float32.
+      logits = cast(logits, tf.float32)
       tiny_val = 1e-9
       g = -log(-log(
           random_uniform(
-              x.mesh,
-              x.shape,
+              logits.mesh,
+              logits.shape,
               minval=tiny_val,
               maxval=1.,
-              dtype=x.dtype)))
-      x += g * temperature
-    return argmax(x, dim, name)
+              dtype=logits.dtype)))
+      logits += g * temperature
+    return argmax(logits, dim, name)
 
 
 def add(x1, x2, output_shape=None, name=None):
@@ -4965,10 +5187,10 @@ def mtf_slice(x, begin, size, slice_dim_name, name=None):
 
 
 def pad(x, paddings, dim_name, name=None):
-  """Slice operation.
+  """Pad operation.
 
   Args:
-    x: a list of Tensors
+    x: a Tensor
     paddings: list of integers of size 2, padding size before and after for dim.
     dim_name: string, name for the padding dim
     name: an optional string
@@ -5025,38 +5247,43 @@ def gather(weights, indices, dim, output_shape=None):
                 reduced_dims=[dim], output_shape=output_shape)
 
 
-def gradients(ys, xs, grad_ys=None):
+def gradients(ys, xs, grad_ys=None, operations=None):
   """Compute gradients in dtf.
 
   Args:
     ys: a list of Tensors
     xs: a list of Tensors
     grad_ys: an optional list of Tensors
+    operations: list of operations through which to back-propagate gradients
+      defaults to ys[0].graph.operations
 
   Returns:
     grad_xs: a list of Tensors
   """
-  graph = ys[0].graph
+  if operations is None:
+    operations = ys[0].graph.operations
   if not grad_ys:
     grad_ys = [Constant(y.mesh, 1.0, y.shape, y.dtype).outputs[0] for y in ys]
   # figure out what Tensors are downstream of xs
   downstream = set(xs)
-  for op in graph.operations:
+  for op in operations:
     if op.has_gradient:
       if set(op.inputs) & downstream:
         downstream |= set(op.outputs)
-  tensor_to_gradient = dict(zip(ys, grad_ys))
-  for op in graph.operations[::-1]:
-    grad_outputs = [tensor_to_gradient.get(out) for out in op.outputs]
-    if op.has_gradient and any(grad_outputs) and (set(op.inputs) & downstream):
-      with tf.variable_scope(op.name + "/gradients"):
-        input_grads = op.gradient(grad_outputs)
-        for inp, grad in zip(op.inputs, input_grads):
-          if inp in downstream and grad is not None:
-            if inp in tensor_to_gradient:
-              tensor_to_gradient[inp] += grad
-            else:
-              tensor_to_gradient[inp] = grad
+  tensor_to_gradient = {y: g for y, g in zip(ys, grad_ys) if g is not None}
+  with tf.variable_scope(ys[0].graph.captured_variable_scope):
+    for op in operations[::-1]:
+      grad_outputs = [tensor_to_gradient.get(out) for out in op.outputs]
+      if (op.has_gradient and any(grad_outputs)
+          and (set(op.inputs) & downstream)):
+        with tf.variable_scope(op.name + "/gradients"):
+          input_grads = op.gradient(grad_outputs)
+          for inp, grad in zip(op.inputs, input_grads):
+            if inp in downstream and grad is not None:
+              if inp in tensor_to_gradient:
+                tensor_to_gradient[inp] += grad
+              else:
+                tensor_to_gradient[inp] = grad
   return [tensor_to_gradient.get(x, None) for x in xs]
 
 
@@ -5594,8 +5821,8 @@ def random_normal(mesh, shape, **kwargs):
   Returns:
     a Tensor
   """
-  shape = mtf.convert_to_shape(shape)
-  return mtf.RandomOperation(mesh, shape, tf.random.normal, **kwargs).outputs[0]
+  shape = convert_to_shape(shape)
+  return RandomOperation(mesh, shape, tf.random.normal, **kwargs).outputs[0]
 
 
 def dropout(x, keep_prob=None, rate=None, noise_shape=None, name=None):
@@ -5652,7 +5879,11 @@ def _cumprod(l):
   return ret
 
 
-def log_variable_sizes(var_list, tag, verbose=True, mesh_to_impl=None):
+def log_variable_sizes(var_list,
+                       tag,
+                       verbose=True,
+                       mesh_to_impl=None,
+                       log_file=None):
   """Log the sizes and shapes of variables, and the total size.
 
   Args:
@@ -5660,6 +5891,8 @@ def log_variable_sizes(var_list, tag, verbose=True, mesh_to_impl=None):
     tag: a string; defaults to "Trainable Variables"
     verbose: bool, if True, log every weight; otherwise, log total size only.
     mesh_to_impl: an optional map from Mesh to MeshImpl
+    log_file: an optional tf.io.gfile.GFile. If provided, information about
+      the variables will also be logged to this file.
   """
   if not var_list:
     return
@@ -5676,20 +5909,41 @@ def log_variable_sizes(var_list, tag, verbose=True, mesh_to_impl=None):
       slice_size = 0
     total_slice_size += slice_size
     if verbose:
-      tf.logging.info(
+      _log_info_also_to_file(
           "Variable %s size %s slice_size %s %s",
           v.name.ljust(60),
           str(v_size).ljust(12),
           str(slice_size).ljust(12),
-          str(v.shape).ljust(60))
+          str(v.shape).ljust(60),
+          log_file=log_file)
       if isinstance(v, StackedVariable):
         for n in v.original_names:
-          tf.logging.info("    " + n)
+          _log_info_also_to_file("    " + n, log_file=log_file)
     total_size += v_size
-  tf.logging.info("%s count: %s  Total size: %s  Total slice_size: %s",
-                  tag.ljust(30), str(len(var_list)).ljust(6),
-                  str(total_size).ljust(15),
-                  str(total_slice_size).ljust(15))
+  _log_info_also_to_file(
+      "%s count: %s  Total size: %s  Total slice_size: %s",
+      tag.ljust(30),
+      str(len(var_list)).ljust(6),
+      str(total_size).ljust(15),
+      str(total_slice_size).ljust(15),
+      log_file=log_file)
+
+
+def _log_info_also_to_file(format_str, *args, **kw_args):
+  """Logs at the info level and writes to file if one is provided.
+
+  Args:
+    format_str: a string; will be logged and can contain things such as %s.
+    *args: arguments to the format_str.
+    **kw_args: keyword arguments. May contain optional tf.io.gfile.GFile keyed
+      by "log_file", where the message will also be appended to this file. Other
+      arguments will be ignored.
+  """
+  tf.logging.info(format_str, *args)
+  log_file = kw_args.get("log_file", None)
+  if log_file:
+    log_file.write(format_str % args)
+    log_file.write("\n")
 
 
 class WhileLoopOperation(Operation):
@@ -5899,6 +6153,160 @@ def while_loop(cond_fn, body_fn, inputs, num_loop_vars=None,
   return WhileLoopOperation(
       my_cond_fn, my_body_fn, inputs, tf_kwargs=kwargs,
       has_accumulators=has_accumulators).outputs
+
+
+class CustomGradientOperation(Operation):
+  """Operation to implement custom gradients.
+
+  See comments on custom_gradient() below.
+  """
+
+  def __init__(self,
+               explicit_inputs,
+               all_inputs,
+               fn_outputs,
+               grad_fn,
+               forward_operations,
+               name=None):
+    super(CustomGradientOperation, self).__init__(
+        all_inputs + fn_outputs, name=name or "custom_gradient")
+    self._explicit_inputs = explicit_inputs
+    self._all_inputs = all_inputs
+    self._grad_fn = grad_fn
+    self._fn_outputs = fn_outputs
+    self._outputs = [Tensor(self, x.shape, x.dtype, index=i)
+                     for i, x in enumerate(fn_outputs)]
+    self._forward_operations = forward_operations
+
+  def lower(self, lowering):
+    for fn_output, output in zip(
+        self._fn_outputs, self._outputs):
+      lowering.set_tensor_lowering(output,
+                                   lowering.tensors[fn_output])
+
+  def gradient(self, grad_ys):
+    graph = self._inputs[0].graph
+    old_num_vars = len(graph.all_variables)
+    grads = self._grad_fn(
+        explicit_inputs=self._explicit_inputs,
+        all_inputs=self._all_inputs,
+        forward_operations=self._forward_operations,
+        outputs=self._fn_outputs,
+        output_grads=grad_ys)
+    new_num_vars = len(graph.all_variables)
+    if new_num_vars != old_num_vars:
+      raise ValueError(
+          "new variables created by custom gradient."
+          "Maybe a problem with scope. %s" % (
+              graph.all_variables[old_num_vars:],))
+    for g, t in zip(grads, self._all_inputs):
+      if g is None:
+        tf.logging.warning("No gradient on input %s" % t)
+    return list(grads) + [None] * len(self._fn_outputs)
+
+
+def custom_gradient(fn, grad_fn, explicit_inputs):
+  """Execute a function and call a custom gradient fn on the backward pass.
+
+  `fn` takes positional Tensor arguments and returns a Tensor or a tuple of
+  Tensors.
+
+  `explicit_inputs` is a list of tensors to be passed as positional arguments
+  to the function `fn`.
+
+  `grad_fn` has the following signature:
+    Args:
+      explicit_inputs: the list of Tensors passed to this function and to `fn`
+      all_inputs: a list of tensors beginning with explicit_inputs, but also
+        containing external Tensors used by fn.
+      forward_operations: a list of Operation. (the operations created on the
+        foward pass
+      outputs: the outputs of `fn` from the forward pass
+      output_grads: the gradient Tensors corresponding to those outputs.
+    Returns
+      a list of Tensor/None with the same length as `all_inputs`
+
+  Args:
+    fn: a function taking positional Tensor arguments
+    grad_fn: a function (see above)
+    explicit_inputs: list of Tensors
+  Returns:
+    a list of outputs
+  """
+  graph = explicit_inputs[0].graph
+  outputs, forward_operations = graph.capture_operations(
+      lambda: fn(*explicit_inputs))
+  returns_tuple = isinstance(outputs, tuple)
+  new_outputs = set()
+  new_inputs = set()
+  for op in forward_operations:
+    new_inputs.update(set(op.inputs))
+    if not isinstance(op, Variable):
+      new_outputs.update(set(op.outputs))
+  external_inputs = list(new_inputs - new_outputs - set(explicit_inputs))
+  external_inputs = [t for t in external_inputs if t.dtype.is_floating]
+  all_inputs = explicit_inputs + external_inputs
+  if not returns_tuple:
+    outputs = outputs,
+  ret = CustomGradientOperation(explicit_inputs,
+                                all_inputs,
+                                list(outputs),
+                                grad_fn,
+                                forward_operations).outputs
+  # Make sure no one uses the internals of this function, since the gradients
+  #  will probably not work correctly.
+  for t in new_outputs - set(outputs):
+    t.usable = False
+  return ret if returns_tuple else ret[0]
+
+
+def _recompute_grad_grad(explicit_inputs,
+                         all_inputs,
+                         forward_operations,
+                         outputs,
+                         output_grads,
+                         control_dependencies):
+  """Gradient function used with recompute_grad."""
+  graph = forward_operations[0].graph
+  input_mapping = {t: t for t in all_inputs}
+  if control_dependencies:
+    # we need to outsmart XLA here to force a control dependency
+    zero_with_control_dependency = reduce_sum(output_grads[0] * 1e-30)
+    for t in explicit_inputs:
+      if t.dtype.is_floating:
+        input_mapping[t] += cast(zero_with_control_dependency, t.dtype)
+  mapped_inputs = [input_mapping[t] for t in all_inputs]
+  recomputed_operations, mapping = graph.clone_operations(
+      forward_operations, input_mapping)
+  recomputed_outputs = [mapping[t] for t in outputs]
+  input_grads = gradients(
+      ys=recomputed_outputs,
+      xs=mapped_inputs,
+      grad_ys=output_grads,
+      operations=recomputed_operations)
+  for x, g in zip(all_inputs, input_grads):
+    if x.dtype.is_floating and g is None:
+      raise ValueError("_recompute_grad_grad: no gradient for %s" % x)
+  return input_grads
+
+
+def recompute_grad(fn, explicit_inputs, control_dependencies=True):
+  """Execute a function and recompute it on the backwards pass.
+
+  Args:
+    fn: a function taking positional arguments and returning a Tensor or tuple
+      of Tensors.
+    explicit_inputs: inputs to the function
+    control_dependencies: a boolean - whether to force the recomputation to
+      happen after the output gradients.
+  Returns:
+    a Tensor or tuple of Tensors
+  """
+  return custom_gradient(
+      fn,
+      functools.partial(_recompute_grad_grad,
+                        control_dependencies=control_dependencies),
+      explicit_inputs)
 
 
 def where(condition, if_true, if_false, output_shape=None):
@@ -6126,6 +6534,14 @@ def serialize_training_step(features, model_fn, batch_dim, num_splits):
     outputs = model_fn(my_features)
     grads = gradients(
         [outputs["loss"]], [v.outputs[0] for v in graph.trainable_variables])
+    if None in grads:
+      for var, var_grad in zip(graph.trainable_variables, grads):
+        if var_grad is None:
+          tf.logging.error(
+              "None gradient for trainable variable %s." % var.outputs[0])
+      raise ValueError("Fond trainable variable(s) with None gradient. "
+                       "Check if there are trainable variables(s) "
+                       "disconnected from the graph.")
     output_keys = outputs.keys()
     cache["output_keys"] = output_keys
     ret = []

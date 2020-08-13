@@ -22,7 +22,7 @@ mesh-tensorflow Transformer implementation in the Tensor2Tensor library.
 The interface is for the user to create a Unitransformer or Bitransformer
 object and then call its methods (call_simple, sample_autoregressive, etc.)
 The Unitransformer or Bitransformer is configured by creating a LayerStack
-object contiaining instances of TransformerLayer.  Users can subclass
+object containing instances of TransformerLayer.  Users can subclass
 TransformerLayer to create new types of layers.
 
 Supported so far:
@@ -32,15 +32,11 @@ Supported so far:
  - fast autoregressive sampling with temperature
  - beam search
  - mixture of experts layer
- - local attetion layer
- - wrapper for tensor2tensor (MtfTransformer2)
+ - local attention layer
  - shared embedding / shared embedding and softmax weights
 
 Not yet supported:  TODO(noam)
  - compressed attention layer
- - training binary without tensor2tensor
-
-TODO(noam): move Unitransformer and Bitransformer classes to top of file.
 """
 
 from __future__ import absolute_import
@@ -48,6 +44,7 @@ from __future__ import division
 from __future__ import print_function
 
 import json
+import math
 
 import gin
 import mesh_tensorflow as mtf
@@ -63,7 +60,7 @@ class TransformerLayer(object):
   library.
 
   Transformer layers should subclass TransformerLayer.  In the constructor, the
-  subclasses simply record their hyperparmeters.  Subclasses must implement a
+  subclasses simply record their hyperparameters.  Subclasses must implement a
   call() method, representing a call to that layer.  The call method is passed
   an input tensor and a Context object.  Variables should be created inside of
   the call().
@@ -145,7 +142,8 @@ class Context(object):
                write_priority=None,
                read_priority=None,
                inputs=None,
-               encoder_inputs=None):
+               encoder_inputs=None,
+               num_microbatches=1):
     """Create a context.
 
     Args:
@@ -155,7 +153,7 @@ class Context(object):
       length_dim: a mtf.Dimension
       variable_dtype: a mtf.VariableDType
       beam_dim: an optional mtf.Dimension (present in beam search)
-      mode: either a tf.estimator.ModeKeys or one of the follwing:
+      mode: either a tf.estimator.ModeKeys or one of the following:
         "first_part"
         "incremental"
       position: an optional Tensor - represents position in the sequence.
@@ -200,6 +198,8 @@ class Context(object):
       encoder_inputs: an optional int32 Tensor with the input token ids to the
         encoder half of the Bitransformer of which this Unitransformer is the
         decoder.
+      num_microbatches: integer - greater than one if the step has been
+        serialized into multiple microbatches to save memory.
     """
     self.model = model
     self.mesh = mesh
@@ -217,6 +217,8 @@ class Context(object):
     self.losses = losses
     self.initial_position = initial_position
     self.layer_outputs = layer_outputs
+    if self.layer_outputs is None:
+      self.layer_outputs = []
     self.encoder_output = encoder_output
     self.encoder_sequence_id = encoder_sequence_id
     self.constant_states = constant_states
@@ -230,6 +232,7 @@ class Context(object):
     self.read_priority = read_priority
     self.inputs = inputs
     self.encoder_inputs = encoder_inputs
+    self.num_microbatches = num_microbatches
 
   @property
   def train(self):
@@ -238,6 +241,12 @@ class Context(object):
   @property
   def activation_dtype(self):
     return self.variable_dtype.activation_dtype
+
+  @property
+  def encoder_length_dim(self):
+    ret, = [d for d in self.encoder_output.shape.dims
+            if d.name == "memory_length"]
+    return ret
 
   def get_states(self, n):
     """Get the next n recurrent states.
@@ -293,86 +302,151 @@ class Context(object):
       return mtf.cast(
           mtf.not_equal(self.sequence_id, 0), self.activation_dtype)
 
+  def get_position(self):
+    if self.position_is_default:
+      return mtf.range(self.mesh, self.length_dim, tf.int32)
+    else:
+      return self.position
+
 
 @gin.configurable
 class LayerStack(TransformerLayer):
   """A stack of layers with residual connections and layer norms."""
 
-  def __init__(self, layers, dropout_rate=0.0, norm_epsilon=1e-6):
+  def __init__(self,
+               layers,
+               sublayers_initial=None,
+               sublayers_per_layer=None,
+               sublayers_final=None,
+               dropout_rate=None,
+               norm_epsilon=None,
+               recompute_grads=False):
     """Create a LayerStack.
+
+    `layers` is a list of TransformerLayer objects representing the
+    building blocks of the transformer model, e.g.
+    transformer_layers.SelfAttention.
+
+    In addition, there are a bunch of other transformations which occur around
+    the layer body, and at the beginning and the end of the layer stack.  We
+    call these "sublayers".  They are configurable with the `sublayers_initial`,
+    `sublayers_per_layer`, and `sublayers_final` arguments, each of which takes
+    a list of sublayer functions.
+
+    Each of the sublayer functions has signature:
+      x, layer_stack, context -> y
+    where x is the input tensor and y is the output tensor.
+
+    The default sublayers specified in defaults.gin are:
+
+      transformer.LayerStack.sublayers_initial = [
+          @transformer.sublayer_dropout,
+      ]
+      transformer.LayerStack.sublayers_per_layer = [
+          @transformer.sublayer_rms_norm,
+          @transformer.sublayer_call_layer,
+          @transformer.sublayer_dropout,
+          @transformer.sublayer_residual,
+      ]
+      transformer.LayerStack.sublayers_final = [
+          @transformer.sublayer_rms_norm,
+          @transformer.sublayer_dropout,
+      ]
+
+    Refer to these as examples of how to write and call your own sublayer
+    functions.
+
+    `dropout_rate` and `norm_epsilon` should only be specified in a legacy mode,
+    for compatiblity with older checkpoints.
 
     Args:
       layers: a list of TransformerLayer
-      dropout_rate: a floating-point number
-      norm_epsilon: a floating-point number
+      sublayers_initial: an optional list of sublayer functions
+      sublayers_per_layer: an optional list of sublayer functions
+      sublayers_final: an optional list of sublayer functions
+      dropout_rate: DEPRECATED - a floating-point number
+      norm_epsilon: DEPRECATED - a floating-point number
+      recompute_grads: a boolean
     """
     self._layers = layers
-    self._dropout_rate = dropout_rate
-    self._norm_epsilon = norm_epsilon
+    self._recompute_grads = recompute_grads
+    self._sublayers_initial = sublayers_initial
+    self._sublayers_per_layer = sublayers_per_layer
+    self._sublayers_final = sublayers_final
+    if (dropout_rate is not None) != (norm_epsilon is not None):
+      raise ValueError(
+          "LayerStack.dropout_rate and LayerStack.norm_epsilon should either "
+          "be both not None (legacy mode) or both None (normal mode)")
+    if dropout_rate is not None:
+      self._legacy_init(dropout_rate, norm_epsilon)
+
+  def _legacy_init(self, dropout_rate, norm_epsilon):
+    """Legacy initialization for use with old checkpoints.
+
+    dropout_rate and norm_epsilon are specified in LayerStack.
+    Custom sublayers are not specified.
+
+    Args:
+      dropout_rate: a float
+      norm_epsilon: a float
+    """
+    self.dropout_rate = dropout_rate
+    self.norm_epsilon = norm_epsilon
+    if (self._sublayers_initial is not None or
+        self._sublayers_per_layer is not None or
+        self._sublayers_final is not None):
+      tf.logging.warning("legacy mode - ignoring custom sublayers")
+    self._sublayers_initial = [sublayer_legacy_dropout]
+    self._sublayers_per_layer = [sublayer_legacy_rms_norm,
+                                 sublayer_call_layer,
+                                 sublayer_legacy_dropout,
+                                 sublayer_residual]
+    self._sublayers_final = [sublayer_legacy_final_rms_norm,
+                             sublayer_legacy_dropout]
 
   def call(self, context, x):
     """Call the layer stack."""
-    if isinstance(context.sequence_id, mtf.Tensor):
-      # We use this mask to zero out the padding regions at each layer.
-      # This "fixes" a bug where extreme values leak from the padding into the
-      # non-padding regions.
-      # TODO(noam): undertand this better and make a more principled fix.
-      mask = mtf.cast(
-          mtf.not_equal(context.sequence_id, 0), context.activation_dtype)
-    else:
-      mask = None
-    x = self._dropout(context, x)
-    if context.layer_outputs is not None:
-      context.layer_outputs.append(x)
+    x = self._call_sublayers(self._sublayers_initial, x, context)
+    context.layer_outputs.append(x)
     for lnum, layer in enumerate(self._layers):
       with tf.variable_scope(layer.name or ""):
-        norm_x = self._layer_norm(context, (x * mask) if mask else x)
-        with tf.variable_scope(layer.__class__.__name__):
-          y = layer.call(context, norm_x)
-          if y.shape != x.shape:
-            raise ValueError("Layer %s returned misshaped output x=%s y=%s"
-                             % (layer.__class__.__name__, x, y))
-        x += self._dropout(context, y)
-      if context.layer_outputs is not None and lnum != len(self._layers) - 1:
+        if self._recompute_grads:
+          def fn(x, l=layer, c=context):
+            return self._layer_fn(x, l, c)
+          x = mtf.recompute_grad(fn, [x])
+        else:
+          x = self._layer_fn(x, layer, context)
+      if lnum != len(self._layers) - 1:
         context.layer_outputs.append(x)
       context.layer_index += 1
-    x = self._layer_norm(context, x, name="final_layer_norm")
-    x = self._dropout(context, x)
-    if mask:
-      x *= mask
-    if context.layer_outputs is not None:
-      context.layer_outputs.append(x)
+    x = self._call_sublayers(self._sublayers_final, x, context)
+    x = sublayer_mask_padding(x, self, context)
+    context.layer_outputs.append(x)
     return x
 
-  def _dropout(self, context, x):
-    if context.train and self._dropout_rate > 0:
-      return mtf.dropout(
-          x, rate=self._dropout_rate,
-          noise_shape=mtf.Shape(context.batch_dims + [context.model.model_dim]))
-    else:
-      return x
+  def _call_sublayers(self, sublayers, x, context):
+    for s in sublayers:
+      x = s(x, self, context)
+    return x
 
-  def _layer_norm(self, context, x, name=None):
-    """Layer normalization.
+  def _layer_fn(self, x, layer, context):
+    """Call the layer and its associated sublayers.
 
     Args:
-      context: a Context
       x: a Tensor
-      name: an optional string
+      layer: a Layer
+      context: a Context
     Returns:
       a Tensor
     """
-    with tf.variable_scope(name, default_name="layer_norm"):
-      scale_shape = [context.model.model_dim]
-      if context.model.ensemble_dim:
-        scale_shape = [context.model.ensemble_dim] + scale_shape
-      scale = mtf.get_variable(
-          context.mesh, "scale", mtf.Shape(scale_shape),
-          initializer=tf.ones_initializer(),
-          dtype=context.variable_dtype)
-      variance = mtf.reduce_mean(
-          mtf.square(x), reduced_dim=context.model.model_dim)
-    return x * mtf.rsqrt(variance + self._norm_epsilon) * scale
+    context.current_layer = layer
+    context.current_layer_input = x
+    y = self._call_sublayers(self._sublayers_per_layer, x, context)
+    if y.shape != x.shape:
+      raise ValueError(
+          "Layer %s returned misshaped output x=%s y=%s"
+          % (layer.__class__.__name__, x, y))
+    return y
 
   @property
   def num_layers(self):
@@ -381,6 +455,177 @@ class LayerStack(TransformerLayer):
   @property
   def layers(self):
     return self._layers
+
+
+@gin.configurable
+def sublayer_call_layer(x, layer_stack, context):
+  x = sublayer_mask_padding(x, layer_stack, context)
+  layer = context.current_layer
+  with tf.variable_scope(layer.__class__.__name__):
+    return layer.call(context, x)
+
+
+@gin.configurable
+def sublayer_mask_padding(x, layer_stack, context):
+  """Zero out padding regions.
+
+  This "fixes" a bug where extreme values leak from the padding into the
+  non-padding regions.
+  TODO(noam): undertand this better and make a more principled fix.
+
+  Args:
+    x: a Tensor
+    layer_stack: ignored
+    context: a Tensor
+  Returns:
+    a Tensor
+  """
+  del layer_stack
+  if isinstance(context.sequence_id, mtf.Tensor):
+    return x * mtf.cast(
+        mtf.not_equal(context.sequence_id, 0), context.activation_dtype)
+  else:
+    return x
+
+
+@gin.configurable
+def sublayer_rms_norm(x, layer_stack, context, epsilon=1e-6, name="rms_norm"):
+  """RMS normalization.
+
+  Args:
+    x: an input mtf.Tensor
+    layer_stack: a LayerStack
+    context: a Context
+    epsilon: a float
+    name: a string
+  Returns:
+    a mtf.Tensor
+  """
+  del layer_stack
+  model_dim = context.model.model_dim
+  with tf.variable_scope(name):
+    scale = mtf.get_variable(
+        context.mesh,
+        "scale",
+        mtf.Shape(context.model.ensemble_dims + [model_dim]),
+        initializer=tf.ones_initializer(),
+        dtype=context.variable_dtype)
+    variance = mtf.reduce_mean(mtf.square(x), reduced_dim=model_dim)
+  return x * mtf.rsqrt(variance + epsilon) * scale
+
+
+@gin.configurable
+def sublayer_legacy_rms_norm(x, layer_stack, context):
+  """Deprecated - keep for checkpoint/operative_config.gin compatibility."""
+  return sublayer_rms_norm(x, layer_stack, context, name="layer_norm")
+
+
+@gin.configurable
+def sublayer_legacy_final_rms_norm(x, layer_stack, context):
+  """Deprecated - keep for checkpoint/operative_config.gin compatibility."""
+  return sublayer_rms_norm(x, layer_stack, context, name="final_layer_norm")
+
+
+@gin.configurable
+def sublayer_rms_norm_subsampled(x, layer_stack, context, percentage=100.,
+                                 epsilon=1e-6):
+  """RMS normalization."""
+  del layer_stack
+  model_dim = context.model.model_dim
+  with tf.variable_scope("layer_norm_subsampled"):
+    scale = mtf.get_variable(
+        context.mesh,
+        "scale",
+        mtf.Shape(context.model.ensemble_dims + [model_dim]),
+        initializer=tf.ones_initializer(),
+        dtype=context.variable_dtype)
+    var_dim = mtf.Dimension(
+        model_dim.name,
+        int(math.ceil(model_dim.size * percentage/100)))
+    var_activations = mtf.slice(x, 0, var_dim.size, var_dim.name)
+    variance = mtf.reduce_mean(
+        mtf.square(var_activations), reduced_dim=var_dim)
+  return x * mtf.rsqrt(variance + epsilon) * scale
+
+
+@gin.configurable
+def sublayer_residual(x, layer_stack, context):
+  del layer_stack
+  return x + context.current_layer_input
+
+
+@gin.configurable
+def sublayer_dropout(x, layer_stack, context, dropout_rate=0.0):
+  del layer_stack
+  if context.train and dropout_rate > 0:
+    return mtf.dropout(
+        x, rate=dropout_rate,
+        noise_shape=mtf.Shape(context.batch_dims + [context.model.model_dim]))
+  else:
+    return x
+
+
+@gin.configurable
+def sublayer_legacy_dropout(x, layer_stack, context):
+  return sublayer_dropout(x, layer_stack, context,
+                          dropout_rate=layer_stack.dropout_rate)
+
+
+@gin.configurable
+def sublayer_rezero(x, layer_stack, context, initial_value=0.0):
+  """Multiply by zero-initialized scalar (residual not included)."""
+  del layer_stack
+  rezero_weight = mtf.get_variable(
+      x.mesh, "rezero_weight", shape=context.model.ensemble_dims,
+      dtype=context.variable_dtype,
+      initializer=tf.constant_initializer(initial_value))
+  return x * rezero_weight
+
+
+
+
+@gin.configurable
+class ReversibleLayerStack(LayerStack):
+  """A version of LayerStack that uses a revnet.
+
+  This should be very memory-efficient if LayerStack.recompute_grads
+  is set to True.
+
+  Also, sublayers_per_layer should be overridden in gin, so as to remove the
+  residual.
+
+  "Reformer" https://arxiv.org/abs/2001.04451 uses something like this.
+  """
+
+  def call(self, context, x):
+    """Call the layer stack."""
+    x = self._call_sublayers(self._sublayers_initial, x, context)
+    context.layer_outputs.append(x)
+    x1, x1_backwards, x2, x2_backwards = x, None, x, None
+    for lnum, layer in enumerate(self._layers):
+      with tf.variable_scope(layer.name or ""):
+        def fn(x, l=layer, c=context):
+          return self._layer_fn(x, l, c)
+        x1, x1_backwards, x2, x2_backwards = (
+            mtf.layers.reversible_half_residual_and_swap(
+                x1, x1_backwards, x2, x2_backwards, fn,
+                recompute_grads=self._recompute_grads))
+      if lnum != len(self._layers) - 1:
+        context.layer_outputs.append(x)
+      context.layer_index += 1
+    x = x1 + x2
+    x = self._call_sublayers(self._sublayers_final, x, context)
+    context.layer_outputs.append(x)
+    return x
+
+
+@gin.configurable
+def sublayer_true_layer_norm(x, layer_stack, context, epsilon=1e-6):
+  """True (aka normal) Normalization."""
+  del layer_stack
+  model_dim = context.model.model_dim
+  with tf.variable_scope("true_layer_norm"):
+    return mtf.layers.layer_norm(x, model_dim, epsilon)
 
 
 @gin.configurable
@@ -408,6 +653,7 @@ class Unitransformer(object):
                ensemble=None,
                loss_fn=None,
                positional_embedding=True,
+               sinusoid_positional_embedding=False,
                input_full_attention=False,
                loss_on_targets_only=False,
                loss_denominator=None,
@@ -433,6 +679,9 @@ class Unitransformer(object):
       ensemble: an optional integer (for creating an ensemble of models)
       loss_fn: an optional function to override self._compute_loss
       positional_embedding: a boolean
+      sinusoid_positional_embedding: a boolean, whether to use the sinusoid
+        positional embedding from the "Attention Is All You Need" paper. If
+        True, this will override the positional_embedding setting.
       input_full_attention: a boolean
         This is an option for seq-to-seq as a language model.  Each example
         consists of [<inputs>, EOS=1, <targets>, EOS=1].  In the self-attention
@@ -456,8 +705,10 @@ class Unitransformer(object):
     """
     self.layer_stack = layer_stack
     self.model_dim = mtf.Dimension("d_model", d_model)
+    self.input_vocab_size_unpadded = input_vocab_size
     self.input_vocab_dim = mtf.Dimension(
         "vocab", _round_up_to_multiple(input_vocab_size, vocab_divisor))
+    self.output_vocab_size_unpadded = output_vocab_size
     if output_vocab_size:
       self.output_vocab_dim = mtf.Dimension(
           "vocab", _round_up_to_multiple(output_vocab_size, vocab_divisor))
@@ -466,6 +717,8 @@ class Unitransformer(object):
       if autoregressive:
         raise ValueError("autoregressive Transformer needs output vocabulary")
     self.autoregressive = autoregressive
+    if sinusoid_positional_embedding:
+      positional_embedding = True
     if positional_embedding:
       self.max_length_dim = mtf.Dimension("max_length", max_length)
     else:
@@ -479,10 +732,9 @@ class Unitransformer(object):
     self.mesh_shape = mesh_shape
     self.ensemble_dim = (
         mtf.Dimension("ensemble", ensemble) if ensemble else None)
-    self.ensemble_dims = [self.ensemble_dim] if ensemble else []
-    if loss_fn:
-      self._compute_loss = loss_fn
+    self._loss_fn = loss_fn
     self.positional_embedding = positional_embedding
+    self.sinusoid_positional_embedding = sinusoid_positional_embedding
     self.input_full_attention = input_full_attention
     self.loss_on_targets_only = loss_on_targets_only
     self._loss_denominator = loss_denominator
@@ -494,6 +746,10 @@ class Unitransformer(object):
   @property
   def fully_autoregressive(self):
     return self.autoregressive and not self.input_full_attention
+
+  @property
+  def ensemble_dims(self):
+    return [self.ensemble_dim] if self.ensemble_dim else []
 
   def _compute_loss(self, context, logits, targets, output_vocab_dim):
     """Regular cross entropy loss.
@@ -507,6 +763,9 @@ class Unitransformer(object):
     Returns:
       A 0-dimensional tensor of the loss.
     """
+    # Use a custom loss function if one is injected.
+    if self._loss_fn:
+      return self._loss_fn(self, context, logits, targets, output_vocab_dim)
     off_value = self.label_smoothing / output_vocab_dim.size
     on_value = 1.0 - self.label_smoothing + off_value
     soft_targets = mtf.one_hot(
@@ -523,9 +782,10 @@ class Unitransformer(object):
     weights = mtf.layers.weights_nonzero(
         targets, dtype=context.activation_dtype)
     if self.loss_on_targets_only:
-      weights *= mtf.cast(mtf.logical_not(text2self_inputs_mask(targets)),
+      weights *= mtf.cast(mtf.logical_not(delimited_lm_inputs_mask(targets)),
                           dtype=context.activation_dtype)
-    return mtf.reduce_sum(loss * weights) / self.loss_denominator(targets)
+    return (mtf.reduce_sum(loss * weights) /
+            self.loss_denominator(targets, context.num_microbatches))
 
   def _call_internal(self, context, inputs, targets=None):
     """Compute logits based on inputs (all positions in parallel).
@@ -560,8 +820,12 @@ class Unitransformer(object):
     if context.train:
       inputs = mtf.dropout(inputs, rate=self.token_dropout_rate)
     x = vocab_embedding.ids_to_embedding(inputs)
-    if self.positional_embedding:
-      if "positional_embedding" in context.shared_params:
+    if self.positional_embedding or self.sinusoid_positional_embedding:
+      if self.sinusoid_positional_embedding:
+        pos_emb_var = sinusoid_positional_embedding_weights(
+            mesh, self.max_length_dim, self.model_dim,
+            context.variable_dtype.activation_dtype)
+      elif "positional_embedding" in context.shared_params:
         pos_emb_var = context.shared_params["positional_embedding"]
       else:
         pos_emb_var = mtf.layers.embedding_weights(
@@ -595,7 +859,7 @@ class Unitransformer(object):
     if self.output_vocab_dim is None:
       return x
     if self.shared_embedding_and_softmax_weights:
-      logits = vocab_embedding.hidden_to_logits(x)
+      logits = vocab_embedding.hidden_to_logits(x, context)
     else:
       logits = mtf.layers.dense(
           x, self.output_vocab_dim, use_bias=False,
@@ -610,7 +874,7 @@ class Unitransformer(object):
           logits, self.ensemble_dim, self.output_vocab_dim)
     return logits
 
-  def loss_denominator(self, targets):
+  def loss_denominator(self, targets, num_microbatches):
     """Denominator applied to losses.
 
     This is usually the size of the targets tensor (omitting ensemble
@@ -619,13 +883,15 @@ class Unitransformer(object):
 
     Args:
       targets: a mtf.Tensor
+      num_microbatches: an integer - greater than one if the step has been
+        serialized into multiple microbatches to save memory.
     Returns:
       a float
     """
     if self._loss_denominator is not None:
       return float(self._loss_denominator)
     else:
-      ret = float(targets.shape.size)
+      ret = float(targets.shape.size) * num_microbatches
       if self.ensemble_dim:
         # The ensembling should not decrease the gradient to each model
         ret /= self.ensemble_dim.size
@@ -645,7 +911,8 @@ class Unitransformer(object):
                   encoder_inputs=None,
                   shared_params=None,
                   layer_outputs=None,
-                  encoder_layer_outputs=None):
+                  encoder_layer_outputs=None,
+                  num_microbatches=1):
     """Compute logits based on inputs (all positions in parallel).
 
     This is called during training and evaluation.
@@ -668,6 +935,8 @@ class Unitransformer(object):
       layer_outputs: an optional list to append Tensor layer activations to
       encoder_layer_outputs: optional - readonly list of tensor activations when
         decoding, one per each input layer + the embedding layer
+      num_microbatches: integer - greater than one if the step has been
+        serialized into multiple microbatches to save memory.
 
     Returns:
       logits: a Tensor with shape [<batch_dims>, output_vocab_dim]
@@ -689,7 +958,7 @@ class Unitransformer(object):
       position_is_default = False
     if self.input_full_attention:
       # The inputs part of each sequence can fully attend within itself.
-      full_attention_region = text2self_inputs_mask(targets)
+      full_attention_region = delimited_lm_inputs_mask(targets)
       # We can include one additional position to the right - the position
       #   where the final EOS of the inputs is read and the first target token
       #   is predicted.
@@ -726,7 +995,8 @@ class Unitransformer(object):
         write_priority=write_priority,
         read_priority=read_priority,
         inputs=inputs,
-        encoder_inputs=encoder_inputs)
+        encoder_inputs=encoder_inputs,
+        num_microbatches=num_microbatches)
     with tf.variable_scope(self.name):
       logits = self._call_internal(context, inputs, targets)
     if compute_loss:
@@ -1102,8 +1372,8 @@ class Bitransformer(object):
   def output_vocab_dim(self):
     return self.decoder.output_vocab_dim
 
-  def loss_denominator(self, targets):
-    return self.decoder.loss_denominator(targets)
+  def loss_denominator(self, targets, num_microbatches):
+    return self.decoder.loss_denominator(targets, num_microbatches)
 
   @property
   def z_loss(self):
@@ -1136,10 +1406,20 @@ class Bitransformer(object):
         if (self.encoder.positional_embedding
             and self.decoder.positional_embedding
             and self.encoder.max_length_dim == self.decoder.max_length_dim):
-          shared_params["positional_embedding"] = mtf.layers.embedding_weights(
-              mesh, self.encoder.max_length_dim, self.encoder.model_dim,
-              variable_dtype, "positional_embedding",
-              ensemble_dim=self.encoder.ensemble_dim)
+          if (self.encoder.sinusoid_positional_embedding and
+              self.decoder.sinusoid_positional_embedding):
+            pos_emb_var = sinusoid_positional_embedding_weights(
+                mesh, self.encoder.max_length_dim, self.encoder.model_dim,
+                variable_dtype.activation_dtype)
+          else:
+            pos_emb_var = mtf.layers.embedding_weights(
+                mesh,
+                self.encoder.max_length_dim,
+                self.encoder.model_dim,
+                variable_dtype,
+                "positional_embedding",
+                ensemble_dim=self.encoder.ensemble_dim)
+          shared_params["positional_embedding"] = pos_emb_var
     return shared_params
 
   def call_simple(self,
@@ -1152,7 +1432,8 @@ class Bitransformer(object):
                   decoder_sequence_id=None,
                   decoder_subsequence_id=None,
                   encoder_position=None,
-                  decoder_position=None):
+                  decoder_position=None,
+                  num_microbatches=1):
     """Compute logits based on inputs (all positions in parallel).
 
     This is called during training and evaluation.
@@ -1168,11 +1449,21 @@ class Bitransformer(object):
       decoder_subsequence_id: an optional Tensor
       encoder_position: an optional Tensor
       decoder_position: an optional Tensor
+      num_microbatches: integer - greater than one if the step has been
+        serialized into multiple microbatches to save memory.
 
     Returns:
       logits: a Tensor with shape [<batch_dims>, output_vocab_dim]
       loss: an optional Scalar (if compute_loss=True)
     """
+    # encoder_sequene_id and decoder_sequence_id are used to delineate packed
+    # examples but are also necessary to indicate padding where sequence_id==0.
+    # If they are absent, then we assume that padding is indicated by zeros in
+    # the inputs/targets, and we make up sequence_id tensors to indicate this.
+    if encoder_sequence_id is None:
+      encoder_sequence_id = mtf.minimum(inputs, 1)
+    if decoder_sequence_id is None:
+      decoder_sequence_id = mtf.minimum(targets, 1)
     encoder_layer_outputs = []
     shared_params = self._shared_params(inputs.mesh, variable_dtype)
     encoder_output, encoder_loss = self.encoder.call_simple(
@@ -1184,7 +1475,8 @@ class Bitransformer(object):
         sequence_id=encoder_sequence_id,
         position=encoder_position,
         shared_params=shared_params,
-        layer_outputs=encoder_layer_outputs)
+        layer_outputs=encoder_layer_outputs,
+        num_microbatches=num_microbatches)
     encoder_output = mtf.layers.rename_length_to_memory_length(encoder_output)
     if encoder_sequence_id is not None:
       encoder_sequence_id = mtf.layers.rename_length_to_memory_length(
@@ -1203,7 +1495,8 @@ class Bitransformer(object):
         encoder_inputs=mtf.layers.rename_length_to_memory_length(inputs),
         position=decoder_position,
         shared_params=shared_params,
-        encoder_layer_outputs=encoder_layer_outputs)
+        encoder_layer_outputs=encoder_layer_outputs,
+        num_microbatches=num_microbatches)
     if loss is not None and encoder_loss is not None:
       loss += encoder_loss
     return logits, loss
@@ -1215,6 +1508,7 @@ class Bitransformer(object):
              beam_size=1,
              alpha=0.6,
              temperature=0.0,
+             sampling_keep_top_k=-1,
              decode_length_multiplier=1.5,
              decode_length_constant=10,
              max_decode_length=None):
@@ -1230,6 +1524,8 @@ class Bitransformer(object):
       alpha: a floating point value (length bonus for beam search)
       temperature: a value between 0 and 1 (must be 0 if beam_size > 1)
         0.0 means argmax, 1.0 means sample according to predicted distribution.
+      sampling_keep_top_k: a value between 1 and vocab_size used to sample from
+        only the k most likely logits. Set to -1 to sample from all logits.
       decode_length_multiplier: a float
       decode_length_constant: a float
       max_decode_length: an optional integer
@@ -1265,6 +1561,7 @@ class Bitransformer(object):
       return self.decoder.sample_autoregressive(
           partial_sequences,
           temperature=temperature,
+          sampling_keep_top_k=sampling_keep_top_k,
           variable_dtype=variable_dtype,
           encoder_output=encoder_output,
           encoder_sequence_id=encoder_sequence_id,
@@ -1276,6 +1573,9 @@ class Bitransformer(object):
       if temperature != 0:
         raise ValueError(
             "don't know how to beam search with nonzero temperature")
+      if sampling_keep_top_k != -1:
+        raise ValueError(
+            "don't know how to beam search with top-k value other than -1.")
       # beam search
       beam_dim = mtf.Dimension("beam", beam_size)
       ids_shape = mtf.Shape(batch_dims + [beam_dim, decode_length_dim])
@@ -1334,6 +1634,7 @@ class StudentTeacher(object):
                   targets,
                   compute_loss,
                   variable_dtype=mtf.VariableDType(tf.float32),
+                  num_microbatches=1,
                   **kargs):
     """Compute logits based on inputs (all positions in parallel).
 
@@ -1346,6 +1647,8 @@ class StudentTeacher(object):
       targets: an optional int32 Tensor with shape [<batch_dims>, length_dim]
       compute_loss: a boolean
       variable_dtype: a mtf.VariableDType
+      num_microbatches: integer - greater than one if the step has been
+        serialized into multiple microbatches to save memory.
       **kargs: additional arguments to pass to the student.call_simple and
         teacher.call_simple
 
@@ -1359,6 +1662,7 @@ class StudentTeacher(object):
           targets,
           compute_loss=True,
           variable_dtype=variable_dtype,
+          num_microbatches=num_microbatches,
           **kargs)
       if not compute_loss:
         return student_logits
@@ -1378,6 +1682,7 @@ class StudentTeacher(object):
           targets,
           compute_loss=True,
           variable_dtype=variable_dtype,
+          num_microbatches=num_microbatches,
           **kargs)
     graph.make_variables_untrainable(
         [v for v in graph.trainable_variables if v.name.startswith("teacher/")])
@@ -1395,7 +1700,7 @@ class StudentTeacher(object):
     weights = mtf.layers.weights_nonzero(
         targets, dtype=variable_dtype.activation_dtype)
     soft_loss = (mtf.reduce_sum(soft_loss * weights) /
-                 self.student.loss_denominator(targets))
+                 self.student.loss_denominator(targets, num_microbatches))
 
     loss = (1.0 - self.fraction_soft) * hard_loss \
            + self.temperature**2 * self.fraction_soft * soft_loss
@@ -1440,7 +1745,10 @@ class StudentTeacher(object):
 
 # gin-configurable constructors
 @gin.configurable
-def make_layer_stack(layers=gin.REQUIRED, num_layers=6, block_scope=True):
+def make_layer_stack(layers=gin.REQUIRED,
+                     layer_stack_cls=LayerStack,
+                     num_layers=6,
+                     block_scope=True):
   """Configurable layer stack.
 
   The "layers" argument specifies the layers in each block.  It is a list
@@ -1459,6 +1767,7 @@ def make_layer_stack(layers=gin.REQUIRED, num_layers=6, block_scope=True):
 
   Args:
     layers: a list (see above)
+    layer_stack_cls: a class, e.g. LayerStack or ReversibleLayerStack
     num_layers: an integer
     block_scope: a bool, if True then use scopes of the format
       ```
@@ -1499,7 +1808,7 @@ def make_layer_stack(layers=gin.REQUIRED, num_layers=6, block_scope=True):
       layer = cls(**kwargs)
       layer.set_name(name)
       layer_stack.append(layer)
-  return LayerStack(layer_stack)
+  return layer_stack_cls(layer_stack)
 
 
 @gin.configurable
@@ -1608,7 +1917,7 @@ def _round_up_to_multiple(n, divisor):
   return n + -n % divisor
 
 
-def text2self_inputs_mask(ids, eos_id=1):
+def delimited_lm_inputs_mask(ids, eos_id=1):
   """Binary mask indicating which parts of the ids represent the inputs.
 
   Assumes that the ids consist of packed sequences where each example is
@@ -1678,7 +1987,7 @@ class VocabEmbedding(object):
   """A class to go from vocab ids to model states and model states to logits."""
 
   def __init__(self, mesh, vocab_dim, output_dim, variable_dtype, name,
-               ensemble_dim):
+               ensemble_dim, scale_variable_like_classifier_weights=False):
     """Embedding for the vocabulary.
 
     Most of the arguments get passed to `mtf.layers.embedding_weights`.
@@ -1690,22 +1999,36 @@ class VocabEmbedding(object):
       variable_dtype: a mtf.VariableDType
       name: a string
       ensemble_dim: a mtf.Dimension
+      scale_variable_like_classifier_weights: a boolean
     """
     self._vocab_dim = vocab_dim
     self._output_dim = output_dim
+    self._scale_variable_like_classifier_weights = (
+        scale_variable_like_classifier_weights)
+    if self._scale_variable_like_classifier_weights:
+      initializer = tf.random_normal_initializer(
+          stddev=self._output_dim.size ** -0.5)
+    else:
+      initializer = None
     self._embedding_weights = mtf.layers.embedding_weights(
         mesh=mesh,
         vocab_dim=vocab_dim,
         output_dim=output_dim,
         variable_dtype=variable_dtype,
         name=name,
-        ensemble_dim=ensemble_dim)
+        ensemble_dim=ensemble_dim,
+        initializer=initializer)
 
   def ids_to_embedding(self, ids):
-    return mtf.gather(self._embedding_weights, ids, self._vocab_dim)
+    ret = mtf.gather(self._embedding_weights, ids, self._vocab_dim)
+    if self._scale_variable_like_classifier_weights:
+      ret *= self._output_dim.size ** 0.5
+    return ret
 
-  def hidden_to_logits(self, hidden):
-    hidden *= self._output_dim.size**-0.5
+  def hidden_to_logits(self, hidden, context):
+    del context
+    if not self._scale_variable_like_classifier_weights:
+      hidden *= self._output_dim.size**-0.5
     return mtf.einsum([hidden, self._embedding_weights],
                       reduced_dims=[self._output_dim])
 
@@ -1721,4 +2044,47 @@ def get_vocab_embedding_cls(cls=VocabEmbedding):
     the class
   """
   return cls
+
+
+def sinusoid_positional_embedding_weights(mesh,
+                                          max_length_dim,
+                                          model_dim,
+                                          dtype,
+                                          min_timescale=1.0,
+                                          max_timescale=1.0e4):
+  """Gets a bunch of sinusoids of different frequencies.
+
+  Mostly copied from tensor2tensor's get_timing_signal_1d.
+
+  Args:
+    mesh: a mtf.Mesh
+    max_length_dim: a mtf.Dimension
+    model_dim: a mtf.Dimension
+    dtype: a tf.DType
+    min_timescale: a float
+    max_timescale: a float
+
+  Returns:
+    an mtf.Tensor of timing signals with shape [max_length_dim, model_dim]
+  Raises:
+    ValueError: If the model_dim is not divisible by 2.
+  """
+  if model_dim.size % 2:
+    raise ValueError("model_dim must be divisible by 2")
+  num_timescales = model_dim.size // 2
+  timescale_dim = mtf.Dimension(model_dim.name, num_timescales)
+  log_timescale_increment = (
+      math.log(float(max_timescale) / float(min_timescale)) /
+      max(float(num_timescales) - 1, 1))
+  inv_timescales = min_timescale * mtf.exp(
+      mtf.mtf_range(mesh, timescale_dim, dtype=tf.float32) *
+      -log_timescale_increment)
+  position = mtf.mtf_range(mesh, max_length_dim, dtype=tf.float32)
+  scaled_time = mtf.einsum([position, inv_timescales])
+  # Please note that this slightly differs from the published paper.
+  # See a discussion here: https://github.com/tensorflow/tensor2tensor/pull/177
+  embeddings = mtf.concat(
+      [mtf.sin(scaled_time), mtf.cos(scaled_time)], model_dim.name)
+  return mtf.cast(embeddings, dtype)
+
 

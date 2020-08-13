@@ -25,6 +25,8 @@ from mesh_tensorflow.transformer import utils
 
 import tensorflow.compat.v1 as tf
 
+tf.disable_v2_behavior()
+
 
 class UtilsTest(parameterized.TestCase, tf.test.TestCase):
 
@@ -79,7 +81,22 @@ class UtilsTest(parameterized.TestCase, tf.test.TestCase):
       actual = self.evaluate(out)
       self.assertAllEqual(actual, v)
 
+  def testCleanDecodes(self):
+    cleaned_decodes = utils.clean_decodes([
+        [2, 0, 2, 1, 3, 2, 0],
+        [1, 2, 2, 2, 2, 2, 2],
+        [2, 2, 1, 1, 1, 1, 1],
+        [2, 2, 2, 2, 2, 2, 2]
+    ])
+    with self.test_session() as sess:
+      self.assertAllEqual(
+          sess.run(cleaned_decodes),
+          [
+              [2, 0, 2, 1, 0, 0, 0],
+              [1, 0, 0, 0, 0, 0, 0],
+              [2, 2, 1, 0, 0, 0, 0],
+              [2, 2, 2, 2, 2, 2, 2]
+          ])
 
 if __name__ == "__main__":
-  tf.disable_v2_behavior()
   tf.test.main()

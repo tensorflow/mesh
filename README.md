@@ -7,7 +7,7 @@ Issues](https://img.shields.io/github/issues/tensorflow/mesh.svg)](https://githu
 [![Contributions
 welcome](https://img.shields.io/badge/contributions-welcome-brightgreen.svg)](CONTRIBUTING.md)
 [![License](https://img.shields.io/badge/License-Apache%202.0-brightgreen.svg)](https://opensource.org/licenses/Apache-2.0)
-[![Travis](https://img.shields.io/travis/tensorflow/mesh.svg)](https://travis-ci.org/tensorflow/mesh)
+[![Build Status](https://github.com/tensorflow/mesh/workflows/build/badge.svg)](https://github.com/tensorflow/mesh/actions?query=workflow%3Abuild)
 
 
 # Introduction

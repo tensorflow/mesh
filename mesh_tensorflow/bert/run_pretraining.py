@@ -21,10 +21,12 @@ from __future__ import division
 from __future__ import print_function
 
 import os
+import time
 
 import mesh_tensorflow as mtf
 import mesh_tensorflow.bert.bert as bert_lib
 import mesh_tensorflow.bert.optimization as optimization_lib
+from six.moves import range
 import tensorflow.compat.v1 as tf
 
 flags = tf.flags
@@ -38,8 +40,12 @@ flags.DEFINE_string(
     "This specifies the model architecture.")
 
 flags.DEFINE_string(
-    "input_file", None,
-    "Input TF example files (can be a glob or comma separated).")
+    "input_train_files", None,
+    "Input TF example files for training (can be a glob or comma separated).")
+
+flags.DEFINE_string(
+    "input_eval_files", None,
+    "Input TF example files for evaluation (can be a glob or comma separated).")
 
 flags.DEFINE_string(
     "output_dir", None,
@@ -61,9 +67,9 @@ flags.DEFINE_integer(
     "Maximum number of masked LM predictions per sequence. "
     "Must match data generation.")
 
-flags.DEFINE_bool("do_train", False, "Whether to run training.")
-
-flags.DEFINE_bool("do_eval", False, "Whether to run eval on the dev set.")
+flags.DEFINE_string(
+    "mode", "train_and_eval",
+    "One of {\"train_and_eval\", \"train\", \"eval\"}.")
 
 flags.DEFINE_integer("train_batch_size", 32, "Total batch size for training.")
 
@@ -78,6 +84,9 @@ flags.DEFINE_string("optimizer", "adam", "adam/adafactor")
 flags.DEFINE_integer("num_train_steps", 100000, "Number of training steps.")
 
 flags.DEFINE_integer("num_warmup_steps", 10000, "Number of warmup steps.")
+
+flags.DEFINE_integer("steps_per_eval", 5000,
+                     "How often to evaluate the checkpoint.")
 
 flags.DEFINE_integer("save_checkpoints_steps", 1000,
                      "How often to save the model checkpoint.")
@@ -133,29 +142,34 @@ def model_fn_builder(bert_config, init_checkpoint, learning_rate,
     mesh_shape = mtf.convert_to_shape(FLAGS.mesh_shape)
     layout_rules = mtf.convert_to_layout_rules(FLAGS.layout)
 
-    ctx = params["context"]
-    num_hosts = ctx.num_hosts
-    host_placement_fn = ctx.tpu_host_placement_function
-    device_list = [host_placement_fn(host_id=t) for t in range(num_hosts)]
-    tf.logging.info("device_list = %s" % device_list,)
-    replica_cache_size = 300 * 1000000  # 300M per replica
-    # Worker 0 caches all the TPU binaries.
-    worker0_mem = replica_cache_size * ctx.num_replicas
-    devices_memeory_usage = [worker0_mem] + [0] * (num_hosts - 1)
-    var_placer = mtf.utils.BalancedVariablePlacer(device_list,
-                                                  devices_memeory_usage)
-    mesh_devices = [""] * mesh_shape.size
-    physical_shape = list(ctx.device_assignment.topology.mesh_shape)
-    logical_to_physical = mtf.simd_mesh_impl.auto_logical_to_physical_tpu(
-        mesh_shape.to_integer_list, physical_shape)
-    mesh_impl = mtf.simd_mesh_impl.SimdMeshImpl(
-        mesh_shape,
-        layout_rules,
-        mesh_devices,
-        ctx.device_assignment,
-        logical_to_physical=logical_to_physical)
-    mesh = mtf.Mesh(graph, "bert_mesh", var_placer)
+    if FLAGS.use_tpu:
+      ctx = params["context"]
+      num_hosts = ctx.num_hosts
+      host_placement_fn = ctx.tpu_host_placement_function
+      device_list = [host_placement_fn(host_id=t) for t in range(num_hosts)]
+      tf.logging.info("device_list = %s" % device_list,)
+      replica_cache_size = 300 * 1000000  # 300M per replica
+      # Worker 0 caches all the TPU binaries.
+      worker0_mem = replica_cache_size * ctx.num_replicas
+      devices_memeory_usage = [worker0_mem] + [0] * (num_hosts - 1)
+      var_placer = mtf.utils.BalancedVariablePlacer(device_list,
+                                                    devices_memeory_usage)
+      mesh_devices = [""] * mesh_shape.size
+      physical_shape = list(ctx.device_assignment.topology.mesh_shape)
+      logical_to_physical = mtf.simd_mesh_impl.auto_logical_to_physical_tpu(
+          mesh_shape.to_integer_list, physical_shape)
+      mesh_impl = mtf.simd_mesh_impl.SimdMeshImpl(
+          mesh_shape,
+          layout_rules,
+          mesh_devices,
+          ctx.device_assignment,
+          logical_to_physical=logical_to_physical)
+    else:
+      mesh_impl = mtf.placement_mesh_impl.PlacementMeshImpl(
+          mesh_shape, layout_rules, [""] * mesh_shape.size)
+      var_placer = None
 
+    mesh = mtf.Mesh(graph, "bert_mesh", var_placer)
     input_ids = features["input_ids"]
     input_mask = features["input_mask"]
     segment_ids = features["segment_ids"]
@@ -401,20 +415,25 @@ def _decode_record(record, name_to_features):
 def main(_):
   tf.logging.set_verbosity(tf.logging.INFO)
 
-  if not FLAGS.do_train and not FLAGS.do_eval:
-    raise ValueError("At least one of `do_train` or `do_eval` must be True.")
-
   bert_config = bert_lib.BertConfig.from_json_file(FLAGS.bert_config_file)
 
   tf.gfile.MakeDirs(FLAGS.output_dir)
 
-  input_files = []
-  for input_pattern in FLAGS.input_file.split(","):
-    input_files.extend(tf.gfile.Glob(input_pattern))
+  input_train_files = []
+  for input_pattern in FLAGS.input_train_files.split(","):
+    input_train_files.extend(tf.gfile.Glob(input_pattern))
 
-  tf.logging.info("*** Input Files ***")
-  for input_file in input_files:
-    tf.logging.info("  %s" % input_file)
+  tf.logging.info("*** Input Training Files ***")
+  for input_train_file in input_train_files:
+    tf.logging.info("  %s" % input_train_file)
+
+  input_eval_files = []
+  for input_pattern in FLAGS.input_eval_files.split(","):
+    input_eval_files.extend(tf.gfile.Glob(input_pattern))
+
+  tf.logging.info("*** Input Evaluation Files ***")
+  for input_eval_file in input_eval_files:
+    tf.logging.info("  %s" % input_eval_file)
 
   tpu_cluster_resolver = None
   if FLAGS.use_tpu and FLAGS.tpu_name:
@@ -448,39 +467,65 @@ def main(_):
       train_batch_size=FLAGS.train_batch_size,
       eval_batch_size=FLAGS.eval_batch_size)
 
-  if FLAGS.do_train:
-    tf.logging.info("***** Running training *****")
-    tf.logging.info("  Batch size = %d", FLAGS.train_batch_size)
+  if FLAGS.mode in ("train_and_eval", "train"):
+    tf.logging.info("Set train batch size = %d", FLAGS.train_batch_size)
     train_input_fn = input_fn_builder(
-        input_files=input_files,
+        input_files=input_train_files,
         max_seq_length=FLAGS.max_seq_length,
         max_predictions_per_seq=FLAGS.max_predictions_per_seq,
         is_training=True)
-    estimator.train(input_fn=train_input_fn, max_steps=FLAGS.num_train_steps)
 
-  if FLAGS.do_eval:
-    tf.logging.info("***** Running evaluation *****")
-    tf.logging.info("  Batch size = %d", FLAGS.eval_batch_size)
-
+  if FLAGS.mode in ("train_and_eval", "eval"):
+    tf.logging.info("Set eval batch size = %d", FLAGS.eval_batch_size)
     eval_input_fn = input_fn_builder(
-        input_files=input_files,
+        input_files=input_eval_files,
         max_seq_length=FLAGS.max_seq_length,
         max_predictions_per_seq=FLAGS.max_predictions_per_seq,
         is_training=False)
 
-    result = estimator.evaluate(
-        input_fn=eval_input_fn, steps=FLAGS.max_eval_steps)
+    try:
+      current_step = tf.train.load_variable(FLAGS.output_dir,
+                                            tf.GraphKeys.GLOBAL_STEP)
+    except (TypeError, ValueError, tf.errors.NotFoundError):
+      current_step = 0
 
-    output_eval_file = os.path.join(FLAGS.output_dir, "eval_results.txt")
-    with tf.gfile.GFile(output_eval_file, "w") as writer:
-      tf.logging.info("***** Eval results *****")
-      for key in sorted(result.keys()):
-        tf.logging.info("  %s = %s", key, str(result[key]))
-        writer.write("%s = %s\n" % (key, str(result[key])))
+    while current_step < FLAGS.num_train_steps:
+      if FLAGS.mode == "train_and_eval":
+        # Train for up to steps_per_eval number of steps.
+        # At the end of training, a checkpoint will be written to --model_dir.
+        next_checkpoint = min(current_step + FLAGS.steps_per_eval,
+                              FLAGS.num_train_steps)
+      elif FLAGS.mode == "train":
+        next_checkpoint = FLAGS.num_train_steps
+
+      if FLAGS.mode in ("train_and_eval", "train"):
+        start_timestamp = time.time()  # This time will include compilation time
+        tf.logging.info("Starting to train.")
+        estimator.train(input_fn=train_input_fn, max_steps=next_checkpoint)
+        current_step = next_checkpoint
+
+        tf.logging.info("Finished training up to step %d. Elapsed seconds %d.",
+                        current_step, int(time.time() - start_timestamp))
+
+      if FLAGS.mode in ("train_and_eval", "eval"):
+        tf.logging.info("Starting to evaluate.")
+        result = estimator.evaluate(
+            input_fn=eval_input_fn, steps=FLAGS.max_eval_steps)
+        output_eval_file = os.path.join(
+            FLAGS.output_dir, "eval_results_{}.txt".format(current_step))
+        with tf.gfile.GFile(output_eval_file, "w") as writer:
+          tf.logging.info("***** Eval results *****")
+          for key in sorted(result.keys()):
+            tf.logging.info("  %s = %s", key, str(result[key]))
+            writer.write("%s = %s\n" % (key, str(result[key])))
+        if FLAGS.mode == "eval":
+          tf.logging.info("Exit eval mode")
+          break
 
 
 if __name__ == "__main__":
-  flags.mark_flag_as_required("input_file")
+  flags.mark_flag_as_required("input_train_files")
+  flags.mark_flag_as_required("input_eval_files")
   flags.mark_flag_as_required("bert_config_file")
   flags.mark_flag_as_required("output_dir")
   tf.disable_v2_behavior()

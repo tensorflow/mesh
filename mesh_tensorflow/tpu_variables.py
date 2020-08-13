@@ -25,6 +25,18 @@ from tensorflow.python.framework import ops
 from tensorflow.python.ops import control_flow_ops
 from tensorflow.python.ops import gen_resource_variable_ops
 
+try:
+  from tensorflow.python.types import core  # pylint:disable=g-import-not-at-top,g-direct-tensorflow-import
+  TF_23 = True
+except ImportError:
+  TF_23 = False
+
+
+if TF_23:
+  VariableBase = core.Tensor
+else:
+  VariableBase = object
+
 
 @contextlib.contextmanager
 def _handle_graph(handle):
@@ -42,7 +54,7 @@ def _enclosing_tpu_context():
   return context
 
 
-class ReplicatedVariable(object):
+class ReplicatedVariable(VariableBase):
   """A replicated variable for use on TPUs.
 
   When accessed inside a tpu.replicate() context, this variable acts as if it
@@ -204,4 +216,6 @@ def _tensor_conversion(var, dtype=None, name=None, as_ref=False):
 
 
 ops.register_tensor_conversion_function(ReplicatedVariable, _tensor_conversion)
-ops.register_dense_tensor_like_type(ReplicatedVariable)
+
+if not TF_23:
+  ops.register_dense_tensor_like_type(ReplicatedVariable)
