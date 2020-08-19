@@ -1377,3 +1377,434 @@ class GeneralBilinearEncDecAttention(GeneralBilinearSelfAttention):
     return self.attention_internal(context, q, m, memory_length, bias)
 
 
+@gin.configurable
+class BranchedSelfAttention(SelfAttention):
+  """Branched self attention."""
+
+  def __init__(self, **kwargs):
+    super(BranchedSelfAttention, self).__init__(
+        combine_dims=False, keep_query_heads_dims=True, **kwargs)
+
+    if self.num_memory_heads != 0:
+      raise ValueError("Set num_memory_heads to 0 for branched attention.")
+
+    self.dense_layer = DenseReluDense()
+    self.kappa_init = tf.random_uniform_initializer(minval=0.0, maxval=1.0)
+    self.alpha_init = tf.random_uniform_initializer(minval=0.0, maxval=1.0)
+
+  def _constraint(self, z):
+    """Keep z non-negative and summing to 1."""
+    z = mtf.relu(z)
+    return z / mtf.reduce_sum(z + 10**-4)
+
+  def layer_output_from_attention_output(self, context, attention_output,
+                                         losses):
+    heads_dim = mtf.Dimension("heads", self.num_heads)
+
+    kappa = mtf.get_variable(
+        context.mesh,
+        "kappa",
+        mtf.Shape([heads_dim]),
+        initializer=self.kappa_init,
+        dtype=context.variable_dtype,
+        constraint=self._constraint)
+
+    alpha = mtf.get_variable(
+        context.mesh,
+        "alpha",
+        mtf.Shape([heads_dim]),
+        initializer=self.alpha_init,
+        dtype=context.variable_dtype,
+        constraint=self._constraint)
+
+    o = mtf.einsum([attention_output, kappa],
+                   output_shape=attention_output.shape)
+    o = self.dense_layer.call(context, o, losses)
+    o = mtf.einsum([o, alpha], output_shape=o.shape)
+    o = mtf.reduce_sum(o, reduced_dim=heads_dim)
+
+    return o
+
+
+@gin.configurable
+class BranchedEncDecAttention(BranchedSelfAttention):
+  """Branched attention over encoder output."""
+
+  def __init__(self, relative_attention_type=None, **kwargs):
+    super(BranchedEncDecAttention, self).__init__(
+        relative_attention_type=relative_attention_type, **kwargs)
+
+  def _get_memory_antecedent(self, context):
+    return context.encoder_output
+
+  def call(self, context, x, losses=None):
+    """Call the layer."""
+    return enc_dec_attention(self, self._get_memory_antecedent(context),
+                             context, x, losses)
+
+
+@gin.configurable
+class Conv1DLayer(transformer.TransformerLayer):
+  """1D convolution over sequence length with model dim as channels.
+
+  One caveat is that this layer does nothing to stop information from bleeding
+  across packed examples.
+  """
+
+  def __init__(self, filter_size, output_size, activation="linear"):
+    """Create a Conv1DLayer.
+
+    Args:
+      filter_size: a positive integer, the size of convolutional kernel.
+      output_size: a positive integer, the number of channels in the output.
+      activation: an optional string function name from namespace mtf, a
+        function to be applied to the layer output. If not provided or set to
+        "linear", then no function will be applied.
+    """
+    self._filter_size = filter_size
+    self._output_size = output_size
+    self._activation = activation
+
+  def call(self, context, x, losses=None):
+    """Call the layer."""
+    if context.mode == "incremental":
+      # TODO(mmatena): Implement.
+      raise NotImplementedError(
+          "incremental mode for Conv1DLayer not implemented yet.")
+
+    # Mask padding.
+    mask = mtf.cast(mtf.not_equal(context.inputs, 0), context.activation_dtype)
+    x *= mask
+
+    model_dim = x.shape.dims[-1]
+    output_dim = mtf.Dimension(model_dim.name, self._output_size)
+    output = mtf.layers.conv1d(
+        x,
+        output_dim=output_dim,
+        filter_size=self._filter_size,
+        padding="SAME",
+        filter_initializer=tf.glorot_uniform_initializer())
+    if self._activation != "linear":
+      activation_fn = getattr(mtf, self._activation)
+      output = activation_fn(output)
+    return output
+
+
+@gin.configurable
+class SeparableConv1DLayer(transformer.TransformerLayer):
+  """1D separable convolution over sequence length with model dim as channels.
+
+  One caveat is that this layer does nothing to stop information from bleeding
+  across packed examples.
+  """
+
+  def __init__(self,
+               min_relative_pos,
+               max_relative_pos,
+               output_size,
+               depthwise_filter_initializer_scale=1.0,
+               pointwise_filter_initializer_scale=1.0,
+               activation="linear"):
+    """Create a SeparableConv1DLayer.
+
+    The filter size will be `max_relative_pos - min_relative_pos + 1`.
+
+    Args:
+      min_relative_pos: an integer, the inclusive minimum relative positive of
+        the depthwise filter, where a relative position of zero means the left
+        end of the filter aligns with the left end of the input.
+      max_relative_pos: an integer, the inclusive maximum relative position of
+        the depthwise filter, where a relative position of zero means the right
+        end of the filter aligns with the right end of the input.
+      output_size: a positive integer, the number of channels in the output.
+      depthwise_filter_initializer_scale: a positive interger, the scale for the
+        initializer for the depthwise filter.
+      pointwise_filter_initializer_scale: a positive interger, the scale for the
+        initializer for the pointwise filter.
+      activation: an optional string function name from namespace mtf, a
+        function to be applied to the layer output. If not provided or set to
+        "linear", then no function will be applied.
+    """
+    self._min_relative_pos = min_relative_pos
+    self._max_relative_pos = max_relative_pos
+    self._output_size = output_size
+    self._depthwise_filter_initializer_scale = depthwise_filter_initializer_scale
+    self._pointwise_filter_initializer_scale = pointwise_filter_initializer_scale
+    self._activation = activation
+
+  def call(self, context, x, losses=None, all_kernel_wts=None):
+    """Call the layer."""
+
+    if context.mode == "incremental":
+      # TODO(mmatena): Implement.
+      raise NotImplementedError(
+          "incremental mode for Conv1DLayer not implemented yet.")
+
+    # Mask padding.
+    # TODO(karishmamalkan): Change the inputs_for_mask_creation to use decoder
+    # when using with decoder
+    inputs_for_mask_creation = context.inputs
+    mask = mtf.cast(
+        mtf.not_equal(inputs_for_mask_creation, 0), context.activation_dtype)
+    x *= mask
+
+    model_dim = x.shape.dims[-1]
+    output_dim = mtf.Dimension(model_dim.name, self._output_size)
+
+    output = mtf.layers.separable_conv1d(
+        x,
+        output_dim=output_dim,
+        min_relative_pos=self._min_relative_pos,
+        max_relative_pos=self._max_relative_pos,
+        depthwise_filter_initializer_scale=self
+        ._depthwise_filter_initializer_scale,
+        pointwise_filter_initializer_scale=self
+        ._pointwise_filter_initializer_scale,
+        use_bias=True,
+        kernel_depth_weights=all_kernel_wts)
+    if self._activation != "linear":
+      activation_fn = getattr(mtf, self._activation)
+      output = activation_fn(output)
+    return output
+
+
+@gin.configurable
+class Conv1DLocalAttn(SeparableConv1DLayer):
+  """Lightweight 1D separable convolution over sequence length with d_model as channels.
+
+  Lightweight 1D separable convolution over sequence length, with separated over
+  model_dim as channels, containing a fixed number of unique channels
+  repeated/stacked over the model_dim.
+  """
+
+  def __init__(self,
+               min_relative_pos,
+               max_relative_pos,
+               output_size,
+               depthwise_filter_initializer_scale=1.0,
+               pointwise_filter_initializer_scale=1.0,
+               activation="linear",
+               num_unique_depth_filters=1):
+    """Create a LightweightConv1DLayer.
+
+    The filter size will be `max_relative_pos - min_relative_pos + 1`
+    The value of the Filter is depthwise separable, and the filter is tied and
+    repeats at every "num_unique_depth_filters" elements.
+
+    Args:
+      min_relative_pos: an integer, the inclusive minimum relative positive of
+        the depthwise filter, where a relative position of zero means the left
+        end of the filter aligns with the left end of the input.
+      max_relative_pos: an integer, the inclusive maximum relative position of
+        the depthwise filter, where a relative position of zero means the right
+        end of the filter aligns with the right end of the input.
+      output_size: a positive integer, the number of channels in the output.
+      depthwise_filter_initializer_scale: a positive interger, the scale for the
+        initializer for the depthwise filter.
+      pointwise_filter_initializer_scale: a positive interger, the scale for the
+        initializer for the pointwise filter.
+      activation: an optional string function name from namespace mtf, a
+        function to be applied to the layer output. If not provided or set to
+        "linear", then no function will be applied.
+      num_unique_depth_filters: The number of unique depth filter values. The
+        unique filter is repeated along the depth dim every
+        num_unique_depth_filters elements.
+    """
+    super(Conv1DLocalAttn,
+          self).__init__(min_relative_pos, max_relative_pos, output_size,
+                         depthwise_filter_initializer_scale,
+                         pointwise_filter_initializer_scale, activation)
+    self._num_unique_depth_filters = num_unique_depth_filters
+    assert (self._output_size % self._num_unique_depth_filters == 0), (
+        "The number of elements in the unique depth filter should exactly "
+        "divide the number of output channels. You set "
+        "num_unique_depth_filters=%d, output_size(num_output_channels)=%d") % (
+            self._num_unique_depth_filters, self._output_size)
+
+  def call(self, context, x, losses=None):
+    """Call the layer."""
+
+    depth_dim = x.shape.dims[-1]
+    initializer_scale = self._depthwise_filter_initializer_scale or 1.0
+    kernel_size = self._max_relative_pos - self._min_relative_pos + 1
+    kernel_initializer = mtf.layers.VarianceScalingInitializer(
+        scale=initializer_scale / kernel_size)
+    repeated_kernel_dim = [
+        mtf.Dimension(
+            "repeated_kernel_dim",
+            size=int(depth_dim.size / self._num_unique_depth_filters))
+    ]
+
+    all_kernel_wts = []
+    for i in range(kernel_size):
+      # get a kernel variable of size num_unique_depth_filters, and replicate it
+      # to span the size of the complete depth(d_model) of x
+      kernel_wt = self.get_kernel_wt(
+          x,
+          repeated_kernel_dim=repeated_kernel_dim,
+          kernel_initializer=kernel_initializer,
+          i=i,
+          context=context,
+          variable_dtype=context.variable_dtype,
+          master_dtype=tf.float32,
+          slice_dtype=tf.float32)
+      repeated_kernel_wts = [kernel_wt] * self._num_unique_depth_filters
+      repeated_kernel_wts_concat = mtf.concat(
+          repeated_kernel_wts, concat_dim_name="repeated_kernel_dim")
+      repeated_kernel_wts_concat = mtf.rename_dimension(
+          repeated_kernel_wts_concat, "repeated_kernel_dim", "d_model")
+      all_kernel_wts.append(repeated_kernel_wts_concat)
+
+    # modify the kernel weights, such that they are softmaxed over the width of
+    # the kernel. We do this by stacking the individual kernel positions,
+    # performing the softmax, and then re-separating the stack.
+    stacked_kernel_weights = mtf.stack(all_kernel_wts, "new_stack_dim")
+    softmaxed_kernel_weights = mtf.softmax(
+        stacked_kernel_weights, reduced_dim=stacked_kernel_weights.shape[0]
+    )  # the softmax is calculated over the new_stack_dim we created
+    unstacked_kernel_weights = mtf.unstack(softmaxed_kernel_weights,
+                                           stacked_kernel_weights.shape[0])
+    return super(Conv1DLocalAttn, self).call(context, x, losses,
+                                             unstacked_kernel_weights)
+
+
+@gin.configurable
+class LightweightConv1DLocalAttn(Conv1DLocalAttn):
+  """Lightweight 1D separable convolution over seq_len with d_model as channels.
+
+  Lightweight 1D separable convolution over sequence length, with separated over
+  model_dim as channels, containing a fixed number of unique channels
+  repeated/stacked over the model_dim.
+  """
+
+  def get_kernel_wt(self,
+                    x,
+                    repeated_kernel_dim,
+                    kernel_initializer,
+                    i,
+                    context,
+                    variable_dtype,
+                    master_dtype=tf.float32,
+                    slice_dtype=tf.float32):
+    kernel_wt = mtf.layers.get_dense_kernel_weights(
+        x,
+        new_dims=[],
+        reduced_dims=[],
+        expert_dims=repeated_kernel_dim,
+        kernel_initializer=kernel_initializer,
+        name="lightwt_depthwise_dense_%d" % (i),
+        variable_dtype=context.variable_dtype,
+        master_dtype=tf.float32,
+        slice_dtype=tf.float32)
+    return kernel_wt
+
+
+@gin.configurable
+class DynamicConv1DLocalAttn(Conv1DLocalAttn):
+  """Dynamic 1D separable convolution over seq_len with d_model as channels.
+
+  Dynamic kernels predicted based on input at a position of the seq_len. Conv
+  operation separated over model_dim as channels, containing a fixed number of
+  unique channels repeated/stacked over the model_dim.
+  """
+
+  def get_kernel_wt(self,
+                    x,
+                    repeated_kernel_dim,
+                    kernel_initializer,
+                    i,
+                    context,
+                    variable_dtype,
+                    master_dtype=tf.float32,
+                    slice_dtype=tf.float32):
+    kernel_wt = mtf.layers.dense(
+        x,
+        new_dims=repeated_kernel_dim,
+        reduced_dims=[context.model.model_dim],
+        expert_dims=[],
+        kernel_initializer=kernel_initializer,
+        name="dyn_conv_depthwise_dense_%d" % (i),
+        variable_dtype=context.variable_dtype,
+        master_dtype=tf.float32,
+        slice_dtype=tf.float32)
+    return kernel_wt
+
+
+@gin.configurable
+class LocalConvAttnBlock(transformer.TransformerLayer):
+  """Conv Attention Block for Lightweight and dynamic conv attention.
+
+  Lightweight/Dynamic separable convolution over sequence length as described in
+  https://arxiv.org/pdf/1901.10430.pdf.
+  """
+
+  def __init__(self,
+               min_relative_pos,
+               max_relative_pos,
+               output_size,
+               depthwise_filter_initializer_scale=1.0,
+               pointwise_filter_initializer_scale=1.0,
+               activation="linear",
+               num_unique_depth_filters=1,
+               attention_type="lightweight_conv"):
+    """Create a LightweightConv1DAttnBlock.
+
+    The filter size will be `max_relative_pos - min_relative_pos + 1`
+    The value of the Filter is depthwise separable, and the filter is tied and
+    repeats at every "num_unique_depth_filters" elements.
+
+    Args:
+      min_relative_pos: an integer, the inclusive minimum relative positive of
+        the depthwise filter, where a relative position of zero means the left
+        end of the filter aligns with the left end of the input.
+      max_relative_pos: an integer, the inclusive maximum relative position of
+        the depthwise filter, where a relative position of zero means the right
+        end of the filter aligns with the right end of the input.
+      output_size: a positive integer, the number of channels in the output.
+      depthwise_filter_initializer_scale: a positive interger, the scale for the
+        initializer for the depthwise filter.
+      pointwise_filter_initializer_scale: a positive interger, the scale for the
+        initializer for the pointwise filter.
+      activation: an optional string function name from namespace mtf, a
+        function to be applied to the layer output. If not provided or set to
+        "linear", then no function will be applied.
+      num_unique_depth_filters: The number of unique depth filter values. The
+        unique filter is repeated along the depth dim every
+        num_unique_depth_filters elements.
+      attention_type: Type of conv attn -"lightweight_conv"/"dynamic_conv"
+    """
+    if attention_type == "lightweight_conv":
+      self.conv_local_attn_layer = LightweightConv1DLocalAttn(
+          min_relative_pos, max_relative_pos, output_size,
+          depthwise_filter_initializer_scale,
+          pointwise_filter_initializer_scale, activation)
+    elif attention_type == "dynamic_conv":
+      self.conv_local_attn_layer = DynamicConv1DLocalAttn(
+          min_relative_pos, max_relative_pos, output_size,
+          depthwise_filter_initializer_scale,
+          pointwise_filter_initializer_scale, activation)
+    else:
+      raise NotImplementedError("This attention type not implemented")
+
+  def call(self, context, x, losses=None):
+    """Call the layer."""
+
+    gated_ip = mtf.layers.dense_product(
+        x,
+        reduced_dims=[context.model.model_dim],
+        new_dims=[context.model.model_dim],
+        activation_functions=["linear", "sigmoid"],
+        variable_dtype=context.variable_dtype,
+        name="local_conv_inp")
+
+    attn_output = self.conv_local_attn_layer.call(context, gated_ip, losses)
+
+    op_projection = mtf.layers.dense(
+        attn_output,
+        reduced_dims=[context.model.model_dim],
+        new_dims=[context.model.model_dim],
+        activation=None,
+        variable_dtype=context.variable_dtype,
+        name="local_conv_attn_op_projection")
+
+    return op_projection
