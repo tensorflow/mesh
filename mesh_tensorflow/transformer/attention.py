@@ -241,7 +241,11 @@ def synthetic_attention(q,
                             dtype=context.variable_dtype)
       r = mtf.einsum([r1, r2], r_shape)
       r = mtf.slice(r, 0, memory_length_dim.size, memory_length_dim.name)
-      r = mtf.slice(r, 0, length_dim.size, length_dim.name)
+      if context.mode == "incremental":
+        r = mtf.gather(r, context.position, r.shape.get_dim_by_name("length"))
+      else:
+        length_dim = q.shape.get_dim_by_name("length")
+        r = mtf.slice(r, 0, length_dim.size, "length")
       logits = r
     elif synthesize_mode == "dense_minus":
       # Dense Synthesizer Model
@@ -258,7 +262,8 @@ def synthetic_attention(q,
       else:
         length_dim = q.shape.get_dim_by_name("length")
         logits = mtf.slice(logits, 0, length_dim.size, "length")
-    elif synthesize_mode == "random_plus_alpha":
+    elif synthesize_mode == "random_plus_alpha" or \
+        synthesize_mode == "random_plus":
       # Mixture Random Synthesizer with learnable Alpha
       tf.logging.info("Using Random Plus Alpha")
       logits = mtf.einsum([q, k], reduced_dims=[key_dim])
@@ -275,14 +280,18 @@ def synthetic_attention(q,
       else:
         length_dim = q.shape.get_dim_by_name("length")
         r = mtf.slice(r, 0, length_dim.size, length_dim.name)
-      alpha = mtf.get_variable(context.mesh,
-                               "alpha",
-                               mtf.Shape([mtf.Dimension("alpha", 1)]),
-                               initializer=tf.zeros_initializer(),
-                               dtype=context.variable_dtype)
-      alpha = mtf.sigmoid(alpha)
-      logits = ((1-alpha) * logits) + (alpha * r)
-    elif synthesize_mode == "dense_plus_alpha":
+      if "alpha" in synthesize_mode:
+        alpha = mtf.get_variable(context.mesh,
+                                 "alpha",
+                                 mtf.Shape([mtf.Dimension("alpha", 1)]),
+                                 initializer=tf.zeros_initializer(),
+                                 dtype=context.variable_dtype)
+        alpha = mtf.sigmoid(alpha)
+        logits = ((1-alpha) * logits) + (alpha * r)
+      else:
+        logits = logits + r
+    elif synthesize_mode == "dense_plus_alpha" or \
+        synthesize_mode == "dense_plus":
       # Mixture Dense Synthesizer with learnable alpha
       tf.logging.info("Using Dense Plus Alpha Scaling")
       logits = mtf.einsum([q, k], reduced_dims=[key_dim])
@@ -298,13 +307,16 @@ def synthetic_attention(q,
       else:
         length_dim = q.shape.get_dim_by_name("length")
         r = mtf.slice(r, 0, length_dim.size, "length")
-      alpha = mtf.get_variable(context.mesh,
-                               "alpha",
-                               mtf.Shape([mtf.Dimension("alpha", 1)]),
-                               initializer=tf.zeros_initializer(),
-                               dtype=context.variable_dtype)
-      alpha = mtf.sigmoid(alpha)
-      logits = ((1-alpha) * logits) + (alpha * r)
+      if "alpha" in synthesize_mode:
+        alpha = mtf.get_variable(context.mesh,
+                                 "alpha",
+                                 mtf.Shape([mtf.Dimension("alpha", 1)]),
+                                 initializer=tf.zeros_initializer(),
+                                 dtype=context.variable_dtype)
+        alpha = mtf.sigmoid(alpha)
+        logits = ((1-alpha) * logits) + (alpha * r)
+      else:
+        logits = logits + r
   if bias is not None:
     logits += bias
 
