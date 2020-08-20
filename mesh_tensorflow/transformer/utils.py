@@ -518,11 +518,44 @@ def tpu_estimator_model_fn(model_type,
             inputs, variable_dtype=get_variable_dtype())
       else:
         raise ValueError("unrecognized class")
+        
+      # calculate probabilities for the output texts  
+      # Replaces everything after EOS with 0 (along last dim).
+      eos_and_after = mtf.cumsum(mtf.cast(mtf.equal(mtf_samples, 1), tf.int32), 
+                                 exclusive=True, dim=mtf_samples.shape[1])
+      valid_ids = mtf.equal(eos_and_after, 0)
+      targets_for_score = mtf.where(valid_ids, mtf_samples, 0)
+
+      logits, _ = transformer_model.call_simple(
+              inputs=inputs,
+              targets=targets_for_score,
+              compute_loss=False,
+              mode='score',
+              variable_dtype=get_variable_dtype())
+
+      # calculate log probability
+      targets = mtf_features["targets"] = targets_for_score
+
+      batch_dim, length_dim, vocab_dim = logits.shape.dims
+      cross_entropy = mtf.layers.softmax_cross_entropy_with_logits(
+          logits, mtf_features["targets"], vocab_dim)
+      cross_entropy *= mtf.cast(
+          mtf.not_equal(targets, 0), cross_entropy.dtype)
+      if mode == "delimited_lm":
+          cross_entropy *= mtf.cast(mtf.logical_not(
+              transformer.delimited_lm_inputs_mask(targets)), cross_entropy.dtype)
+      scores = -mtf.reduce_sum(cross_entropy, reduced_dim=length_dim)
+    
+      # convert log prob to prob
+      probabilities = mtf.exp(scores)
+      probabilities = mtf.anonymize(probabilities)
+    
       mtf_samples = mtf.anonymize(mtf_samples)
       inputs = mtf.anonymize(inputs)
       lowering = mtf.Lowering(graph, {mesh: mesh_impl}, autostack=autostack)
       inputs = clean_decodes(lowering.export_to_tf_tensor(inputs))
       outputs = clean_decodes(lowering.export_to_tf_tensor(mtf_samples))
+      probabilities = lowering.export_to_tf_tensor(probabilities)
 
       # Detokenize in the graph if supported by vocabulary and accelerator.
       def _maybe_detokenize(ids, vocab):
@@ -535,7 +568,9 @@ def tpu_estimator_model_fn(model_type,
 
       predictions = {
           "inputs": inputs,
-          "outputs": outputs}
+          "outputs": outputs,
+          "probabilities": probabilities
+          }
 
     if mode in ["score", tf.estimator.ModeKeys.PREDICT]:
       # When exporting a model, we need to communicate to TF-Serving that
@@ -1201,6 +1236,7 @@ def clean_decodes(ids, eos_id=1, pad_id=0, length_axis=-1):
                             exclusive=True, axis=length_axis)
   valid_ids = tf.equal(eos_and_after, 0)
   return tf.where_v2(valid_ids, ids, pad_id)
+
 
 
 def _score_with_estimator(estimator, input_fn, eval_checkpoint_step, model_dir,
