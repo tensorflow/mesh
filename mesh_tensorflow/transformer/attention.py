@@ -383,6 +383,7 @@ class AttentionParams(object):
     """
     if shared_kv and key_dim != value_dim:
       raise ValueError("shared_kv requires key_dim == value_dim")
+    self.mesh = mesh
     self.query_input_dim = query_input_dim
     self.memory_input_dim = memory_input_dim
     self.output_dim = output_dim
@@ -390,53 +391,83 @@ class AttentionParams(object):
     self.value_dim = value_dim
     self.query_heads_dims = query_heads_dims or []
     self.memory_heads_dims = memory_heads_dims or []
+    self.variable_dtype = variable_dtype
     self.shared_kv = shared_kv
     self.no_query = no_query
     self.combine_dims = combine_dims
     self.keep_query_heads_dims = keep_query_heads_dims
     self.fold_scaling_into_initializer = fold_scaling_into_initializer
     if combine_dims:
-      q_shape = [query_input_dim, _combined_dim(self.q_dims)]
-      k_shape = [memory_input_dim, _combined_dim(self.k_dims)]
-      v_shape = [memory_input_dim, _combined_dim(self.v_dims)]
-      o_shape = [_combined_dim(self.o_dims), output_dim]
+      self.q_shape = [query_input_dim, _combined_dim(self.q_dims)]
+      self.k_shape = [memory_input_dim, _combined_dim(self.k_dims)]
+      self.v_shape = [memory_input_dim, _combined_dim(self.v_dims)]
+      self.o_shape = [_combined_dim(self.o_dims), output_dim]
     else:
-      q_shape = [query_input_dim] + self.q_dims
-      k_shape = [memory_input_dim] + self.k_dims
-      v_shape = [memory_input_dim] + self.v_dims
-      o_shape = self.o_dims + [output_dim]
+      self.q_shape = [query_input_dim] + self.q_dims
+      self.k_shape = [memory_input_dim] + self.k_dims
+      self.v_shape = [memory_input_dim] + self.v_dims
+      self.o_shape = self.o_dims + [output_dim]
+    if ensemble_dim:
+      self.q_shape = [ensemble_dim] + self.q_shape
+      self.k_shape = [ensemble_dim] + self.k_shape
+      self.v_shape = [ensemble_dim] + self.v_shape
+      self.o_shape = [ensemble_dim] + self.o_shape
+
+    self.init_weights()
+
+  def init_weights(self):
+    """Initialize attention projection matrices."""
     if mtf.layers.unit_scaling_convention():
       init = tf.random_normal_initializer(stddev=1.0)
       q_init = init
       kv_init = init
       o_init = init
     else:
-      stddev = query_input_dim.size ** -0.5
+      stddev = self.query_input_dim.size ** -0.5
       if self.fold_scaling_into_initializer:
-        stddev *= key_dim.size ** -0.5
+        stddev *= self.key_dim.size ** -0.5
       q_init = tf.random_normal_initializer(stddev=stddev)
       kv_init = tf.random_normal_initializer(
-          stddev=memory_input_dim.size ** -0.5)
+          stddev=self.memory_input_dim.size ** -0.5)
       o_init = tf.random_normal_initializer(
-          stddev=mtf.Shape(self.query_heads_dims + [value_dim]).size ** -0.5)
-    if ensemble_dim:
-      q_shape = [ensemble_dim] + q_shape
-      k_shape = [ensemble_dim] + k_shape
-      v_shape = [ensemble_dim] + v_shape
-      o_shape = [ensemble_dim] + o_shape
+          stddev=mtf.Shape(self.query_heads_dims + [self.value_dim]).size**-0.5)
+
     if not self.no_query:
       self.wq = mtf.get_variable(
-          mesh, "q", q_shape, initializer=q_init, dtype=variable_dtype)
-    if shared_kv:
+          self.mesh,
+          "q",
+          self.q_shape,
+          initializer=q_init,
+          dtype=self.variable_dtype)
+
+    if self.shared_kv:
       self.wkv = mtf.get_variable(
-          mesh, "kv", k_shape, initializer=kv_init, dtype=variable_dtype)
+          self.mesh,
+          "kv",
+          self.v_shape,
+          initializer=kv_init,
+          dtype=self.variable_dtype)
     else:
       self.wk = mtf.get_variable(
-          mesh, "k", k_shape, initializer=kv_init, dtype=variable_dtype)
+          self.mesh,
+          "k",
+          self.k_shape,
+          initializer=kv_init,
+          dtype=self.variable_dtype)
+
       self.wv = mtf.get_variable(
-          mesh, "v", v_shape, initializer=kv_init, dtype=variable_dtype)
+          self.mesh,
+          "v",
+          self.v_shape,
+          initializer=kv_init,
+          dtype=self.variable_dtype)
+
     self.wo = mtf.get_variable(
-        mesh, "o", o_shape, initializer=o_init, dtype=variable_dtype)
+        self.mesh,
+        "o",
+        self.o_shape,
+        initializer=o_init,
+        dtype=self.variable_dtype)
 
   def compute_q(self, query_antecedent):
     """Compute query Tensor q.
