@@ -895,6 +895,7 @@ class Unitransformer(object):
       if self.ensemble_dim:
         # The ensembling should not decrease the gradient to each model
         ret /= self.ensemble_dim.size
+      tf.logging.info("loss denominator: %d" % ret)
       return float(ret)
 
   def call_simple(self,
