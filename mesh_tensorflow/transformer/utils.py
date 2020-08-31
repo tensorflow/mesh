@@ -483,16 +483,9 @@ def tpu_estimator_model_fn(model_type,
           compute_loss=False,
           mode=mode,
           variable_dtype=get_variable_dtype())
-      batch_dim, length_dim, vocab_dim = logits.shape.dims
-      cross_entropy = mtf.layers.softmax_cross_entropy_with_logits(
-          logits, mtf_features["targets"], vocab_dim)
-      cross_entropy *= mtf.cast(
-          mtf.not_equal(targets, 0), cross_entropy.dtype)
-      if model_type == "delimited_lm":
-        cross_entropy *= mtf.cast(mtf.logical_not(
-            transformer.delimited_lm_inputs_mask(targets)), cross_entropy.dtype)
-      scores = -mtf.reduce_sum(cross_entropy, reduced_dim=length_dim)
-      scores = mtf.anonymize(scores)
+    
+      # calculate log likelihood
+      scores = compute_score(logits, targets, model_type)
       lowering = mtf.Lowering(graph, {mesh: mesh_impl}, autostack=autostack)
       predictions = {
           "scores": lowering.export_to_tf_tensor(scores)
@@ -533,29 +526,15 @@ def tpu_estimator_model_fn(model_type,
               mode='score',
               variable_dtype=get_variable_dtype())
 
-      # calculate log probability
-      targets = mtf_features["targets"] = targets_for_score
-
-      batch_dim, length_dim, vocab_dim = logits.shape.dims
-      cross_entropy = mtf.layers.softmax_cross_entropy_with_logits(
-          logits, mtf_features["targets"], vocab_dim)
-      cross_entropy *= mtf.cast(
-          mtf.not_equal(targets, 0), cross_entropy.dtype)
-      if mode == "delimited_lm":
-          cross_entropy *= mtf.cast(mtf.logical_not(
-              transformer.delimited_lm_inputs_mask(targets)), cross_entropy.dtype)
-      scores = -mtf.reduce_sum(cross_entropy, reduced_dim=length_dim)
-    
-      # convert log prob to prob
-      probabilities = mtf.exp(scores)
-      probabilities = mtf.anonymize(probabilities)
+      # calculate log likelihood
+      scores = compute_score(logits, targets_for_score, model_type)
     
       mtf_samples = mtf.anonymize(mtf_samples)
       inputs = mtf.anonymize(inputs)
       lowering = mtf.Lowering(graph, {mesh: mesh_impl}, autostack=autostack)
       inputs = clean_decodes(lowering.export_to_tf_tensor(inputs))
       outputs = clean_decodes(lowering.export_to_tf_tensor(mtf_samples))
-      probabilities = lowering.export_to_tf_tensor(probabilities)
+      scores = lowering.export_to_tf_tensor(scores)
 
       # Detokenize in the graph if supported by vocabulary and accelerator.
       def _maybe_detokenize(ids, vocab):
@@ -569,9 +548,9 @@ def tpu_estimator_model_fn(model_type,
       predictions = {
           "inputs": inputs,
           "outputs": outputs,
-          "probabilities": probabilities
+          "scores": scores
           }
-
+        
     if mode in ["score", tf.estimator.ModeKeys.PREDICT]:
       # When exporting a model, we need to communicate to TF-Serving that
       # master variables need to be copied to their slave slice variables.
@@ -1238,6 +1217,32 @@ def clean_decodes(ids, eos_id=1, pad_id=0, length_axis=-1):
   return tf.where_v2(valid_ids, ids, pad_id)
 
 
+def compute_score(logits, targets, model_type):
+  """Compute the log likelihood given logits and targets.
+  
+  Args:
+    logits: A mtf Tensor with floating-point dtype, containing the predicted
+      relative log probabilities of the classes.
+    targets: A mtf Tensor with integer dtype whose values are in the range 
+      [0, vocab_dim.size).
+    model_type: a string. One of "bitransformer", "lm", "delimited_lm",
+      "aligned", or "bi_teacher_student"
+
+  Returns:
+    a float mtf.Tensor with the log likelihood.
+  """
+  batch_dim, length_dim, vocab_dim = logits.shape.dims
+  cross_entropy = mtf.layers.softmax_cross_entropy_with_logits(
+      logits, targets, vocab_dim)
+  cross_entropy *= mtf.cast(
+      mtf.not_equal(targets, 0), cross_entropy.dtype)
+  if model_type == "delimited_lm":
+      cross_entropy *= mtf.cast(mtf.logical_not(
+          transformer.delimited_lm_inputs_mask(targets)), cross_entropy.dtype)
+  scores = -mtf.reduce_sum(cross_entropy, reduced_dim=length_dim)
+  scores = mtf.anonymize(scores)
+  return scores
+    
 
 def _score_with_estimator(estimator, input_fn, eval_checkpoint_step, model_dir,
                           scores_filename, num_examples=None):
