@@ -58,7 +58,9 @@ class MoE1D(transformer.TransformerLayer):
                rand_1_dropout=0.1,
                rand_1_temperature=1.0,
                rand_1_jitter=1e-2,
-               switch_top_k=4):
+               switch_top_k=4,
+               output_dim=None,
+               use_experts_attention=False):
     self._hparams = HParams(
         moe_gating=moe_gating,
         moe_num_experts=num_experts,
@@ -79,7 +81,9 @@ class MoE1D(transformer.TransformerLayer):
         moe_rand_1_dropout=rand_1_dropout,
         moe_rand_1_temperature=rand_1_temperature,
         moe_rand_1_jitter=rand_1_jitter,
-        moe_switch_top_k=switch_top_k)
+        moe_output_dim=output_dim,
+        moe_switch_top_k=switch_top_k,
+        moe_use_experts_attention=use_experts_attention)
     self._activation = activation
 
   def call(self, context, x, losses=None):
@@ -94,9 +98,15 @@ class MoE1D(transformer.TransformerLayer):
           x_shape.dims[:-1] + [mtf.Dimension("length", 1)]
           + x_shape.dims[-1:])
       x = mtf.reshape(x, shape_with_length)
+
+    # Extract the MoE output dimension
+    if self._hparams.moe_output_dim is not None:
+      output_dim = self._hparams.moe_output_dim
+    else:
+      output_dim = context.model.model_dim
     y, loss = transformer_moe_layer_v1(
         x,
-        context.model.model_dim,
+        output_dim,
         self._hparams,
         context.train,
         context.variable_dtype,
@@ -107,7 +117,11 @@ class MoE1D(transformer.TransformerLayer):
     if context.losses is not None:
       context.losses.append(loss)
     if not has_length_dim:
-      y = mtf.reshape(y, x_shape)
+      if self._hparams.moe_use_experts_attention:
+        y_reshape = [mtf.reshape(y_out, x_shape) for y_out in y]
+        y = y_reshape
+      else:
+        y = mtf.reshape(y, x_shape)
     return y
 
 
@@ -418,27 +432,40 @@ def transformer_moe_layer_v1(
   if train and hparams.moe_dropout_rate != 0.0:
     h = mtf.dropout(h, 1.0 - hparams.moe_dropout_rate)
 
-  expert_output = mtf.layers.dense(
-      h, output_dim, expert_dims=[experts_dim], use_bias=False,
-      reduced_dims=h.shape.dims[-1:], variable_dtype=variable_dtype,
-      name="wo")
+  def _compute_output(hidden, layer_name):
+    """Compute the output of the attention layer from the hidden vector."""
+    expert_output = mtf.layers.dense(
+        hidden, output_dim, expert_dims=[experts_dim], use_bias=False,
+        reduced_dims=hidden.shape.dims[-1:], variable_dtype=variable_dtype,
+        name=layer_name)
 
-  expert_output = mtf.reshape(
-      expert_output,
-      mtf.Shape([
-          outer_batch_dim,
-          experts_dim_unsplit,
-          num_groups_dim,
-          expert_capacity_dim,
-          output_dim,
-      ]))
+    expert_output = mtf.reshape(
+        expert_output,
+        mtf.Shape([
+            outer_batch_dim,
+            experts_dim_unsplit,
+            num_groups_dim,
+            expert_capacity_dim,
+            output_dim,
+        ]))
+    moe_output_dims = moe_input_dims[:-1] + [output_dim]
+    output = mtf.einsum([expert_output, combine_tensor],
+                        mtf.Shape(moe_output_dims))
+    output = mtf.reshape(output, batch_and_length_dims + [output_dim])
+    return output
 
-  moe_output_dims = moe_input_dims[:-1] + [output_dim]
-  output = mtf.einsum([expert_output, combine_tensor],
-                      mtf.Shape(moe_output_dims))
-  output = mtf.reshape(output, batch_and_length_dims + [output_dim])
-
-  return output, loss * hparams.moe_loss_coef
+  if hparams.moe_use_experts_attention:
+    # We share k_h and v_h with no degradation in performance
+    q_h, k_h = h, h
+    outputs = []
+    q = _compute_output(q_h, layer_name="q_wo")
+    k = _compute_output(k_h, layer_name="k_wo")
+    outputs.append(q)
+    outputs.append(k)
+    return outputs, loss * hparams.moe_loss_coef
+  else:
+    output = _compute_output(h, layer_name="wo")
+    return output, loss * hparams.moe_loss_coef
 
 
 def transformer_moe_layer_v2(
@@ -858,21 +885,25 @@ def _rand_1_gating(
   else:
     policy = hparams.moe_rand_1_policy_eval
 
-  # Input perturbations
-  if train and policy == "input_dropout":
-    inputs = mtf.dropout(inputs, 1.0 - hparams.moe_rand_1_dropout)
-  elif train and policy == "input_jitter":
-    inputs = mtf.layers.multiplicative_jitter(inputs, hparams.moe_rand_1_jitter)
-
-  gate_logits = mtf.layers.dense(inputs, experts_dim, use_bias=False,
-                                 expert_dims=outer_expert_dims,
-                                 variable_dtype=variable_dtype,
-                                 name=name)
-  raw_gates = mtf.softmax(gate_logits, reduced_dim=experts_dim)
-
   # The internals of this function run in float32.
   #   bfloat16 seems to reduce quality.
-  raw_gates = mtf.to_float(raw_gates)
+  gate_inputs = mtf.to_float(inputs)
+
+  # Input perturbations
+  if train and policy == "input_dropout":
+    gate_inputs = mtf.dropout(gate_inputs, 1.0 - hparams.moe_rand_1_dropout)
+  elif train and policy == "input_jitter":
+    gate_inputs = mtf.layers.multiplicative_jitter(gate_inputs,
+                                                   hparams.moe_rand_1_jitter)
+
+  gate_logits = mtf.layers.dense(
+      gate_inputs,
+      experts_dim,
+      use_bias=False,
+      expert_dims=outer_expert_dims,
+      variable_dtype=variable_dtype,
+      name=name)
+  raw_gates = mtf.softmax(gate_logits, reduced_dim=experts_dim)
 
   if policy == "argmax" or policy == "input_dropout" or policy == "input_jitter":
     expert_gate, expert_index = mtf.top_1(raw_gates, reduced_dim=experts_dim)

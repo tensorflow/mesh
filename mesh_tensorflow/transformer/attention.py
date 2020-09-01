@@ -356,7 +356,8 @@ class AttentionParams(object):
                combine_dims=True,
                ensemble_dim=None,
                keep_query_heads_dims=False,
-               fold_scaling_into_initializer=True):
+               fold_scaling_into_initializer=True,
+               make_attention_vars=True):
     """Create attention parameters.
 
     combine_dims is a hack for faster execution.  The heads and key/value
@@ -380,6 +381,9 @@ class AttentionParams(object):
       keep_query_heads_dims: a boolean, if true keep the query_heads_dims in the
         output.
       fold_scaling_into_initializer: a boolean
+      make_attention_vars: a boolean, whether to make the attention variables.
+        This is typically True. Only set to False for ExpertsAttention which
+        creates variables inside the moe.MoE1D-call.
     """
     if shared_kv and key_dim != value_dim:
       raise ValueError("shared_kv requires key_dim == value_dim")
@@ -397,6 +401,8 @@ class AttentionParams(object):
     self.combine_dims = combine_dims
     self.keep_query_heads_dims = keep_query_heads_dims
     self.fold_scaling_into_initializer = fold_scaling_into_initializer
+    self.make_attention_vars = make_attention_vars
+
     if combine_dims:
       self.q_shape = [query_input_dim, _combined_dim(self.q_dims)]
       self.k_shape = [memory_input_dim, _combined_dim(self.k_dims)]
@@ -432,36 +438,35 @@ class AttentionParams(object):
       o_init = tf.random_normal_initializer(
           stddev=mtf.Shape(self.query_heads_dims + [self.value_dim]).size**-0.5)
 
-    if not self.no_query:
-      self.wq = mtf.get_variable(
-          self.mesh,
-          "q",
-          self.q_shape,
-          initializer=q_init,
-          dtype=self.variable_dtype)
-
-    if self.shared_kv:
-      self.wkv = mtf.get_variable(
-          self.mesh,
-          "kv",
-          self.v_shape,
-          initializer=kv_init,
-          dtype=self.variable_dtype)
-    else:
-      self.wk = mtf.get_variable(
-          self.mesh,
-          "k",
-          self.k_shape,
-          initializer=kv_init,
-          dtype=self.variable_dtype)
-
-      self.wv = mtf.get_variable(
-          self.mesh,
-          "v",
-          self.v_shape,
-          initializer=kv_init,
-          dtype=self.variable_dtype)
-
+    # Toggle producing wq, wv, wk which are not needed for the ExpertsAttention
+    if self.make_attention_vars:
+      if not self.no_query:
+        self.wq = mtf.get_variable(
+            self.mesh,
+            "q",
+            self.q_shape,
+            initializer=q_init,
+            dtype=self.variable_dtype)
+      if self.shared_kv:
+        self.wkv = mtf.get_variable(
+            self.mesh,
+            "kv",
+            self.k_shape,
+            initializer=kv_init,
+            dtype=self.variable_dtype)
+      else:
+        self.wk = mtf.get_variable(
+            self.mesh,
+            "k",
+            self.k_shape,
+            initializer=kv_init,
+            dtype=self.variable_dtype)
+        self.wv = mtf.get_variable(
+            self.mesh,
+            "v",
+            self.v_shape,
+            initializer=kv_init,
+            dtype=self.variable_dtype)
     self.wo = mtf.get_variable(
         self.mesh,
         "o",
@@ -580,6 +585,107 @@ class AttentionParams(object):
   @property
   def o_dims(self):
     return self.query_heads_dims + [self.value_dim]
+
+
+class ExpertsAttentionParams(AttentionParams):
+  """Create attention parameters using experts-layer."""
+
+  def __init__(self,
+               mesh,
+               query_input_dim,
+               memory_input_dim,
+               output_dim,
+               key_dim,
+               value_dim,
+               query_heads_dims,
+               memory_heads_dims,
+               variable_dtype,
+               shared_kv=False,
+               no_query=False,
+               combine_dims=True,
+               ensemble_dim=None,
+               keep_query_heads_dims=False,
+               fold_scaling_into_initializer=True,
+               context=None,
+               experts_hparams=None):
+    super(ExpertsAttentionParams, self).__init__(
+        mesh=mesh,
+        query_input_dim=query_input_dim,
+        memory_input_dim=memory_input_dim,
+        output_dim=output_dim,
+        key_dim=key_dim,
+        value_dim=value_dim,
+        query_heads_dims=query_heads_dims,
+        memory_heads_dims=memory_heads_dims,
+        variable_dtype=variable_dtype,
+        shared_kv=shared_kv,
+        no_query=no_query,
+        combine_dims=combine_dims,
+        ensemble_dim=ensemble_dim,
+        keep_query_heads_dims=keep_query_heads_dims,
+        fold_scaling_into_initializer=fold_scaling_into_initializer,
+        make_attention_vars=False)
+
+    self.context = context
+
+    # ExpertsAttention, for simplicitly, asserts that combine_dims is True, and
+    # for efficiency, that shared_kv is True.
+    if not self.combine_dims:
+      raise ValueError("self.combine_dims must be True for ExpertsAttention")
+    if not self.shared_kv:
+      raise ValueError("self.shared_kv must be True for ExpertsAttention")
+    if mtf.layers.unit_scaling_convention():
+      raise NotImplementedError
+
+    moe_output_dims = self.q_shape[-1]
+    tf.logging.info("ExpertsAttention moe_hidden_size: {}".format(
+        experts_hparams.hidden_size))
+    tf.logging.info("moe_output_dims: {}".format(moe_output_dims))
+    self.moe_layer = mtf.transformer.moe.MoE1D(
+        moe_gating=experts_hparams.moe_gating,
+        num_experts=experts_hparams.num_experts,
+        loss_coef=experts_hparams.loss_coef,
+        group_size=experts_hparams.group_size,
+        min_expert_capacity=experts_hparams.min_expert_capacity,
+        capacity_factor_train=experts_hparams.capacity_factor_train,
+        capacity_factor_eval=experts_hparams.capacity_factor_eval,
+        rand_1_policy_train=experts_hparams.rand_1_policy_train,
+        rand_1_policy_eval=experts_hparams.rand_1_policy_eval,
+        rand_1_dropout=experts_hparams.rand_1_dropout,
+        rand_1_temperature=experts_hparams.rand_1_temperature,
+        rand_1_jitter=experts_hparams.rand_1_jitter,
+        switch_top_k=experts_hparams.switch_top_k,
+        hidden_size=experts_hparams.hidden_size,
+        output_dim=moe_output_dims,
+        use_experts_attention=experts_hparams.use_experts_attention)
+
+  def _compute_merge_qkv(self, antecedent):
+    """Computes qkv all in one call using MoE layer."""
+    # NOTE: This assumes querty and memory antecedent are the same
+    qk = self.moe_layer.call(self.context, antecedent)
+    # Split qk here since they went through experts-layers
+    q, k = qk
+
+    # Scale query
+    q *= self.key_dim.size ** -0.5
+    self._q = mtf.replace_dimensions(q, q.shape.dims[-1], self.q_dims)
+    self._k = mtf.replace_dimensions(k, k.shape.dims[-1], self.k_dims)
+
+  def compute_q(self, query_antecedent):
+    self._compute_merge_qkv(query_antecedent)
+    return self._q
+
+  def compute_k(self, memory_antecedent):
+    del memory_antecedent
+    return self._k
+
+  def compute_kv(self, memory_antecedent):
+    del memory_antecedent
+    return self._k
+
+  def compute_v(self, memory_antecedent):
+    del memory_antecedent
+    raise NotImplementedError("ExpertsAttention uses shared_kv = True.")
 
 
 def _combined_dim(dims):
