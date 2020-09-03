@@ -456,6 +456,11 @@ def tpu_estimator_model_fn(model_type,
       if model_type == "delimited_lm":
         mtf_features = _dynamic_text2self(mtf_features)
 
+    # Detokenize in the graph if supported by vocabulary and accelerator.
+    def _maybe_detokenize(ids, vocab):
+      if not use_tpu and hasattr(vocab, "decode_tf"):
+        return vocab.decode_tf(ids)
+      return ids
     if mode == "score":
       # compute log-likelihoods per sequence
       if predict_fn:
@@ -493,8 +498,13 @@ def tpu_estimator_model_fn(model_type,
             transformer.delimited_lm_inputs_mask(targets)), cross_entropy.dtype)
       scores = -mtf.reduce_sum(cross_entropy, reduced_dim=length_dim)
       scores = mtf.anonymize(scores)
+      targets = mtf.anonymize(targets)
       lowering = mtf.Lowering(graph, {mesh: mesh_impl}, autostack=autostack)
+      targets = clean_decodes(lowering.export_to_tf_tensor(targets))
+      targets = _maybe_detokenize(targets, targets_vocabulary(vocabulary))
+
       predictions = {
+          "targets": targets,
           "scores": lowering.export_to_tf_tensor(scores)
       }
     elif mode == tf.estimator.ModeKeys.PREDICT:
@@ -523,12 +533,6 @@ def tpu_estimator_model_fn(model_type,
       lowering = mtf.Lowering(graph, {mesh: mesh_impl}, autostack=autostack)
       inputs = clean_decodes(lowering.export_to_tf_tensor(inputs))
       outputs = clean_decodes(lowering.export_to_tf_tensor(mtf_samples))
-
-      # Detokenize in the graph if supported by vocabulary and accelerator.
-      def _maybe_detokenize(ids, vocab):
-        if not use_tpu and hasattr(vocab, "decode_tf"):
-          return vocab.decode_tf(ids)
-        return ids
 
       inputs = _maybe_detokenize(inputs, inputs_vocabulary(vocabulary))
       outputs = _maybe_detokenize(outputs, targets_vocabulary(vocabulary))
@@ -1223,12 +1227,26 @@ def _score_with_estimator(estimator, input_fn, eval_checkpoint_step, model_dir,
   checkpoint_path, = get_checkpoint_iterator(eval_checkpoint_step, model_dir)
 
   result_iter = estimator.predict(input_fn, checkpoint_path=checkpoint_path)
-  scores = [m["scores"] for m in result_iter]
+  scores, targets = [], []
+  for m in result_iter:
+    scores.append(m["scores"])
+    targets.append(m["targets"])
   # Remove any padding examples
   scores = scores[:num_examples]
+  targets = targets[:num_examples]
   if scores_filename is not None:
-    write_lines_to_file(["%f" % f for f in scores], scores_filename)
-  return scores
+    write_lines_to_file(["%f" % f for f in scores], scores_filename+".scores")
+    # Targets gets decoded in python then written out later.
+  return scores, targets
+
+
+def _maybe_decode_python(ids_or_strs, vocabulary):
+  """Decode if ids_or_strs is not yet strings in pure python."""
+
+  if ids_or_strs:
+    if not isinstance(ids_or_strs[0], str):
+      ids_or_strs = [vocabulary.decode(t.tolist()) for t in ids_or_strs]
+  return ids_or_strs
 
 
 @gin.configurable
@@ -1303,8 +1321,15 @@ def score_from_strings(estimator, vocabulary, model_type, batch_size,
     dataset = dataset.batch(batch_size, drop_remainder=True)
     return dataset.prefetch(tf.data.experimental.AUTOTUNE)
 
-  return _score_with_estimator(estimator, input_fn, eval_checkpoint_step,
-                               model_dir, scores_filename, len(targets))
+  scores, targets = _score_with_estimator(
+      estimator, input_fn, eval_checkpoint_step, model_dir, scores_filename,
+      len(targets))
+  targets = _maybe_decode_python(targets, targets_vocabulary(vocabulary))
+  if scores_filename is not None:
+    write_lines_to_file(["%s" % f for f in targets],
+                        scores_filename + ".targets")
+
+  return scores, targets
 
 
 @gin.configurable
@@ -1358,8 +1383,16 @@ def score_from_dataset(estimator, vocabulary, batch_size, sequence_length,
 
   # TODO(dei): Since we pass in the num_examples as None, scores for the
   # padding examples will get written to the output file. Should fix this.
-  return _score_with_estimator(estimator, input_fn, eval_checkpoint_step,
-                               model_dir, scores_filename, None)
+  scores, targets = _score_with_estimator(
+      estimator, input_fn, eval_checkpoint_step, model_dir, scores_filename,
+      None)
+
+  targets = _maybe_decode_python(targets, targets_vocabulary(vocabulary))
+  if scores_filename is not None:
+    write_lines_to_file(["%s" % f for f in targets],
+                        scores_filename + ".targets")
+
+  return scores, targets
 
 
 def get_estimator(model_type, vocabulary, mesh_shape,
@@ -2176,7 +2209,7 @@ def run(tpu_job_name,
         num_examples = batch_size * perplexity_eval_steps
         # include the number of examples in the evaluation name so as to
         # make sure we are comparing apples to apples.
-        name = "%s_%d" % (eval_dataset.name, num_examples)
+        name = "%s_%s_%d" % (eval_dataset.name, dataset_split, num_examples)
         _ = estimator.evaluate(
             input_fn=functools.partial(_input_fn, eval_dataset=eval_dataset),
             steps=perplexity_eval_steps,
