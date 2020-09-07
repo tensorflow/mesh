@@ -448,11 +448,11 @@ class Graph(object):
     and large numbers of variables.
 
     This function should be called after graph construction  (it is called by
-    default in the Lowering constuctor).
+    default in the Lowering constructor).
 
     When we find a set of variables with the same shape/dtype/etc, we replace
     them with one StackedVariable and an "unstack" operation.  The
-    StackedVariable has multiple master variables (so as to maintain checkpiont
+    StackedVariable has multiple master variables (so as to maintain checkpoint
     compatibility), but only one slice variable per device.  We point the inputs
     of later operations to the outputs of the "unstack" operations, instead of
     the outputs of the defunct single variables.
@@ -477,7 +477,7 @@ class Graph(object):
     self._operations = []
     self._all_variables = []
     self._trainable_variables = []
-    # We can only stack varaibles which share the same set of assignment
+    # We can only stack variables which share the same set of assignment
     # operations.
     var_to_assign_ops = collections.defaultdict(str)
     for op in operations:
@@ -608,7 +608,7 @@ class Graph(object):
   def clone_operations(self, ops, input_mapping):
     """Clone a portion of the graph, but with different inputs.
 
-    The differnt inputs are specified by the `input_mapping` dictionary, which
+    The different inputs are specified by the `input_mapping` dictionary, which
     maps from input Tensor in the original operations to input Tensor in the
     cloned operations.  If an original operation uses an external input that is
     not in `input_mapping`, then the original input is used for the cloned
@@ -1033,7 +1033,7 @@ class MeshImpl(object):
     Args:
       fn: function from tf.Tensors to tf.Tensor or a tuple of tf.Tensors.
       *inputs: list of inputs.  Each input is either a LaidOutTensor or
-        has a to_laid_out_tensor method or is convertibleto a tf.Tensor.
+        has a to_laid_out_tensor method or is convertible to a tf.Tensor.
 
     Returns:
       LaidOutTensor or LazyAllreduceSum
@@ -2057,7 +2057,7 @@ class BinaryOpWithBroadcasting(Operation):
         self._initialize_all_dimensions_as_splittable())
 
   def gradient(self, unused_grad_ys):
-    raise ValueError("Gradient not implememnted")
+    raise ValueError("Gradient not implemented")
 
   def lower(self, lowering):
     x1 = self.inputs[0]

@@ -730,7 +730,7 @@ def local_attention_1d(q,
                        write_priority=None,
                        read_priority=None,
                        attention_kwargs=None):
-  """Attention to the a neighborood around the source.
+  """Attention to the a neighborhood around the source.
 
   If fully_autoregressive, then query position p can only see memory positions
   in the range (p - radius, p].
@@ -846,7 +846,7 @@ def _maybe_reshape_attention_input_for_2d_sharding(
   this function reshapes the attention inputs to remove the unnecessary
   replication.
 
-  This becomes relevent when doing 2-dimenional model parallelism.
+  This becomes relevent when doing 2-dimensional model parallelism.
   d_model is sharded over one mesh dimension and [vocab, num_heads, d_ff] are
   sharded over the other mesh dimension.  This fully distributes all of the
   einsum operations, except for the internals of the attention computation.

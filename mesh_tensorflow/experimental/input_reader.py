@@ -277,7 +277,7 @@ class SimdMeshImplInputReader(object):
         be used once and only once.
     Note:
       1. The efficiency is optimized according to the shape of the 0-th tensor:
-         mtf_input_shapes[0]. We recommand you to put the largest tensor as the
+         mtf_input_shapes[0]. We recommend you to put the largest tensor as the
          0-th input.
       2. You need to call start_infeed_thread() before your train ops.
     Example:
