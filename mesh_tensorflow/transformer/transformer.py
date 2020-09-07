@@ -15,7 +15,7 @@
 
 """MTF implementation of Transformer sequence/seq2seq model.
 
-This implmentation is meant to be extensible, allowing users to define their
+This implementation is meant to be extensible, allowing users to define their
 own custom layers.  It is meant to eventually replace the existing
 mesh-tensorflow Transformer implementation in the Tensor2Tensor library.
 
@@ -357,7 +357,7 @@ class LayerStack(TransformerLayer):
     functions.
 
     `dropout_rate` and `norm_epsilon` should only be specified in a legacy mode,
-    for compatiblity with older checkpoints.
+    for compatibility with older checkpoints.
 
     Args:
       layers: a list of TransformerLayer
@@ -471,7 +471,7 @@ def sublayer_mask_padding(x, layer_stack, context):
 
   This "fixes" a bug where extreme values leak from the padding into the
   non-padding regions.
-  TODO(noam): undertand this better and make a more principled fix.
+  TODO(noam): understand this better and make a more principled fix.
 
   Args:
     x: a Tensor
@@ -694,9 +694,9 @@ class Unitransformer(object):
         loss for the inputs portion of the example.
       loss_denominator: an optional float.  The default behavior is to
         compute the mean loss across all tokens in the batch, making the
-        denomiator the size of the targets tensor (omitting ensemble
+        denominator the size of the targets tensor (omitting ensemble
         dimensions).
-        Passing a float here provides an alternative denomiator.
+        Passing a float here provides an alternative denominator.
         One use case is that when fine-tuning a model using a much smaller
         batch size than the original training batch, one might want to use the
         same denominator as was used for the pretraining.  This complication
@@ -834,7 +834,7 @@ class Unitransformer(object):
       if (context.length_dim is not None and
           context.length_dim.size > self.max_length_dim.size):
         message = (
-            "Length dimenison exceeds size of positional embedding table. "
+            "Length dimension exceeds size of positional embedding table. "
             "length_dim.size > max_length_dim.size %s vs %s."
             % (context.length_dim, self.max_length_dim))
         if context.position_is_default:
@@ -878,7 +878,7 @@ class Unitransformer(object):
     """Denominator applied to losses.
 
     This is usually the size of the targets tensor (omitting ensemble
-    dimensions).  Alternitively, it is an override value passed to the
+    dimensions).  Alternatively, it is an override value passed to the
     class constructor.
 
     Args:
@@ -1457,7 +1457,7 @@ class Bitransformer(object):
       logits: a Tensor with shape [<batch_dims>, output_vocab_dim]
       loss: an optional Scalar (if compute_loss=True)
     """
-    # encoder_sequene_id and decoder_sequence_id are used to delineate packed
+    # encoder_sequence_id and decoder_sequence_id are used to delineate packed
     # examples but are also necessary to indicate padding where sequence_id==0.
     # If they are absent, then we assume that padding is indicated by zeros in
     # the inputs/targets, and we make up sequence_id tensors to indicate this.

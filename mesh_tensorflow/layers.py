@@ -37,7 +37,7 @@ def unit_scaling_convention(value=False):
   variance, and the outputs of most contractions (matmul/einsum operations) are
   divided by the square-root of the sizes of the contracting dimensions.
 
-  This differs from the typical inverse-square-root weight-initalization
+  This differs from the typical inverse-square-root weight-initialization
   convention often attributed to
   http://proceedings.mlr.press/v9/glorot10a.html
   in which weights are typically initialized according to a distribution with
@@ -402,7 +402,7 @@ def _depthwise_conv1d_hack(x,
     max_relative_pos: int, max relative position,
     name: str, variable_scope name,
     use_bias: Bool, whether to use bias,
-    initializer_scale: int, initalizer scale,
+    initializer_scale: int, initializer scale,
     kernel_depth_weights: an optional list of kernel weight tensors. The list
     contains one element for each relative position in the kernel. Each element
     has a width equal to the depth over which the separable conv operation is
@@ -550,7 +550,7 @@ def conv2d_with_blocks(
     padding: string, "SAME". The type of padding algorithm to use.
         "Valid" is not currently supported.
     h_blocks_dim: Dimension representing number of height blocks.
-    w_blocks_dim: Dimension representing number of witdh blocks.
+    w_blocks_dim: Dimension representing number of width blocks.
     filter_initializer: the initializer for tf.get_variable.
     variable_dtype: a mtf.VariableDType
     name: a name for the operation (optional).

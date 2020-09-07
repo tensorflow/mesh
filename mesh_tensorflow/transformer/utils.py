@@ -219,7 +219,7 @@ def tpu_mesh_shape(tpu_topology=gin.REQUIRED,
   """Create a mesh_shape for data-parallelism and model-parallelism on TPU.
 
   Example: tpu_mesh_shape("4x4", 8) -> mtf.Shape(("batch", 4), ("model", 8))
-  Since there are 4x4x2=32 total cores, and we want 8-way model paralleism.
+  Since there are 4x4x2=32 total cores, and we want 8-way model parallelism.
 
   This function is passed through gin to the argument `mesh_shape` inside the
   function `run`.
@@ -1011,7 +1011,7 @@ def encode_delimited_lm(inputs,
                         sequence_length,
                         eos_id=1,
                         include_final_eos=True):
-  """Encode inputs and targets for scoring a delimited langauge model.
+  """Encode inputs and targets for scoring a delimited language model.
 
   Args:
     inputs: list of strings
@@ -1260,7 +1260,7 @@ def score_from_strings(estimator, vocabulary, model_type, batch_size,
   evenly divide targets N times, where each input has N decodes sequentially
   in targets.
 
-  The function returns a list of floats represnenting the log-liekelihood of the
+  The function returns a list of floats representing the log-likelihood of the
   target given the input.  If `scores_filename` is present, then these are also
   written out as a text file, one per line.
 
@@ -1340,7 +1340,7 @@ def score_from_dataset(estimator, vocabulary, batch_size, sequence_length,
 
 
 
-  The function returns a list of floats represnenting the log-liekelihood of the
+  The function returns a list of floats representing the log-likelihood of the
   target given the input.  If `scores_filename` is present, then these are also
   written out as a text file, one per line.
 
@@ -1435,7 +1435,7 @@ def get_estimator(model_type, vocabulary, mesh_shape,
     use_tpu: string, the Cloud TPU to use for training
     tpu_job_name: string, name of TPU worker binary
     iterations_per_loop: integer, steps per train loop
-    cluster: a TPUClsuterResolver object
+    cluster: a TPUClusterResolver object
     init_checkpoint: a string, if not None then read in variables from this
       checkpoint path when initializing variables. Will only initialize
       variables that appear both in the current graph and the checkpoint.
@@ -2089,7 +2089,7 @@ def run(tpu_job_name,
     learning_rate_schedule: a function which takes the scalar name argument
       `step` and the numeric argument `total_train_steps` and returns the scalar
       learning rate.  Alternatively a float.  Alternatively, a list of
-      such factos to be multiplied together.
+      such factors to be multiplied together.
     optimizer: a class extending optimize.Optimizer, required for training
     predict_fn: an optional function, see `get_estimator` docstring for details.
     variable_filter: a string, see `get_estimator` docstring for details.

@@ -121,7 +121,7 @@ def beam_search(logits_fn,
 
   num_prefilter is a theoretically lossy shortcut around slow performance of
   top_k on TPU on large Tensors and large k.  This option should be removed once
-  better top_k implementations on TPU are avialable.  If num_prefilter is set to
+  better top_k implementations on TPU are available.  If num_prefilter is set to
   a nonzero value, then at each step we first compute the top num_prefilter
   sequences per beam and then compute the top k sequences overall from among
   those.  Empirically, there seems to be no quality difference in setting
@@ -321,7 +321,7 @@ def beam_search(logits_fn,
       top_scores = mtf.reshape(top_scores, [batch_dim, combined])
       top_minor_vocab_ids = mtf.reshape(
           top_minor_vocab_ids, [batch_dim, combined])
-      # shpae = [batch_dim, double_beam]
+      # shape = [batch_dim, double_beam]
       # ids are indices representing (beam, major_vocab, prefilter)
       top_scores, top_combined_ids = mtf.top_k(
           top_scores, reduced_dim=combined, k_dim=double_beam)
@@ -585,7 +585,7 @@ def greedy_decode(logits_fn,
 
   Args:
     logits_fn: Interface to the model, to provide logits.
-        Shoud take:
+        Should take:
           step_num - mtf Scalar
           ids - mtf Tensor with shape [..., length]
           states - list of mtf.Tensor
