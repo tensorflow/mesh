@@ -1609,7 +1609,8 @@ class StudentTeacher(object):
                teacher,
                temperature=None,
                fraction_soft=None,
-               teacher_checkpoint=None):
+               teacher_checkpoint=None,
+               initialize_student_weights=False):
     """Create a StudentTeacher.
 
     Args:
@@ -1623,12 +1624,16 @@ class StudentTeacher(object):
         training.
       teacher_checkpoint: a string, the path to the teacher checkpoint that we
         wish to use. Required only when training.
+      initialize_student_weights: a boolean, if true then initialize any
+        of the student weights whose name matches those in the teacher
+        checkpoint.
     """
     self.student = student
     self.teacher = teacher
     self.temperature = temperature
     self.fraction_soft = fraction_soft
     self.teacher_checkpoint = teacher_checkpoint
+    self.initialize_student_weights = initialize_student_weights
 
   def call_simple(self,
                   inputs,
@@ -1730,7 +1735,7 @@ class StudentTeacher(object):
         raise ValueError("unrecognized class")
 
   def initialize(self):
-    """Initialize the teacher model from the checkpoint.
+    """Initialize the teacher and maybe student model from the checkpoint.
 
     This function will be called after the graph has been constructed.
     """
@@ -1739,6 +1744,31 @@ class StudentTeacher(object):
       return
     vars_to_restore = tf.get_collection(
         tf.GraphKeys.GLOBAL_VARIABLES, scope="teacher")
+
+    if self.initialize_student_weights:
+      student_vars_to_restore = tf.get_collection(
+          tf.GraphKeys.GLOBAL_VARIABLES, scope="student")
+      # See what variables exist in the checkpoint
+      ckpt_vars = set([
+          name for name, _ in tf.train.list_variables(self.teacher_checkpoint)])
+      student_load_dict = {}
+      # Loop over all student variables and see if any can be loaded from ckpt
+      for var in student_vars_to_restore:
+        var_name = var.name[len("student/"):].split(":")[0]
+        if var_name in ckpt_vars:
+          student_load_dict[var_name] = var
+        else:
+          tf.logging.info("Student variable not found in ckpt: {}".format(
+              var_name))
+
+      loaded_vars = set(student_load_dict.keys())
+      tf.logging.info("Variables not restored from ckpt for student: {}".format(
+          ckpt_vars - loaded_vars))
+
+      tf.train.init_from_checkpoint(
+          self.teacher_checkpoint, student_load_dict)
+
+    # Initialize teacher weights
     tf.train.init_from_checkpoint(
         self.teacher_checkpoint,
         {v.name[len("teacher/"):].split(":")[0]: v for v in vars_to_restore})
