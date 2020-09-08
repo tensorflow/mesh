@@ -485,7 +485,7 @@ def tpu_estimator_model_fn(model_type,
           variable_dtype=get_variable_dtype())
     
       # calculate log likelihood
-      scores = compute_score(logits, targets, model_type)
+      scores = compute_scores(logits, targets, model_type)
       lowering = mtf.Lowering(graph, {mesh: mesh_impl}, autostack=autostack)
       predictions = {
           "scores": lowering.export_to_tf_tensor(scores)
@@ -527,7 +527,7 @@ def tpu_estimator_model_fn(model_type,
               variable_dtype=get_variable_dtype())
 
       # calculate log likelihood
-      scores = compute_score(logits, targets_for_score, model_type)
+      scores = compute_scores(logits, targets_for_score, model_type)
     
       mtf_samples = mtf.anonymize(mtf_samples)
       inputs = mtf.anonymize(inputs)
@@ -1217,7 +1217,7 @@ def clean_decodes(ids, eos_id=1, pad_id=0, length_axis=-1):
   return tf.where_v2(valid_ids, ids, pad_id)
 
 
-def compute_score(logits, targets, model_type):
+def compute_scores(logits, targets, model_type):
   """Compute the log likelihood given logits and targets.
   
   Args:
