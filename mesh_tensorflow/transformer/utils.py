@@ -446,9 +446,12 @@ def tpu_estimator_model_fn(model_type,
       _verify_feature_exists("inputs", True)
       # "targets" may or may not exist depending on whether we are doing
       # evaluation or open-ended inference.
-    elif model_type == "delimited_lm" and mode == "score":
+    elif model_type in ("lm", "delimited_lm") and mode == "score":
       # in scoring mode the inputs and targets may already be combined.
       if "inputs" in mtf_features:
+        if model_type == "lm":
+          tf.logging.warning(
+              "Scoring of lm models will include loss from the 'inputs'.")
         mtf_features = _dynamic_text2self(mtf_features)
     else:
       _verify_feature_exists("targets", True)
