@@ -1344,11 +1344,10 @@ def score_from_dataset(estimator, vocabulary, batch_size, sequence_length,
                        score_dataset_fn=None, scores_filename=gin.REQUIRED):
   """Compute log likelihoods per example and write to a text file.
 
-
-
-  The function returns a list of floats represnenting the log-liekelihood of the
+  The function returns a list of floats representing the log-likelihood of the
   target given the input.  If `scores_filename` is present, then these are also
-  written out as a text file, one per line.
+  written out as a text file, one per line. If multiple datasets are returned,
+  their scores will be concatenated.
 
   Args:
     estimator: a TPUEstimator
@@ -1365,21 +1364,24 @@ def score_from_dataset(estimator, vocabulary, batch_size, sequence_length,
     scores_filename: a string (path of file to write)
 
   Returns:
-    a list of floats
+    scores: a list of floats, the log likelihood scores
+    targets: a list of strings, scored targets
   """
   scoring_datasets = score_dataset_fn(
       sequence_length=sequence_length,
       vocabulary=vocabulary,
       dataset_split=dataset_split)
-  if len(scoring_datasets) != 1:
-    raise ValueError("Only scoring from a single dataset supported.")
-  scoring_dataset = scoring_datasets[0]
 
   def input_fn(params):
     """Eval input function for estimator."""
     del params
-    dataset = scoring_dataset.dataset_fn()
-    dataset = dataset.map(_filter_features)
+
+    dataset = None
+    for scoring_dataset in scoring_datasets:
+      ds = scoring_dataset.dataset_fn()
+      ds = ds.map(_filter_features)
+      dataset = dataset.concatenate(ds) if dataset else ds
+
     dataset = dataset.batch(batch_size, drop_remainder=False)
     # Pad the final batch.
     dataset = transformer_dataset.trim_and_pad_dataset(
