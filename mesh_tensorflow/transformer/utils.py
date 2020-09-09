@@ -1235,6 +1235,9 @@ def _score_with_estimator(estimator, input_fn, eval_checkpoint_step, model_dir,
     scores.append(m["scores"])
     targets.append(m["targets"])
   # Remove any padding examples
+  if num_examples is None:
+    num_padded = next((i for i, x in enumerate(targets[::-1]) if x.any()), None)
+    num_examples = len(targets) - num_padded
   scores = scores[:num_examples]
   targets = targets[:num_examples]
   if scores_filename is not None:
@@ -1384,8 +1387,6 @@ def score_from_dataset(estimator, vocabulary, batch_size, sequence_length,
     dataset = dataset.prefetch(tf.data.experimental.AUTOTUNE)
     return dataset
 
-  # TODO(dei): Since we pass in the num_examples as None, scores for the
-  # padding examples will get written to the output file. Should fix this.
   scores, targets = _score_with_estimator(
       estimator, input_fn, eval_checkpoint_step, model_dir, scores_filename,
       None)
