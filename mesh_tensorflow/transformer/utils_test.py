@@ -30,7 +30,7 @@ tf.disable_v2_behavior()
 
 class UtilsTest(parameterized.TestCase, tf.test.TestCase):
 
-  def testDynamicText2self(self):
+  def testDynamicText2self_packed(self):
     batch = 2
     length = 5
     input_tensors = {
@@ -63,6 +63,39 @@ class UtilsTest(parameterized.TestCase, tf.test.TestCase):
         "targets_position": [
             [0, 1, 2, 0, 1, 2, 0, 0, 0, 0],
             [0, 1, 2, 3, 0, 1, 2, 3, 4, 5]]
+    }
+    graph = mtf.Graph()
+    mesh = mtf.Mesh(graph, "my_mesh")
+    batch_dim = mtf.Dimension("batch", batch)
+    length_dim = mtf.Dimension("length", length)
+
+    input_shape = mtf.Shape([batch_dim, length_dim])
+    mtf_features = {k: mtf.import_tf_tensor(mesh, v, input_shape)
+                    for k, v in input_tensors.items()}
+    mtf_outputs = utils._dynamic_text2self(mtf_features)
+    mesh_impl = mtf.placement_mesh_impl.PlacementMeshImpl(
+        shape=[], layout={}, devices=[""])
+    lowering = mtf.Lowering(graph, {mesh: mesh_impl})
+    for k, v in expected_output_tensors.items():
+      out = lowering.export_to_tf_tensor(mtf_outputs[k])
+      actual = self.evaluate(out)
+      self.assertAllEqual(actual, v)
+
+  def testDynamicText2self_unpacked(self):
+    batch = 2
+    length = 5
+    input_tensors = {
+        "inputs": [
+            [3, 1, 4, 1, 0],
+            [1, 4, 3, 2, 1]],
+        "targets": [
+            [1, 1, 0, 0, 0],
+            [9, 8, 1, 2, 1]],
+    }
+    expected_output_tensors = {
+        "targets": [
+            [3, 1, 4, 1, 1, 1, 0, 0, 0, 0],
+            [1, 4, 3, 2, 1, 9, 8, 1, 2, 1]],
     }
     graph = mtf.Graph()
     mesh = mtf.Mesh(graph, "my_mesh")

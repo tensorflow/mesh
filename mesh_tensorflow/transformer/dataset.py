@@ -108,22 +108,25 @@ def pack_or_pad(
     dataset: a tf.data.Dataset
     length: an integer or a dict from feature-key to integer
     pack: a boolean, whether to pack (True) or pad (False).
-    feature_keys: (optional) list of strings, the feature names to limit
+    feature_keys: (optional) collection of strings, the feature names to limit
       packing or padding to. Packing will filter out other features whereas
       padding will pass them through unchanged. Defaults to all features.
-    ensure_eos: a boolean, whether to replace the final token with EOS=1 if it
-      is not PAD=0.
+    ensure_eos: a boolean or collection of strings, whether to replace the final
+      token with EOS=1 if it is not PAD=0. If True, will be applied to all keys
+      in `feature_keys`. If False, will be applied to none. If a collection of
+      strings, will only be applied to these features in the collection.
   Returns:
     a tf.data.Dataset where all features have fixed shape [length].
   """
-  feature_keys = feature_keys or list(tf.data.get_output_shapes(dataset).keys())
+  feature_keys = set(feature_keys or tf.data.get_output_shapes(dataset).keys())
   if pack:
     dataset = pack_dataset(dataset, length=length, keys=feature_keys)
   # Pad/trim length of each example to length.
   dataset = trim_and_pad_dataset(
       dataset, length=length, feature_keys=feature_keys)
   if ensure_eos:
-    dataset = ensure_dataset_eos(dataset, feature_keys)
+    eos_keys = feature_keys if isinstance(ensure_eos, bool) else ensure_eos
+    dataset = ensure_dataset_eos(dataset, eos_keys)
   return dataset
 
 
@@ -132,12 +135,12 @@ def ensure_dataset_eos(dataset, feature_keys=None):
 
   Args:
     dataset: a tf.data.Dataset
-    feature_keys: (optional) list of strings, the feature names to ensure end
-      with EOS or padding. Defaults to all features.
+    feature_keys: (optional) collection of strings, the feature names to ensure
+      end with EOS or padding. Defaults to all features.
   Returns:
     a tf.data.Dataset where all specified features end with PAD=0 or EOS=1.
   """
-  feature_keys = feature_keys or tf.data.get_output_shapes(dataset).keys()
+  feature_keys = feature_keys or set(tf.data.get_output_shapes(dataset).keys())
   def _ensure_eos(k, v):
     if k not in feature_keys:
       return v
@@ -512,7 +515,7 @@ def pack_dataset(dataset, length, keys=None, use_custom_ops=False):
   Args:
     dataset: a tf.data.Dataset
     length: an integer, or a dict from feature-key to integer
-    keys: a list of strings (e.g. ["inputs", "targets"])
+    keys: a collection of strings (e.g. ["inputs", "targets"])
     use_custom_ops: a boolean - custom ops are faster but require a custom-built
       binary, which is not currently possible on cloud-tpu.
 
@@ -564,7 +567,7 @@ def _pack_with_tf_ops(dataset, keys, length):
 
   Args:
     dataset: a dataset containing padded batches of examples.
-    keys: a list of strings
+    keys: a collection of strings
     length: an dict from feature-key to integer
 
   Returns:
@@ -599,7 +602,8 @@ def _pack_with_tf_ops(dataset, keys, length):
     """
     partial = empty_example.copy()
     i = tf.zeros([], dtype=tf.int32)
-    dynamic_batch_size = tf.shape(x[keys[0]])[0]
+    first_key, *_ = keys
+    dynamic_batch_size = tf.shape(x[first_key])[0]
     outputs = {}
     for k in keys:
       outputs[k] = tf.TensorArray(
@@ -677,7 +681,7 @@ def _pack_with_custom_ops(dataset, keys, length):
 
   Args:
     dataset: a dataset containing padded batches of examples.
-    keys: a list of strings (must have length 1 or 2)
+    keys: a collection of strings (must have length 1 or 2)
     length: a dictionary from key to integer
 
   Returns:
@@ -722,7 +726,7 @@ def trim_and_pad_dataset(dataset, length, feature_keys=None):
   Args:
     dataset: tf.data.Dataset, the dataset to trimp/pad examples in.
     length: int, or a dict from feature-key to int
-    feature_keys: (optional) list of strings, the feature names to limit
+    feature_keys: (optional) collection of strings, the feature names to limit
       trimming/padding to. Defaults to all features.
   Returns:
     Trimmed/padded tf.data.Dataset.

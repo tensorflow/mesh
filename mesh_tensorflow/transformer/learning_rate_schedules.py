@@ -228,7 +228,7 @@ def learning_rate_schedule_noam(step,
   Returns:
     a tf.Scalar, the learning rate for the step.
   """
-  train_steps = float(total_train_steps)
+  train_steps = float(total_train_steps) - offset
   step_num = tf.cast(step, tf.float32) - offset
   learning_rate = tf.math.rsqrt(tf.maximum(step_num, warmup_steps))
   learning_rate *= multiplier

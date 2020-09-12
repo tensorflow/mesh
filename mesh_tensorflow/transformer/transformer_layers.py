@@ -380,6 +380,101 @@ class SelfAttention(transformer.TransformerLayer):
 
 
 @gin.configurable
+class ExpertsSelfAttention(SelfAttention):
+  """Expert-layers for SelfAttention computations."""
+
+  def __init__(self,
+               num_experts=16,
+               loss_coef=1e-2,
+               group_size=1024,
+               capacity_factor_train=1.25,
+               capacity_factor_eval=2.0,
+               moe_gating="switch",
+               min_expert_capacity=4,
+               rand_1_policy_train="input_jitter",
+               rand_1_policy_eval="input_jitter",
+               rand_1_dropout=0.0,
+               rand_1_temperature=1.0,
+               rand_1_jitter=1e-2,
+               switch_top_k=4,
+               hidden_size=3072,
+               use_experts_attention=True,
+               **kwargs):
+    super(ExpertsSelfAttention, self).__init__(**kwargs)
+    self._hparams = mtf.transformer.moe.HParams(
+        moe_gating=moe_gating,
+        num_experts=num_experts,
+        loss_coef=loss_coef,
+        group_size=group_size,
+        min_expert_capacity=min_expert_capacity,
+        capacity_factor_train=capacity_factor_train,
+        capacity_factor_eval=capacity_factor_eval,
+        rand_1_policy_train=rand_1_policy_train,
+        rand_1_policy_eval=rand_1_policy_eval,
+        rand_1_dropout=rand_1_dropout,
+        rand_1_temperature=rand_1_temperature,
+        rand_1_jitter=rand_1_jitter,
+        switch_top_k=switch_top_k,
+        hidden_size=hidden_size,
+        use_experts_attention=use_experts_attention)
+
+  def make_params(self, context):
+    num_heads = self.num_heads
+    num_memory_heads = self.num_memory_heads
+    if num_heads == 1:
+      query_heads_dims = None
+      memory_heads_dims = None
+    elif num_memory_heads == 0:
+      query_heads_dims = [mtf.Dimension("heads", num_heads)]
+      memory_heads_dims = query_heads_dims
+    elif num_memory_heads == 1:
+      query_heads_dims = [mtf.Dimension("heads", num_heads)]
+      memory_heads_dims = None
+    else:
+      if num_heads % num_memory_heads != 0:
+        raise ValueError("num_memory_heads must divide num_heads")
+      memory_heads_dims = [mtf.Dimension("heads", num_memory_heads)]
+      query_heads_dims = memory_heads_dims + [
+          mtf.Dimension("query_heads", num_heads // num_memory_heads)]
+
+    return attention.ExpertsAttentionParams(
+        context.mesh,
+        query_input_dim=context.model.model_dim,
+        memory_input_dim=context.model.model_dim,
+        output_dim=context.model.model_dim,
+        key_dim=self.kv_dim,
+        value_dim=self.kv_dim,
+        query_heads_dims=query_heads_dims,
+        memory_heads_dims=memory_heads_dims,
+        variable_dtype=context.variable_dtype,
+        shared_kv=self.shared_kv,
+        no_query=False,
+        ensemble_dim=context.model.ensemble_dim,
+        combine_dims=self.combine_dims,
+        keep_query_heads_dims=self.keep_query_heads_dims,
+        fold_scaling_into_initializer=self.fold_scaling_into_initializer,
+        context=context,
+        experts_hparams=self._hparams)
+
+
+@gin.configurable
+class ExpertsEncDecAttention(ExpertsSelfAttention):
+  """Expert-layers for EncDecAttention computations."""
+
+  def __init__(self, relative_attention_type=None, **kwargs):
+    super(ExpertsEncDecAttention, self).__init__(
+        relative_attention_type=relative_attention_type, **kwargs)
+
+  def _get_memory_antecedent(self, context):
+    return context.encoder_output
+
+  def call(self, context, x, losses=None):
+    """Call the layer."""
+    return enc_dec_attention(self, self._get_memory_antecedent(context),
+                             context, x, losses)
+
+
+@gin.configurable
 class Synthesizer(SelfAttention):
   """Multi-head Synthesizer layer https://arxiv.org/abs/2005.00743."""
 
@@ -396,6 +491,7 @@ class Synthesizer(SelfAttention):
                combine_dims=True,
                keep_query_heads_dims=False,
                synthesize_mode="random_plus_alpha",
+               fold_scaling_into_initializer=True,
                **kwargs):
     """Create a Synthesizer Layer.
 
@@ -413,6 +509,7 @@ class Synthesizer(SelfAttention):
       combine_dims: a boolean
       keep_query_heads_dims: a boolean
       synthesize_mode: a string to select synthesizer variant
+      fold_scaling_into_initializer: a boolean
       **kwargs: additional constructor params
     """
     super(Synthesizer, self).__init__(**kwargs)
@@ -428,6 +525,7 @@ class Synthesizer(SelfAttention):
     self.combine_dims = combine_dims
     self.keep_query_heads_dims = keep_query_heads_dims
     self.synthesize_mode = synthesize_mode
+    self.fold_scaling_into_initializer = fold_scaling_into_initializer
     self.no_query = False
     if "plus" in self.synthesize_mode:
       self.shared_kv = False
@@ -441,12 +539,14 @@ class Synthesizer(SelfAttention):
       self.no_query = True
 
   def make_params(self, context):
-    return attention_params(context=context,
-                            kv_dim=self.kv_dim,
-                            num_heads=self.num_heads,
-                            num_memory_heads=self.num_memory_heads,
-                            shared_kv=self.shared_kv,
-                            no_query=self.no_query)
+    return attention_params(
+        context=context,
+        kv_dim=self.kv_dim,
+        num_heads=self.num_heads,
+        num_memory_heads=self.num_memory_heads,
+        shared_kv=self.shared_kv,
+        no_query=self.no_query,
+        fold_scaling_into_initializer=self.fold_scaling_into_initializer)
 
   def call(self, context, x, losses=None):
     """Call the layer."""
