@@ -113,7 +113,8 @@ class MoE1D(transformer.TransformerLayer):
         layout=context.model.layout,
         mesh_shape=context.model.mesh_shape,
         nonpadding=context.nonpadding,
-        activation=self._activation)
+        activation=self._activation,
+        num_microbatches=context.num_microbatches)
     if context.losses is not None:
       context.losses.append(loss)
     if not has_length_dim:
@@ -176,7 +177,8 @@ class MoE2D(transformer.TransformerLayer):
         context.variable_dtype,
         layout=context.model.layout,
         mesh_shape=context.model.mesh_shape,
-        nonpadding=context.nonpadding)
+        nonpadding=context.nonpadding,
+        num_microbatches=context.num_microbatches)
     if context.losses is not None:
       context.losses.append(loss)
     if not has_length_dim:
@@ -186,7 +188,8 @@ class MoE2D(transformer.TransformerLayer):
 
 def transformer_moe_layer_v1(
     inputs, output_dim, hparams, train, variable_dtype,
-    layout=None, mesh_shape=None, nonpadding=None, activation=mtf.relu):
+    layout=None, mesh_shape=None, nonpadding=None, activation=mtf.relu,
+    num_microbatches=None):
   """Local mixture of experts that works well on TPU.
 
   Adapted from the paper https://arxiv.org/abs/1701.06538
@@ -260,6 +263,7 @@ def transformer_moe_layer_v1(
       and the same dtype as inputs, consisting of ones(nonpadding)
       and zeros(padding).
     activation: a function.
+    num_microbatches: number of microbatches.
 
   Returns:
     outputs: a Tensor with shape [batch_dim(s), length_dim, output_dim]
@@ -383,7 +387,8 @@ def transformer_moe_layer_v1(
         hparams=hparams,
         train=train,
         variable_dtype=variable_dtype,
-        importance=nonpadding)
+        importance=nonpadding,
+        num_microbatches=num_microbatches)
   elif hparams.moe_gating == "rand_1":
     dispatch_tensor, combine_tensor, loss = _rand_1_gating(
         inputs=inputs,
@@ -393,7 +398,8 @@ def transformer_moe_layer_v1(
         hparams=hparams,
         train=train,
         variable_dtype=variable_dtype,
-        importance=nonpadding)
+        importance=nonpadding,
+        num_microbatches=num_microbatches)
   elif hparams.moe_gating == "switch":
     dispatch_tensor, combine_tensor, loss = _switch_gating(
         inputs=inputs,
@@ -403,7 +409,8 @@ def transformer_moe_layer_v1(
         hparams=hparams,
         train=train,
         variable_dtype=variable_dtype,
-        importance=nonpadding)
+        importance=nonpadding,
+        num_microbatches=num_microbatches)
   else:
     raise ValueError("unknown hparams.moe_gating=%s" % hparams.moe_gating)
 
@@ -470,7 +477,7 @@ def transformer_moe_layer_v1(
 
 def transformer_moe_layer_v2(
     inputs, output_dim, hparams, train, variable_dtype,
-    layout=None, mesh_shape=None, nonpadding=None):
+    layout=None, mesh_shape=None, nonpadding=None, num_microbatches=None):
   """2-level mixture of experts.
 
   Adapted from the paper https://arxiv.org/abs/1701.06538
@@ -569,6 +576,7 @@ def transformer_moe_layer_v2(
     nonpadding: an optional mtf.Tensor with shape [a, b, l]
       and the same dtype as inputs, consisting of ones(nonpadding)
       and zeros(padding).
+    num_microbatches: number of microbatches.
 
   Returns:
     outputs: a Tensor with shape [a, b, l, n]
@@ -650,7 +658,8 @@ def transformer_moe_layer_v2(
         train=train,
         variable_dtype=variable_dtype,
         name="outer_gating",
-        importance=nonpadding)
+        importance=nonpadding,
+        num_microbatches=num_microbatches)
   else:
     raise ValueError("unknown hparams.moe_gating=%s" % hparams.moe_gating)
 
@@ -690,7 +699,8 @@ def transformer_moe_layer_v2(
         train=train,
         variable_dtype=variable_dtype,
         importance=importance,
-        name="inner_gating")
+        name="inner_gating",
+        num_microbatches=num_microbatches)
   else:
     raise ValueError("unknown hparams.moe_gating=%s" % hparams.moe_gating)
 
@@ -749,7 +759,8 @@ def _switch_gating(inputs,
                    train,
                    variable_dtype,
                    importance=None,
-                   name="switch_gating"):
+                   name="switch_gating",
+                   num_microbatches=None):
   """Compute a switch top-1 gating with no-token-left behind behavior."""
   # SELECT EXPERT
   if train:
@@ -794,6 +805,10 @@ def _switch_gating(inputs,
   loss = (
       mtf.reduce_mean(density_1_proxy * density_1) *
       float(experts_dim.size * experts_dim.size))
+  if num_microbatches > 1:
+    tf.logging.info("Dividing load-balance loss by num_microbatches={}".format(
+        num_microbatches))
+    loss /= num_microbatches
 
   # Logging
   if train:
@@ -877,7 +892,8 @@ def _switch_gating(inputs,
 
 def _rand_1_gating(
     inputs, outer_expert_dims, experts_dim, expert_capacity_dim,
-    hparams, train, variable_dtype, importance=None, name="rand_1_gating"):
+    hparams, train, variable_dtype, importance=None, name="rand_1_gating",
+    num_microbatches=None):
   """Compute a random top-1 gating."""
   # SELECT EXPERT
   if train:
@@ -929,6 +945,10 @@ def _rand_1_gating(
   loss = (
       mtf.reduce_mean(density_1_proxy * density_1) *
       float(experts_dim.size * experts_dim.size))
+  if num_microbatches > 1:
+    tf.logging.info("Dividing load-balance loss by num_microbatches={}".format(
+        num_microbatches))
+    loss /= num_microbatches
 
   # Logging
   if train:
@@ -985,7 +1005,8 @@ def _rand_1_gating(
 
 def _top_2_gating(
     inputs, outer_expert_dims, experts_dim, expert_capacity_dim,
-    hparams, train, variable_dtype, importance=None, name="top_2_gating"):
+    hparams, train, variable_dtype, importance=None, name="top_2_gating",
+    num_microbatches=None):
   """Compute gating for mixture-of-experts in TensorFlow.
 
   Note: until the algorithm and inferface solidify, we pass in a hyperparameters
@@ -1038,6 +1059,7 @@ def _top_2_gating(
     variable_dtype: a mtf.VariableDType
     importance: an optional tensor with shape [<batch_dims>, group_size_dim]
     name: an optional string
+    num_microbatches: number of microbatches.
 
   Returns:
     dispatch_tensor: a Tensor with shape
@@ -1108,6 +1130,10 @@ def _top_2_gating(
     loss_2 = (mtf.reduce_mean(density_2_proxy * density_2)
               * float(experts_dim.size * experts_dim.size))
     loss += loss_2 * 0.5
+  if num_microbatches > 1:
+    tf.logging.info("Dividing load-balance loss by num_microbatches={}".format(
+        num_microbatches))
+    loss /= num_microbatches
 
   # Depending on the policy in the hparams, we may drop out some of the
   # second-place experts.
