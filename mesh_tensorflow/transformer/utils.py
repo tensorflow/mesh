@@ -1211,7 +1211,7 @@ def clean_decodes(ids, eos_id=1, pad_id=0, length_axis=-1):
 
 
 def _score_with_estimator(estimator, input_fn, eval_checkpoint_step, model_dir,
-                          scores_filename, num_examples=None):
+                          scores_filename=None, num_examples=None):
   """For each example returned by input_fn, compute log likelihood.
 
   Args:
@@ -1407,7 +1407,7 @@ def get_estimator(model_type, vocabulary, mesh_shape,
                   save_checkpoints_steps, optimizer, predict_fn,
                   variable_filter, ensemble_inputs, use_tpu, tpu_job_name,
                   iterations_per_loop, cluster, init_checkpoint=None,
-                  mesh_devices=None):
+                  mesh_devices=None, score_in_predict_mode=False):
   """Create TPU estimator for the transfomer Mesh-TF model.
 
   Args:
@@ -1447,6 +1447,8 @@ def get_estimator(model_type, vocabulary, mesh_shape,
       variables that appear both in the current graph and the checkpoint.
     mesh_devices: a list of strings, the device names to use for each mesh
       slice. Only required for GPU.
+    score_in_predict_mode: a bool, compute log-likelihood scores instead of
+      predictions.
   Returns:
     an Estimator object.
   """
@@ -1492,7 +1494,8 @@ def get_estimator(model_type, vocabulary, mesh_shape,
       variable_filter=variable_filter,
       ensemble_inputs=ensemble_inputs,
       init_checkpoint=init_checkpoint,
-      mesh_devices=mesh_devices)
+      mesh_devices=mesh_devices,
+      score_in_predict_mode=score_in_predict_mode)
 
   estimator = tpu_estimator.TPUEstimator(
       model_fn=model_fn,
@@ -1595,7 +1598,7 @@ def infer_model(estimator,
 
 def eval_model(estimator, vocabulary, sequence_length, batch_size,
                dataset_split, model_dir, eval_dataset_fn, eval_summary_dir,
-               eval_checkpoint_step):
+               eval_checkpoint_step, eval_with_score=False):
   """Eval a Mesh-TF model.
 
   Args:
@@ -1631,6 +1634,8 @@ def eval_model(estimator, vocabulary, sequence_length, batch_size,
       whose global steps are closest to the global steps provided. If None and
       mode="eval", run eval continuously waiting for new checkpoints via
       `tf.train.checkpoints_iterator`.
+    eval_with_score: bool, whether to evaluate using log likelihood scores of
+      targets instead of decoded predictions.
   """
   if eval_dataset_fn is None:
     raise ValueError("Must provide eval_dataset_fn through gin for eval.")
@@ -1714,17 +1719,25 @@ def eval_model(estimator, vocabulary, sequence_length, batch_size,
   for checkpoint_path in checkpoint_paths:
     tf.logging.info("Checkpoint path %s" % checkpoint_path)
     global_step = int(get_step_from_checkpoint_path(checkpoint_path))
-    decodes = decode(estimator, input_fn, vocabulary, checkpoint_path)
+    if eval_with_score:
+      outputs, _ = _score_with_estimator(
+          estimator, input_fn, global_step, model_dir,
+          num_examples=sum(len(cex) for cex in cached_examples.values()))
+    else:
+      outputs = [
+          tf.compat.as_text(d) for d in
+          decode(estimator, input_fn, vocabulary, checkpoint_path)
+      ]
     for eval_dataset in eval_datasets:
       # Extract the portion of decodes corresponding to this dataset
       examples = cached_examples[eval_dataset.name]
       dataset_size = len(examples)
       predictions = [
-          eval_dataset.postprocess_fn(tf.compat.as_text(d), example=ex)
-          for d, ex in zip(decodes[:dataset_size], examples)
+          eval_dataset.postprocess_fn(d, example=ex)
+          for d, ex in zip(outputs[:dataset_size], examples)
       ]
       # Remove the used decodes.
-      del decodes[:dataset_size]
+      del outputs[:dataset_size]
 
       global_step = int(get_step_from_checkpoint_path(checkpoint_path))
 
@@ -1747,9 +1760,9 @@ def eval_model(estimator, vocabulary, sequence_length, batch_size,
 
     # Only padding should remain.
     expected_pad = -sum(len(t) for t in cached_targets.values()) % batch_size
-    if len(decodes) != expected_pad:
-      raise ValueError("{} padded decodes, {} expected.".format(
-          len(decodes), expected_pad))
+    if outputs and len(outputs) != expected_pad:
+      raise ValueError("{} padded outputs, {} expected.".format(
+          len(outputs), expected_pad))
 
 
 def export_model(estimator, export_dir, vocabulary, sequence_length,
@@ -2076,8 +2089,14 @@ def run(tpu_job_name,
     export_checkpoint_step: int or None, see `export_model` doc string for
       details.
     export_path: a string, path to export the saved model
-    mode: string, train/eval/perplexity_eval/infer
-      perplexity_eval computes the perplexity of the dev set.
+    mode: string, one of
+      train - train the model
+      eval - eval the model by decoding predictions
+      score_eval - eval the model by computing log likelihood scores of targets
+      perplexity_eval - eval the model by computing perplexity
+      infer - decode predictions based on inputs
+      score_from_dataset - compute scores of targets from a dataset
+      score_from_strings - compute scores of targets from strings or a file
     iterations_per_loop: integer, steps per train loop
     save_checkpoints_steps: integer, see `get_estimator` docstring.
     keep_checkpoint_max: an integer, see `get_estimator` docstring.
@@ -2169,7 +2188,8 @@ def run(tpu_job_name,
       tpu_job_name=tpu_job_name,
       iterations_per_loop=iterations_per_loop,
       cluster=cluster,
-      mesh_devices=mesh_devices)
+      mesh_devices=mesh_devices,
+      score_in_predict_mode="score" in mode)
 
   if mode == "train":
     # train_dataset_fn could be None if train_model_fn is not equal to
@@ -2221,10 +2241,10 @@ def run(tpu_job_name,
             steps=perplexity_eval_steps,
             checkpoint_path=checkpoint_path,
             name=name)
-  elif mode == "eval":
+  elif mode in ("eval", "score_eval"):
     eval_model(estimator, vocabulary, sequence_length, batch_size,
                dataset_split, model_dir, eval_dataset_fn, eval_summary_dir,
-               eval_checkpoint_step)
+               eval_checkpoint_step, eval_with_score=(mode == "score_eval"))
   elif mode == "infer":
     infer_model(estimator, vocabulary, sequence_length, batch_size, model_type,
                 model_dir, eval_checkpoint_step)
