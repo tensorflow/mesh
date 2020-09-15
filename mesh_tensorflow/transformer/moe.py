@@ -805,7 +805,7 @@ def _switch_gating(inputs,
   loss = (
       mtf.reduce_mean(density_1_proxy * density_1) *
       float(experts_dim.size * experts_dim.size))
-  if num_microbatches > 1:
+  if num_microbatches and num_microbatches > 1:
     tf.logging.info("Dividing load-balance loss by num_microbatches={}".format(
         num_microbatches))
     loss /= num_microbatches
@@ -945,7 +945,7 @@ def _rand_1_gating(
   loss = (
       mtf.reduce_mean(density_1_proxy * density_1) *
       float(experts_dim.size * experts_dim.size))
-  if num_microbatches > 1:
+  if num_microbatches and num_microbatches > 1:
     tf.logging.info("Dividing load-balance loss by num_microbatches={}".format(
         num_microbatches))
     loss /= num_microbatches
@@ -1130,7 +1130,7 @@ def _top_2_gating(
     loss_2 = (mtf.reduce_mean(density_2_proxy * density_2)
               * float(experts_dim.size * experts_dim.size))
     loss += loss_2 * 0.5
-  if num_microbatches > 1:
+  if num_microbatches and num_microbatches > 1:
     tf.logging.info("Dividing load-balance loss by num_microbatches={}".format(
         num_microbatches))
     loss /= num_microbatches
