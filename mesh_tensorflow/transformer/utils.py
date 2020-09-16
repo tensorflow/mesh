@@ -494,8 +494,9 @@ def tpu_estimator_model_fn(model_type,
       batch_dim, length_dim, vocab_dim = logits.shape.dims
       cross_entropy = mtf.layers.softmax_cross_entropy_with_logits(
           logits, mtf_features["targets"], vocab_dim)
+      # 0=padding and negative targets are a hack to indicate no loss
       cross_entropy *= mtf.cast(
-          mtf.not_equal(targets, 0), cross_entropy.dtype)
+          mtf.greater(targets, 0), cross_entropy.dtype)
       if model_type == "delimited_lm":
         cross_entropy *= mtf.cast(mtf.logical_not(
             transformer.delimited_lm_inputs_mask(targets)), cross_entropy.dtype)
@@ -777,7 +778,8 @@ def tpu_estimator_model_fn(model_type,
       predictions = mtf.cast(mtf.argmax(logits, vocab_dim), targets.dtype)
       anon_predictions = mtf.anonymize(predictions)
       anon_targets = mtf.anonymize(targets)
-      anon_weights = mtf.layers.weights_nonzero(anon_targets, dtype=tf.float32)
+      # 0=padding and negative targets are a hack to indicate no loss
+      anon_weights = mtf.cast(mtf.greater(anon_targets, 0), tf.float32)
       if model_type == "delimited_lm":
         anon_weights *= mtf.cast(
             mtf.logical_not(transformer.delimited_lm_inputs_mask(anon_targets)),
@@ -972,7 +974,8 @@ def encode_inputs(inputs,
                   model_type,
                   batch_size,
                   sequence_length,
-                  eos_id=1):
+                  eos_id=1,
+                  unscored_prefix=None):
   """Encode string inputs for inference/scoring.
 
   Args:
@@ -982,14 +985,18 @@ def encode_inputs(inputs,
     batch_size: an integer
     sequence_length: an integer (maximum decode length)
     eos_id: EOS id
+    unscored_prefix: an optional list of strings
 
   Returns:
     all_input_ids: encoded inputs
   """
   n = len(inputs)
   all_input_ids = []
-  for line in inputs:
+  for line_num, line in enumerate(inputs):
     ids = inputs_vocabulary(vocabulary).encode(line.strip())
+    if unscored_prefix:
+      prefix_str = unscored_prefix[line_num].strip()
+      ids = [-i for i in inputs_vocabulary(vocabulary).encode(prefix_str)] + ids
     if model_type != "lm":
       # for text2self problems, the inputs represent a partial sequence
       # to be continued, and should not be terminated by EOS.
@@ -1311,12 +1318,19 @@ def score_from_strings(estimator, vocabulary, model_type, batch_size,
       if len(targets) != 1:
         raise ValueError("Expected only one target string")
       targets = targets * len(inputs)
-  if has_inputs:
-    all_input_ids = encode_inputs(inputs, vocabulary, model_type, batch_size,
-                                  sequence_length["inputs"], eos_id=eos_id)
-  all_target_ids = encode_inputs(
-      targets, vocabulary, model_type, batch_size,
-      sequence_length["targets"], eos_id=eos_id if score_eos else 0)
+  if has_inputs and model_type == "lm":
+    has_inputs = False
+    all_target_ids = encode_inputs(
+        targets, vocabulary, model_type, batch_size,
+        sequence_length["targets"], eos_id=eos_id if score_eos else 0,
+        unscored_prefix=inputs)
+  else:
+    if has_inputs:
+      all_input_ids = encode_inputs(inputs, vocabulary, model_type, batch_size,
+                                    sequence_length["inputs"], eos_id=eos_id)
+    all_target_ids = encode_inputs(
+        targets, vocabulary, model_type, batch_size,
+        sequence_length["targets"], eos_id=eos_id if score_eos else 0)
 
   def input_fn(params):
     del params

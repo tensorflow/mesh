@@ -769,7 +769,7 @@ class Unitransformer(object):
     off_value = self.label_smoothing / output_vocab_dim.size
     on_value = 1.0 - self.label_smoothing + off_value
     soft_targets = mtf.one_hot(
-        targets,
+        mtf.maximum(targets, 0),
         output_vocab_dim,
         dtype=context.activation_dtype,
         on_value=on_value,
@@ -779,8 +779,7 @@ class Unitransformer(object):
         soft_targets,
         output_vocab_dim,
         z_loss=self.z_loss if context.train else 0.0)
-    weights = mtf.layers.weights_nonzero(
-        targets, dtype=context.activation_dtype)
+    weights = mtf.cast(mtf.greater(targets, 0), context.activation_dtype)
     if self.loss_on_targets_only:
       weights *= mtf.cast(mtf.logical_not(delimited_lm_inputs_mask(targets)),
                           dtype=context.activation_dtype)
@@ -943,6 +942,9 @@ class Unitransformer(object):
       logits: a Tensor with shape [<batch_dims>, output_vocab_dim]
       loss: an optional Scalar (if compute_loss=True)
     """
+    # Negative ids are used to indicate masked loss during training.
+    # Switch them back to positive numbers.
+    inputs = mtf.abs(inputs)
     batch_dims = inputs.shape.dims[:-1]
     length_dim = inputs.shape.dims[-1]
     length_range = mtf.range(inputs.mesh, length_dim, dtype=tf.int32)
@@ -1703,8 +1705,7 @@ class StudentTeacher(object):
         z_loss=z_loss)
 
     # Ignore losses from padding regions.
-    weights = mtf.layers.weights_nonzero(
-        targets, dtype=variable_dtype.activation_dtype)
+    weights = mtf.cast(mtf.greater(targets, 0), soft_loss.dtype)
     soft_loss = (mtf.reduce_sum(soft_loss * weights) /
                  self.student.loss_denominator(targets, num_microbatches))
 
