@@ -1218,7 +1218,8 @@ def clean_decodes(ids, eos_id=1, pad_id=0, length_axis=-1):
 
 
 def _score_with_estimator(estimator, input_fn, eval_checkpoint_step, model_dir,
-                          scores_filename=None, num_examples=None):
+                          score_postprocess_fn, vocabulary,
+                          num_examples=None):
   """For each example returned by input_fn, compute log likelihood.
 
   Args:
@@ -1228,7 +1229,10 @@ def _score_with_estimator(estimator, input_fn, eval_checkpoint_step, model_dir,
     eval_checkpoint_step: int, list of ints, or None, see `eval_model`
       docstring.
     model_dir: string, estimator model_dir
-    scores_filename: a string (path of file to write scores to)
+    score_postprocess_fn: Function that takes in model outputs and
+      post-processes, saves, and returns then.
+    vocabulary: a vocabulary.Vocabulary or (inputs_vocabulary,
+      targets_vocabulary) tuple
     num_examples: int, the total # of examples being scored, None if unknown
 
   Returns:
@@ -1237,20 +1241,62 @@ def _score_with_estimator(estimator, input_fn, eval_checkpoint_step, model_dir,
   checkpoint_path, = get_checkpoint_iterator(eval_checkpoint_step, model_dir)
 
   result_iter = estimator.predict(input_fn, checkpoint_path=checkpoint_path)
-  scores, targets = [], []
-  for m in result_iter:
-    scores.append(m["scores"])
-    targets.append(m["targets"])
-  # Remove any padding examples
+  # TODO(dei): This code is not well-designed for large-scale scoring, where the
+  # number of examples might exceed available memory.
+  results = list(result_iter)
+
   if num_examples is None:
+    targets = [r["targets"] for r in results]
     num_padded = next((i for i, x in enumerate(targets[::-1]) if x.any()), None)
     num_examples = len(targets) - num_padded
-  scores = scores[:num_examples]
-  targets = targets[:num_examples]
+  results = results[:num_examples]
+
+  return score_postprocess_fn(results, vocabulary)
+
+
+@gin.configurable
+def save_scores(results, vocabulary,
+                scores_filename=None, save_example_text=True):
+  """Processes results from scoring examples and maybe saves them to disk.
+
+  Args:
+    results: list of dictionaries containing the results for each scored
+        example.
+    vocabulary: a function that that returns a tf.data.Dataset with examples
+      containing the string field 'targets' and optionally the field 'inputs'
+    scores_filename: a string (path of file to write scores to). If None, scores
+        are returned but not written to disk.
+    save_example_text: a boolean - If True, then the text for each example is
+        also saved/returned.
+
+  Returns:
+    List of float scores, one score per example. If save_example_text is True,
+    the text of the inputs/targets for each example are also returned.
+  """
+  if not results:
+    raise ValueError("No examples were scored.")
+
+  scores = [r["scores"] for r in results]
+
   if scores_filename is not None:
     write_lines_to_file(["%f" % f for f in scores], scores_filename+".scores")
-    # Targets gets decoded in python then written out later.
-  return scores, targets
+
+    if save_example_text:
+      # Targets will always exist.
+      targets = [r.get("targets_plaintext", r["targets"]) for r in results]
+      targets = _maybe_decode_python(targets, targets_vocabulary(vocabulary))
+      write_lines_to_file(targets, scores_filename+".targets")
+
+      # Inputs may only exist for some tasks.
+      if "inputs" in results[0]:
+        inputs = [r.get("inputs_plaintext", r["inputs"]) for r in results]
+        inputs = _maybe_decode_python(inputs, inputs_vocabulary(vocabulary))
+        if scores_filename is not None:
+          write_lines_to_file(inputs, scores_filename+".inputs")
+        return scores, inputs, targets
+      else:
+        return scores, targets
+    return scores
 
 
 def _maybe_decode_python(ids_or_strs, vocabulary):
@@ -1266,7 +1312,8 @@ def _maybe_decode_python(ids_or_strs, vocabulary):
 def score_from_strings(estimator, vocabulary, model_type, batch_size,
                        sequence_length, model_dir, eval_checkpoint_step,
                        inputs=gin.REQUIRED, targets=gin.REQUIRED,
-                       scores_filename=gin.REQUIRED, eos_id=1, score_eos=True):
+                       score_postprocess_fn=gin.REQUIRED, eos_id=1,
+                       score_eos=True):
   """Compute log likelihoods per example and write to a text file.
 
   inputs & targets must either be the same length (in lines) or have inputs
@@ -1291,7 +1338,8 @@ def score_from_strings(estimator, vocabulary, model_type, batch_size,
       alternatively, a string filepath for a text file (one string per line)
     targets: a list of strings (targets)
       alternatively, a string filepath for a text file (one string per line)
-    scores_filename: a string (path of file to write)
+    score_postprocess_fn: Function that takes in model outputs and
+      post-processes then returns then.
     eos_id: EOS id
     score_eos: a boolean - whether to score the final eos token of each line
       If this is set to false, the scores can be interpreted as prefix
@@ -1341,21 +1389,16 @@ def score_from_strings(estimator, vocabulary, model_type, batch_size,
     dataset = dataset.batch(batch_size, drop_remainder=True)
     return dataset.prefetch(tf.data.experimental.AUTOTUNE)
 
-  scores, targets = _score_with_estimator(
-      estimator, input_fn, eval_checkpoint_step, model_dir, scores_filename,
-      len(targets))
-  targets = _maybe_decode_python(targets, targets_vocabulary(vocabulary))
-  if scores_filename is not None:
-    write_lines_to_file(["%s" % f for f in targets],
-                        scores_filename + ".targets")
-
-  return scores, targets
+  return _score_with_estimator(
+      estimator, input_fn, eval_checkpoint_step, model_dir,
+      score_postprocess_fn, vocabulary, len(targets))
 
 
 @gin.configurable
 def score_from_dataset(estimator, vocabulary, batch_size, sequence_length,
                        model_dir, eval_checkpoint_step, dataset_split,
-                       score_dataset_fn=None, scores_filename=gin.REQUIRED):
+                       score_dataset_fn=None,
+                       score_postprocess_fn=gin.REQUIRED):
   """Compute log likelihoods per example and write to a text file.
 
   The function returns a list of floats representing the log-likelihood of the
@@ -1375,7 +1418,8 @@ def score_from_dataset(estimator, vocabulary, batch_size, sequence_length,
         dataset_split: a string
     score_dataset_fn: A function returning a list of dataset.EvalDataset tuples.
       See `eval_dataset_fn` argument to `eval_model` for details.
-    scores_filename: a string (path of file to write)
+    score_postprocess_fn: Function that takes in model outputs and
+      post-processes then returns then.
 
   Returns:
     scores: a list of floats, the log likelihood scores
@@ -1403,16 +1447,9 @@ def score_from_dataset(estimator, vocabulary, batch_size, sequence_length,
     dataset = dataset.prefetch(tf.data.experimental.AUTOTUNE)
     return dataset
 
-  scores, targets = _score_with_estimator(
-      estimator, input_fn, eval_checkpoint_step, model_dir, scores_filename,
-      None)
-
-  targets = _maybe_decode_python(targets, targets_vocabulary(vocabulary))
-  if scores_filename is not None:
-    write_lines_to_file(["%s" % f for f in targets],
-                        scores_filename + ".targets")
-
-  return scores, targets
+  return _score_with_estimator(
+      estimator, input_fn, eval_checkpoint_step, model_dir,
+      score_postprocess_fn, vocabulary, None)
 
 
 def get_estimator(model_type, vocabulary, mesh_shape,
@@ -1735,7 +1772,7 @@ def eval_model(estimator, vocabulary, sequence_length, batch_size,
     global_step = int(get_step_from_checkpoint_path(checkpoint_path))
     if eval_with_score:
       outputs, _ = _score_with_estimator(
-          estimator, input_fn, global_step, model_dir,
+          estimator, input_fn, global_step, model_dir, save_scores, vocabulary,
           num_examples=sum(len(cex) for cex in cached_examples.values()))
     else:
       outputs = [
