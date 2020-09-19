@@ -1281,22 +1281,24 @@ def save_scores(results, vocabulary,
   if scores_filename is not None:
     write_lines_to_file(["%f" % f for f in scores], scores_filename+".scores")
 
-    if save_example_text:
-      # Targets will always exist.
-      targets = [r.get("targets_plaintext", r["targets"]) for r in results]
-      targets = _maybe_decode_python(targets, targets_vocabulary(vocabulary))
+  if save_example_text:
+    # Targets will always exist.
+    targets = [r.get("targets_plaintext", r["targets"]) for r in results]
+    targets = _maybe_decode_python(targets, targets_vocabulary(vocabulary))
+    if scores_filename is not None:
       write_lines_to_file(targets, scores_filename+".targets")
 
-      # Inputs may only exist for some tasks.
-      if "inputs" in results[0]:
-        inputs = [r.get("inputs_plaintext", r["inputs"]) for r in results]
-        inputs = _maybe_decode_python(inputs, inputs_vocabulary(vocabulary))
-        if scores_filename is not None:
-          write_lines_to_file(inputs, scores_filename+".inputs")
-        return scores, inputs, targets
-      else:
-        return scores, targets
-    return scores
+    # Inputs may only exist for some tasks.
+    if "inputs" in results[0]:
+      inputs = [r.get("inputs_plaintext", r["inputs"]) for r in results]
+      inputs = _maybe_decode_python(inputs, inputs_vocabulary(vocabulary))
+      if scores_filename is not None:
+        write_lines_to_file(inputs, scores_filename+".inputs")
+      return scores, inputs, targets
+    else:
+      return scores, targets
+
+  return scores
 
 
 def _maybe_decode_python(ids_or_strs, vocabulary):
