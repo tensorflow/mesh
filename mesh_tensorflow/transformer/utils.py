@@ -491,6 +491,7 @@ def tpu_estimator_model_fn(model_type,
           compute_loss=False,
           mode=mode,
           variable_dtype=get_variable_dtype())
+      logits = mtf.cast(logits, tf.float32)
       batch_dim, length_dim, vocab_dim = logits.shape.dims
       cross_entropy = mtf.layers.softmax_cross_entropy_with_logits(
           logits, mtf_features["targets"], vocab_dim)
