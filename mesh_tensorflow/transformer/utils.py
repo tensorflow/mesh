@@ -1607,10 +1607,9 @@ def train_model(estimator, vocabulary, sequence_length, batch_size,
 
     # On the first time data is read in after relaunching, skip data that has
     # already been seen.
-    if skip_seen_data:
+    if skip_seen_data and estimator.latest_checkpoint() is not None:
       recovered_step = estimator.get_variable_value("global_step")
-      if recovered_step > 0:
-        tf.logging.info("Skipping %d steps of data.", recovered_step)
+      tf.logging.info("Skipping %d steps of data.", recovered_step)
       dataset = dataset.skip(recovered_step)
     return dataset
 
