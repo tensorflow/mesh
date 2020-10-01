@@ -1893,15 +1893,17 @@ def export_model(estimator, export_dir, vocabulary, sequence_length,
 
       receiver_tensors = {"inputs": inputs, "targets": targets}
 
-    dataset = transformer_dataset.trim_and_pad_dataset(
-        dataset, length=batch_size)
     dataset = transformer_dataset.pack_or_pad(
         dataset=dataset,
         length=sequence_length,
         pack=False,
         feature_keys=receiver_tensors.keys()
     )
-    dataset = dataset.batch(batch_size)
+
+    # Batch, and pad final batch.
+    dataset = dataset.batch(batch_size, drop_remainder=True)
+    dataset = transformer_dataset.trim_and_pad_dataset(
+        dataset, length=batch_size)
 
     features = tf.data.experimental.get_single_element(dataset)
     return tf.estimator.export.ServingInputReceiver(
