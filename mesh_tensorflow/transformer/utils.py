@@ -423,8 +423,6 @@ def tpu_estimator_model_fn(model_type,
       x = tf.reshape(x, feature_shape.to_integer_list)
       if not use_tpu:
         tf.logging.info("feature %s : %s" % (key, x))
-        x = tf.Print(
-            x, [x], "import feature %s" % key, summarize=1000, first_n=10)
       mtf_features[key] = mtf.import_fully_replicated(
           mesh, x, feature_shape, name=key)
 
