@@ -95,8 +95,12 @@ import tensorflow_datasets as tfds
 
 
 @gin.configurable
-def pack_or_pad(
-    dataset, length, pack=True, feature_keys=None, ensure_eos=False):
+def pack_or_pad(dataset,
+                length,
+                pack=True,
+                feature_keys=None,
+                ensure_eos=False,
+                trim_at_end=False):
   """Creates a 'packed' version of a dataset or pads examples with zeros.
 
   If pack=True, then multiple examples concatenated to form one combined
@@ -115,6 +119,7 @@ def pack_or_pad(
       token with EOS=1 if it is not PAD=0. If True, will be applied to all keys
       in `feature_keys`. If False, will be applied to none. If a collection of
       strings, will only be applied to these features in the collection.
+    trim_at_end: (optional) if False trims the beginning of sequence.
   Returns:
     a tf.data.Dataset where all features have fixed shape [length].
   """
@@ -123,7 +128,10 @@ def pack_or_pad(
     dataset = pack_dataset(dataset, length=length, keys=feature_keys)
   # Pad/trim length of each example to length.
   dataset = trim_and_pad_dataset(
-      dataset, length=length, feature_keys=feature_keys)
+      dataset,
+      length=length,
+      feature_keys=feature_keys,
+      trim_at_end=trim_at_end)
   if ensure_eos:
     eos_keys = feature_keys if isinstance(ensure_eos, bool) else ensure_eos
     dataset = ensure_dataset_eos(dataset, eos_keys)
@@ -720,14 +728,15 @@ def _pack_with_custom_ops(dataset, keys, length):
   return dataset
 
 
-def trim_and_pad_dataset(dataset, length, feature_keys=None):
+def trim_and_pad_dataset(dataset, length, feature_keys=None, trim_at_end=True):
   """Trim and pad first dimension of features to size `length`.
 
   Args:
-    dataset: tf.data.Dataset, the dataset to trimp/pad examples in.
+    dataset: tf.data.Dataset, the dataset to trim/pad examples in.
     length: int, or a dict from feature-key to int
     feature_keys: (optional) collection of strings, the feature names to limit
       trimming/padding to. Defaults to all features.
+    trim_at_end: (optional) if False trims the beginning of sequence.
   Returns:
     Trimmed/padded tf.data.Dataset.
   """
@@ -736,7 +745,7 @@ def trim_and_pad_dataset(dataset, length, feature_keys=None):
     if feature_keys and k not in feature_keys:
       return t
     length_k = length if isinstance(length, int) else length[k]
-    t = t[:length_k]
+    t = t[:length_k] if trim_at_end else t[-length_k:] 
     pad_amt = length_k - tf.shape(t)[0]
     padded_t = tf.pad(t, [(0, pad_amt)] + [(0, 0)] * (len(t.shape) - 1))
     padded_t.set_shape([length_k] + t.shape.as_list()[1:])
