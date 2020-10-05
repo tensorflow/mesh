@@ -1201,7 +1201,9 @@ class MeshImpl(object):
     divisor = list_product(self.shape.to_integer_list[mesh_axis + 1:])
     modulus = self.shape[mesh_axis].size
     def my_fn(pnum):
-      return (pnum // divisor) % modulus
+      # TODO(noam): casting to float32 for the floordiv masks a bug.
+      #  document and file the bug.
+      return tf.cast((tf.cast(pnum, tf.float32) // divisor), tf.int32) % modulus
     return self.slicewise(my_fn, self.laid_out_pnum())
 
   def laid_out_slice_num(self, tensor_shape):
