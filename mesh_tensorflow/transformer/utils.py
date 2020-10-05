@@ -474,8 +474,8 @@ def tpu_estimator_model_fn(model_type,
       targets = mtf_features["targets"]
       if isinstance(transformer_model, transformer.Unitransformer):
         length_dim = targets.shape.dims[-1]
-        inputs = mtf.shift(mtf_features["targets"], offset=1,
-                           dim=length_dim, wrap=False)
+        inputs = transformer.autoregressive_inputs(
+            mtf_features["targets"])
       elif isinstance(transformer_model,
                       (transformer.Bitransformer,
                        transformer.StudentTeacher)):
@@ -588,9 +588,9 @@ def tpu_estimator_model_fn(model_type,
         loss: a mtf.Tensor
       """
       if model_type in ["lm", "delimited_lm"]:
-        _, _, length_dim = mtf_features["targets"].shape
-        inputs = mtf.shift(mtf_features["targets"], offset=1,
-                           dim=length_dim, wrap=False)
+        inputs = transformer.autoregressive_inputs(
+            mtf_features["targets"],
+            sequence_id=mtf_features.get("targets_segmentation", None))
       else:
         inputs = mtf_features["inputs"]
 
@@ -807,7 +807,8 @@ def tpu_estimator_model_fn(model_type,
                 "token_accuracy": tf.metrics.mean(token_correct, weights),
                 "sequence_accuracy": tf.metrics.mean(
                     sequence_correct, sequence_weights),
-                "mean_label": tf.metrics.mean(tf.cast(labels, tf.float32)),
+                "mean_label": tf.metrics.mean(
+                    tf.cast(labels, tf.float32), weights),
                 "num_eval_tokens": metric_sum(weights, name="num_eval_tokens"),
                 "max_targets_length": metric_max(tf.reduce_sum(
                     weights, axis=-1), name="max_targets_length"),

@@ -919,8 +919,8 @@ class Unitransformer(object):
 
     Args:
       inputs: an int32 Tensor with shape [<batch_dims>, length_dim] For training
-        autoregressive models this should be equal to mtf.shift(targets,
-        offset=1, dim=length_dim, wrap=False)
+        autoregressive models this should be equal to
+        autoregressive_inputs(targets, sequence_id).
       targets: an optional int32 Tensor with shape [<batch_dims>, length_dim]
       compute_loss: a boolean
       mode: a tf.estimator.ModeKeys
@@ -942,9 +942,6 @@ class Unitransformer(object):
       logits: a Tensor with shape [<batch_dims>, output_vocab_dim]
       loss: an optional Scalar (if compute_loss=True)
     """
-    # Negative ids are used to indicate masked loss during training.
-    # Switch them back to positive numbers.
-    inputs = mtf.abs(inputs)
     batch_dims = inputs.shape.dims[:-1]
     length_dim = inputs.shape.dims[-1]
     length_range = mtf.range(inputs.mesh, length_dim, dtype=tf.int32)
@@ -1099,7 +1096,7 @@ class Unitransformer(object):
         inputs=inputs,
         encoder_inputs=encoder_inputs)
 
-    shifted_inputs = mtf.shift(inputs, offset=1, dim=length_dim, wrap=False)
+    shifted_inputs = autoregressive_inputs(inputs)
     with tf.variable_scope(self.name):
       logits = self._call_internal(context_first_part, shifted_inputs)
     del logits
@@ -1274,7 +1271,7 @@ class Unitransformer(object):
         inputs=inputs,
         encoder_inputs=encoder_inputs)
 
-    shifted_inputs = mtf.shift(inputs, offset=1, dim=length_dim, wrap=False)
+    shifted_inputs = autoregressive_inputs(inputs)
     with tf.variable_scope(self.name):
       logits = self._call_internal(context_first_part, shifted_inputs)
     del logits
@@ -1332,6 +1329,8 @@ class Unitransformer(object):
 def shift_targets(targets, bos_id=0, eos_id=1):
   """Transforms decoder labels to decoder inputs.
 
+  DEPRECATED - use autoregressive_inputs()
+
   Args:
     targets: decoder labels
     bos_id: begin of sequence id, defaults to 0
@@ -1340,6 +1339,8 @@ def shift_targets(targets, bos_id=0, eos_id=1):
   Returns:
     Decoder inputs.
   """
+  tf.logging.warning("warning: shift_targets is deprecated - "
+                     "use autoregressive_inputs() instead.")
   length_dim = targets.shape.dims[-1]
   shifted_targets = mtf.shift(targets, offset=1, dim=length_dim, wrap=False)
   # We should have a 0 at the beginning of each sequence rather than the
@@ -1353,6 +1354,37 @@ def shift_targets(targets, bos_id=0, eos_id=1):
             mtf.not_equal(targets, 0))) * bos_id
 
   return shifted_targets
+
+
+def autoregressive_inputs(targets, sequence_id=None):
+  """Generate inputs for an autoregressive model, by shifting the targets.
+
+  For the first element of each sequence, the returned input id is 0.
+
+  For a "packed" dataset, also pass the sequence_id tensor, which aligns
+  with the targets tensor and contains different values for different
+  concatenated examples.
+
+  Args:
+    targets: a tf.int32 Tensor with shape [..., length_dim]
+    sequence_id: an optional Tensor with the same shape as targets
+
+  Returns:
+    a Tensor with dtype tf.int32 and the same shape as targets.
+  """
+  length_dim = targets.shape.dims[-1]
+  inputs = mtf.shift(targets, offset=1, dim=length_dim, wrap=False)
+  # Negative ids are used to indicate masked loss during training.
+  # Switch them back to positive numbers.
+  inputs = mtf.abs(inputs)
+  # We should have a 0 at the beginning of each sequence rather than the
+  # shifted EOS (e.g. 1) from the previous sequence.
+  if sequence_id is not None:
+    not_first_in_sequence = mtf.equal(
+        sequence_id,
+        mtf.shift(sequence_id, offset=1, dim=length_dim, wrap=False))
+    inputs *= mtf.to_int32(not_first_in_sequence)
+  return inputs
 
 
 @gin.configurable
@@ -1486,7 +1518,7 @@ class Bitransformer(object):
           encoder_sequence_id)
 
     logits, loss = self.decoder.call_simple(
-        shift_targets(targets),
+        autoregressive_inputs(targets, sequence_id=decoder_sequence_id),
         targets,
         compute_loss,
         mode=mode,
