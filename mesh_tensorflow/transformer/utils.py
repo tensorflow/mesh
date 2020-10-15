@@ -1667,11 +1667,13 @@ def eval_model(estimator, vocabulary, sequence_length, batch_size,
   """Eval a Mesh-TF model.
 
   Args:
-    estimator: Estimator object, created with the appropriate model_fn.
+    estimator: an Estimator object or a callable that returns one.
     vocabulary: a vocabulary.Vocabulary or (inputs_vocabulary,
       targets_vocabulary) tuple
     sequence_length: a dict from feature-key to integer the (packed)
-      sequence length, e.g. {"inputs": 512, "targets": 128}
+      sequence length, e.g. {"inputs": 512, "targets": 128}. May also be set to
+      `None` to automatically compute the maximum length of the examples, which
+      requires `estimator` to be a callable.
     batch_size: an integer, global batch size
     dataset_split: a string
     model_dir: a string, directory with the model.
@@ -1704,6 +1706,10 @@ def eval_model(estimator, vocabulary, sequence_length, batch_size,
   """
   if eval_dataset_fn is None:
     raise ValueError("Must provide eval_dataset_fn through gin for eval.")
+  if sequence_length is None and not callable(estimator):
+    raise ValueError(
+        "A callable must be passed for the estimator when automatically "
+        "computing the sequence length.")
 
   eval_datasets = eval_dataset_fn(
       sequence_length=sequence_length,
@@ -1735,18 +1741,29 @@ def eval_model(estimator, vocabulary, sequence_length, batch_size,
   cached_examples = {}
   # Need to create a separate graph for loading in plaintext targets
   # or else TF will complain that we modified the graph
+  max_sequence_length = {"inputs": 0, "targets": 0}
+
+  tf.logging.info("Caching evaluation examples.")
   with tf.Graph().as_default():
     for eval_dataset in eval_datasets:
       if eval_dataset.metric_fns:
         ds = eval_dataset.dataset_fn()
         # Create list of postprocessed text targets
-        examples = [ex for ex in tfds.as_numpy(ds)]
-        targets = [
-            eval_dataset.postprocess_fn(  # pylint:disable=g-complex-comprehension
-                tf.compat.as_text(ex["targets_plaintext"]),
-                example=ex, is_target=True)
-            for ex in examples
-        ]
+        inputs = []
+        targets = []
+        examples = []
+        for ex in tfds.as_numpy(ds):
+          max_sequence_length["inputs"] = max(
+              max_sequence_length["inputs"], len(ex["inputs"]))
+          max_sequence_length["targets"] = max(
+              max_sequence_length["targets"], len(ex["targets"]))
+          examples.append(ex)
+          inputs.append(ex["inputs_plaintext"])
+          targets.append(
+              eval_dataset.postprocess_fn(
+                  tf.compat.as_text(ex["targets_plaintext"]),
+                  example=ex, is_target=True)
+          )
         targets_filename = os.path.join(
             eval_summary_dir,
             "{}_targets".format(eval_dataset.name),
@@ -1756,11 +1773,33 @@ def eval_model(estimator, vocabulary, sequence_length, batch_size,
         inputs_filename = os.path.join(
             eval_summary_dir,
             "{}_inputs".format(eval_dataset.name))
-        inputs = [ex["inputs_plaintext"] for ex in examples]
         write_lines_to_file(inputs, inputs_filename)
 
         cached_targets[eval_dataset.name] = targets
         cached_examples[eval_dataset.name] = examples
+  if sequence_length is None:
+    tf.logging.info("Setting sequence lengths to %s", max_sequence_length)
+    sequence_length = max_sequence_length
+    estimator = functools.partial(estimator, sequence_length=sequence_length)
+  elif (sequence_length["inputs"] < max_sequence_length["inputs"] or
+        sequence_length["targets"] < max_sequence_length["targets"]):
+    tf.logging.warning(
+        "Given sequence lengths are insufficient for some evaluation inputs or "
+        "targets. These sequences will be truncated to fit, likely leading to "
+        "sub-optimal results. Consider passing `None` for sequence_length to "
+        "have them be automatically computed.\n Got: %s,\n Max Lengths: %s",
+        sequence_length, max_sequence_length)
+  elif (sequence_length["inputs"] > max_sequence_length["inputs"] or
+        sequence_length["targets"] > max_sequence_length["targets"]):
+    tf.logging.warning(
+        "Given sequence lengths are longer than necessary for some evaluation "
+        "inputs or targets, resulting in wasted computation. Consider passing "
+        "`None` for sequence_length to have them be automatically computed.\n"
+        " Got: %s,\n Max Lengths: %s",
+        sequence_length, max_sequence_length)
+
+  if callable(estimator):
+    estimator = estimator()
 
   def input_fn(params):
     """Eval input function for estimator."""
@@ -1770,7 +1809,7 @@ def eval_model(estimator, vocabulary, sequence_length, batch_size,
     for eval_dataset in eval_datasets:
       # Only cache targets for those tasks with eval functions provides
       if eval_dataset.metric_fns:
-        ds = eval_dataset.dataset_fn()
+        ds = eval_dataset.dataset_fn(sequence_length=sequence_length)
         ds = ds.map(_filter_features)
         combined_ds = ds if not combined_ds else combined_ds.concatenate(ds)
     combined_ds = combined_ds.batch(batch_size, drop_remainder=False)
@@ -1949,7 +1988,6 @@ def compute_batch_size(sequence_length,
   Returns:
     an integer - the number of sequences per batch
   """
-  sequence_length = max(sequence_length.values())
   def checkdiv(a, b):
     if a % b:
       raise ValueError("%d is not divisible by %d" % (a, b))
@@ -1962,7 +2000,8 @@ def compute_batch_size(sequence_length,
   method, value = method_and_value
   if method == "sequences_per_batch":
     return value
-  elif method == "tokens_per_batch":
+  sequence_length = max(sequence_length.values())
+  if method == "tokens_per_batch":
     return checkdiv(value, sequence_length)
   elif method == "sequences_per_replica":
     return value * num_replicas
@@ -2147,7 +2186,7 @@ def run(tpu_job_name,
         eval_summary_dir=None,
         batch_size=("tokens_per_replica", 2048),
         train_steps=auto_train_steps,
-        sequence_length=gin.REQUIRED,
+        sequence_length=None,
         mesh_shape=gin.REQUIRED,
         mesh_devices=None,
         layout_rules=gin.REQUIRED,
@@ -2202,7 +2241,9 @@ def run(tpu_job_name,
     train_steps: An integer or a function with the same signature as
       auto_train_steps().  Total number of training steps.
     sequence_length: an integer or a dict from feature-key to integer
-      the (packed) sequence length, e.g. {"inputs": 512, "targets": 128}
+      the (packed) sequence length, e.g. {"inputs": 512, "targets": 128}.
+      May also be set to `None` in eval mode to automatically compute the
+      maximum length of the examples.
     mesh_shape: an input to mtf.convert_to_shape()
     mesh_devices: a list of strings, see `get_estimator` docstring.
     layout_rules: an input to mtf.convert_to_layout_rules()
@@ -2267,7 +2308,8 @@ def run(tpu_job_name,
   )
 
   score_in_predict_mode = "score" in mode
-  estimator = get_estimator(
+  estimator_fn = functools.partial(
+      get_estimator,
       model_type=model_type,
       vocabulary=vocabulary,
       layout_rules=layout_rules,
@@ -2290,6 +2332,11 @@ def run(tpu_job_name,
       iterations_per_loop=iterations_per_loop,
       cluster=cluster,
       mesh_devices=mesh_devices)
+
+  if mode != "eval":
+    if sequence_length is None:
+      raise ValueError(f"`sequence_length` must be specified in '{mode}' mode.")
+    estimator = estimator_fn()
 
   if mode == "train":
     # train_dataset_fn could be None if train_model_fn is not equal to
@@ -2345,7 +2392,7 @@ def run(tpu_job_name,
             checkpoint_path=checkpoint_path,
             name=name)
   elif mode in ("eval", "score_eval"):
-    eval_model(estimator, vocabulary, sequence_length, batch_size,
+    eval_model(estimator_fn, vocabulary, sequence_length, batch_size,
                dataset_split, model_dir, eval_dataset_fn, eval_summary_dir,
                eval_checkpoint_step, eval_with_score=(mode == "score_eval"))
   elif mode == "infer":
