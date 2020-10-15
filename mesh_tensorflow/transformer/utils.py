@@ -2333,7 +2333,7 @@ def run(tpu_job_name,
       cluster=cluster,
       mesh_devices=mesh_devices)
 
-  if mode != "eval":
+  if mode not in ("eval", "score_eval"):
     if sequence_length is None:
       raise ValueError(f"`sequence_length` must be specified in '{mode}' mode.")
     estimator = estimator_fn()
