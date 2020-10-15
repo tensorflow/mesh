@@ -465,8 +465,8 @@ tensor2tensor/bin/t2t-trainer \
 
 ## Run the toy model without Tensor2Tensor dependencies
 
-  This toy model contains two fully-connected layers which aim to train a
-  identity function: f(x) = x. Since there are 8 TPU cores, we can arbitrary
+  This toy model contains two fully-connected layers which aim to train an
+  identity function: f(x) = x. Since there are 8 TPU cores, we can arbitrarily
   change the FLAGS.mesh_shape and FLAGS.layout to achieve different
   data-parallelism and model-parallelism strategies.
 
