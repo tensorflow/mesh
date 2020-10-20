@@ -112,6 +112,7 @@ class EncoderConvolutionalLayer(transformer.TransformerLayer):
 
     with tf.variable_scope("sep_conv9x1"):
       output = self._sep_conv9x1.call(context, hidden_state, losses)
+      output = _dropout(output, context, self._dropout_rate)
       return _pad_channels_dim(output, model_dim.size)
 
 
@@ -211,7 +212,8 @@ class DecoderConvolutionalLayer(transformer.TransformerLayer):
         dim=hidden_state.shape.dims[-1])
 
     with tf.variable_scope("sep_conv7x1_2"):
-      return self._sep_conv7x1_2.call(context, hidden_state, losses)
+      output = self._sep_conv7x1_2.call(context, hidden_state, losses)
+      return _dropout(output, context, self._dropout_rate)
 
 
 def _pad_channels_dim(tensor, size):
