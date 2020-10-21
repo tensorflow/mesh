@@ -1882,7 +1882,8 @@ def make_bitransformer(
     layout=None,
     mesh_shape=None,
     encoder_name="encoder",
-    decoder_name="decoder"):
+    decoder_name="decoder",
+    bitransformer_cls=Bitransformer):
   """Gin-configurable bitransformer constructor.
 
   In your config file you need to set the encoder and decoder layers like this:
@@ -1905,8 +1906,10 @@ def make_bitransformer(
       Some layers (e.g. MoE layers) cheat by looking at layout and mesh_shape
     encoder_name: optional - a string giving the Unitransformer encoder name.
     decoder_name: optional - a string giving the Unitransformer decoder name.
+    bitransformer_cls: a class that implements the bitransformer with the
+      encoder and decoder both of which are Unitransformer instances.
   Returns:
-    a Bitransformer
+    a bitransformer_cls instance
   """
   with gin.config_scope("encoder"):
     encoder = Unitransformer(
@@ -1926,7 +1929,7 @@ def make_bitransformer(
         name=decoder_name,
         layout=layout,
         mesh_shape=mesh_shape)
-  return Bitransformer(encoder, decoder)
+  return bitransformer_cls(encoder, decoder)
 
 
 @gin.configurable
