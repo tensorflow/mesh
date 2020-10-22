@@ -366,7 +366,8 @@ class AdafactorOptimizer(Optimizer):
     return adafactor_decay_rate_pow(0.8)
 
   def _learning_rate_default(self, multiply_by_parameter_scale):
-    learning_rate = tf.minimum(tf.math.rsqrt(step_num() + 1.0), 0.01)
+    step_num = tf.cast(tf.train.get_or_create_global_step(), tf.float32)
+    learning_rate = tf.minimum(tf.math.rsqrt(step_num + 1.0), 0.01)
     if (not multiply_by_parameter_scale
         and not layers.unit_scaling_convention()):
       learning_rate *= 0.05
@@ -386,19 +387,21 @@ def adafactor_decay_rate_adam(beta2):
   return decay
 
 
-def adafactor_decay_rate_pow(exponent):
+@gin.configurable
+def adafactor_decay_rate_pow(exponent, offset=0):
   """Second moment decay rate where memory-length grows as step_num^exponent.
+
+  For fine-tuning, you may want to gin-configure offset to equal the starting
+  step-number for the fine-tuning phase.
 
   Args:
     exponent: a float between 0 and 1
+    offset: an integer (the starting step number)
   Returns:
     a scalar
   """
-  return 1.0 - tf.pow((step_num() + 1.0), -exponent)
-
-
-def step_num():
-  return tf.cast(tf.train.get_or_create_global_step(), tf.float32)
+  step_num = tf.cast(tf.train.get_or_create_global_step() - offset, tf.float32)
+  return 1.0 - tf.pow((step_num + 1.0), -exponent)
 
 
 def adafactor_optimizer_from_hparams(hparams, lr):
