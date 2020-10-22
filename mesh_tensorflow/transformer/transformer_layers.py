@@ -256,20 +256,12 @@ class SelfAttention(transformer.TransformerLayer):
     if self.shared_kv:
       k = kv
       v = kv
-    if self.attention_func == "hybrid":
-      o = attention.hybrid_attention(
-          q, k, v, context, memory_length, self.kv_dim, self.kv_dim,
-          self.compute_bias(context, memory_position, x,
-                            params.query_heads_dims, q),
-          **self.attention_kwargs_from_context(context))
-    else:
-      o = attention.attention(
-          q, k, v, memory_length, self.kv_dim, self.kv_dim,
-          self.compute_bias(context, memory_position, x,
-                            params.query_heads_dims, q),
-          context=context,
-          **self.attention_kwargs_from_context(context))
-
+    o = self.attention_fn(
+        q, k, v, context=context, memory_length_dim=memory_length,
+        key_dim=self.kv_dim, value_dim=self.kv_dim,
+        bias=self.compute_bias(context, memory_position, x,
+                               params.query_heads_dims, q),
+        **self.attention_kwargs_from_context(context))
     attention_output_shape = self.expected_attention_output_shape(x, params)
     attention_output = params.compute_output(
         o, output_shape=attention_output_shape)
@@ -377,6 +369,13 @@ class SelfAttention(transformer.TransformerLayer):
 
   def max_relative_position(self, context):
     return None
+
+  @property
+  def attention_fn(self):
+    if self.attention_func == "hybrid":
+      return attention.hybrid_attention
+    else:
+      return attention.attention
 
 
 @gin.configurable
@@ -720,7 +719,7 @@ def enc_dec_attention_bias(layer,
 
 @gin.configurable
 def enc_dec_attention(self_attention_layer, memory_antecedent, context, x,
-                      losses):
+                      losses, attention_fn=attention.attention):
   """Multi-head attention over the encoder outputs."""
   memory_input_dim = memory_antecedent.shape[-1]
   if memory_input_dim != context.model.model_dim:
@@ -745,7 +744,7 @@ def enc_dec_attention(self_attention_layer, memory_antecedent, context, x,
   bias = enc_dec_attention_bias(self_attention_layer,
                                 context,
                                 params.query_heads_dims)
-  a = attention.attention(
+  a = attention_fn(
       q, k, v, memory_length, self_attention_layer.kv_dim,
       self_attention_layer.kv_dim, bias,
       context=context,
@@ -772,7 +771,12 @@ class EncDecAttention(SelfAttention):
   def call(self, context, x, losses=None):
     """Call the layer."""
     return enc_dec_attention(self, self._get_memory_antecedent(context),
-                             context, x, losses)
+                             context, x, losses,
+                             attention_fn=self.attention_fn)
+
+  @property
+  def attention_fn(self):
+    return attention.attention
 
 
 @gin.configurable

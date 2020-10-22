@@ -66,7 +66,7 @@ def attention(q,
     Tensor with shape q.shape - key_dim + value_dim
   """
   orig_q_shape = q.shape
-  q, k, v, bias = _maybe_reshape_attention_input_for_2d_sharding(
+  q, k, v, bias = maybe_reshape_attention_input_for_2d_sharding(
       context, q, k, v, bias, [key_dim, value_dim])
   logits = mtf.layers.us_einsum([q, k], reduced_dims=[key_dim])
   if bias is not None:
@@ -838,7 +838,7 @@ def visibility_mask_to_attention_bias(visible, dtype):
   return mtf.cast(mtf.logical_not(visible), dtype) * -1e9
 
 
-def _maybe_reshape_attention_input_for_2d_sharding(
+def maybe_reshape_attention_input_for_2d_sharding(
     context, q, k, v, bias, unsplittable_dims):
   """Reshape the inputs to attention to split over an unused mesh dimension.
 
