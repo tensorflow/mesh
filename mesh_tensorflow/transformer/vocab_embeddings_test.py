@@ -84,7 +84,7 @@ class FactorizedVocabEmbeddingTest(tf.test.TestCase):
         ensemble_dim=None,
         inner_dimension_size=inner_dimension_size)
 
-    mtf_embedding = vocab_embedding.ids_to_embedding(mtf_ids)
+    mtf_embedding = vocab_embedding.ids_to_embedding(mtf_ids, context=None)
 
     mesh_impl = mtf.placement_mesh_impl.PlacementMeshImpl(
         shape=[], layout={}, devices=[''])
@@ -209,7 +209,7 @@ class AdaptiveVocabEmbeddingTest(tf.test.TestCase):
             'embedding_size': 1
         }])
 
-    mtf_embedding = vocab_embedding.ids_to_embedding(mtf_ids)
+    mtf_embedding = vocab_embedding.ids_to_embedding(mtf_ids, context=None)
 
     mesh_impl = mtf.placement_mesh_impl.PlacementMeshImpl(
         shape=[], layout={}, devices=[''])
@@ -320,7 +320,7 @@ class MixtureOfSoftmaxesTest(tf.test.TestCase):
         ensemble_dim=None,
         num_softmaxes=num_softmaxes)
 
-    mtf_embedding = vocab_embedding.ids_to_embedding(mtf_ids)
+    mtf_embedding = vocab_embedding.ids_to_embedding(mtf_ids, context=None)
 
     mesh_impl = mtf.placement_mesh_impl.PlacementMeshImpl(
         shape=[], layout={}, devices=[''])
@@ -448,7 +448,7 @@ class MixtapeTest(tf.test.TestCase):
         gate_embedding_size=gate_embedding_size,
         frequent_token_fraction=frequent_token_fraction)
 
-    mtf_embedding = vocab_embedding.ids_to_embedding(mtf_ids)
+    mtf_embedding = vocab_embedding.ids_to_embedding(mtf_ids, context=None)
 
     mesh_impl = mtf.placement_mesh_impl.PlacementMeshImpl(
         shape=[], layout={}, devices=[''])

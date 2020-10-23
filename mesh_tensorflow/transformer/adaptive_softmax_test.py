@@ -487,7 +487,7 @@ class AdaptiveSoftmaxTest(tf.test.TestCase):
             'embedding_size': 1
         }])
 
-    mtf_embedding = vocab_embedding.ids_to_embedding(mtf_ids)
+    mtf_embedding = vocab_embedding.ids_to_embedding(mtf_ids, context=None)
 
     mesh_impl = mtf.placement_mesh_impl.PlacementMeshImpl(
         shape=[], layout={}, devices=[''])

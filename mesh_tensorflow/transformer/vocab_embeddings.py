@@ -77,7 +77,8 @@ class FactorizedVocabEmbedding(object):
         initializer=tf.random_normal_initializer(
             stddev=inner_dimension_size**-0.25))
 
-  def ids_to_embedding(self, ids):
+  def ids_to_embedding(self, ids, context):
+    del context
     tmp = mtf.gather(self._factor1, ids, self._vocab_dim)
     return mtf.einsum([tmp, self._factor2], reduced_dims=[self._inner_dim])
 
@@ -111,7 +112,7 @@ class _Cluster(object):
     self._start_token_id = start_token_id
     self._end_token_id = end_token_id
 
-  def ids_to_embedding(self, ids):
+  def ids_to_embedding(self, ids, context):
     """Ids to embeddings with ids not in cluster mapped to the zero vector."""
     ids -= self._start_token_id
     # The mtf.gather in the embedding's ids_to_embedding implementation will
@@ -119,7 +120,7 @@ class _Cluster(object):
     # dimension size to be the zero vector. Thus the embeddings for those tokens
     # will be the zero vector.
     ids = mtf.where(mtf.greater_equal(ids, 0), ids, self._end_token_id)
-    return self._embedding.ids_to_embedding(ids)
+    return self._embedding.ids_to_embedding(ids, context)
 
   def hidden_to_logits(self, hidden, context):
     """Returns the logits for tokens within the cluster."""
@@ -228,10 +229,11 @@ class AdaptiveVocabEmbedding(object):
               end_token_id=start_token_id + token_count))
       start_token_id += token_count
 
-  def ids_to_embedding(self, ids):
+  def ids_to_embedding(self, ids, context):
     # Ids not in each cluster will be mapped to the zero vector. Since clusters
     # are disjoint, this sum is correct.
-    return sum(cluster.ids_to_embedding(ids) for cluster in self._clusters)
+    return sum(
+        cluster.ids_to_embedding(ids, context) for cluster in self._clusters)
 
   def hidden_to_logits(self, hidden, context):
     # Each cluster returns the logits for only the tokens with itself, so their
@@ -312,7 +314,8 @@ class MixtureOfSoftmaxes(object):
         ensemble_dim=([ensemble_dim] if ensemble_dim else []) +
         [self._components_dim])
 
-  def ids_to_embedding(self, ids: mtf.Tensor) -> mtf.Tensor:
+  def ids_to_embedding(self, ids: mtf.Tensor, context) -> mtf.Tensor:
+    del context
     return mtf.gather(self._embedding_weights, ids, self._vocab_dim)
 
   def hidden_to_logits(self, hidden: mtf.Tensor,
@@ -490,7 +493,8 @@ class Mixtape(object):
         dtype=variable_dtype,
         initializer=tf.random_normal_initializer())
 
-  def ids_to_embedding(self, ids: mtf.Tensor) -> mtf.Tensor:
+  def ids_to_embedding(self, ids: mtf.Tensor, context) -> mtf.Tensor:
+    del context
     return mtf.gather(self._embedding_weights, ids, self._vocab_dim)
 
   def _sigmoid_tree(self, tensor):

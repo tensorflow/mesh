@@ -72,7 +72,7 @@ class _Cluster(object):
   def length_projection_factor(self):
     return self._length_projection_factor
 
-  def ids_to_embedding(self, ids):
+  def ids_to_embedding(self, ids, context):
     """Ids to embeddings with ids not in cluster mapped to the zero vector."""
     ids -= self._start_token_id
     # The mtf.gather in the embedding's ids_to_embedding implementation will
@@ -87,7 +87,7 @@ class _Cluster(object):
         ids,
         self._vocab_dim.size,
     )
-    return self._embedding.ids_to_embedding(ids)
+    return self._embedding.ids_to_embedding(ids, context)
 
   def get_cluster_mask(self, targets):
     """Computes mask over the targets masking out tokens not in the cluster."""
@@ -303,11 +303,12 @@ class AdaptiveSoftmaxVocabEmbedding(object):
         length_projection_factor=length_projection_factor,
         vocab_dim=cluster_vocab_dim)
 
-  def ids_to_embedding(self, ids: mtf.Tensor) -> mtf.Tensor:
+  def ids_to_embedding(self, ids: mtf.Tensor, context) -> mtf.Tensor:
     all_clusters = self._tail_clusters + [self._head_cluster]
     # Ids not in each cluster will be mapped to the zero vector. Since clusters
     # are disjoint, this sum is correct.
-    return sum(cluster.ids_to_embedding(ids) for cluster in all_clusters)
+    return sum(
+        cluster.ids_to_embedding(ids, context) for cluster in all_clusters)
 
   def hidden_to_logits(self, hidden: mtf.Tensor,
                        context: transformer.Context) -> mtf.Tensor:

@@ -818,7 +818,7 @@ class Unitransformer(object):
           ensemble_dim=self.ensemble_dim)
     if context.train:
       inputs = mtf.dropout(inputs, rate=self.token_dropout_rate)
-    x = vocab_embedding.ids_to_embedding(inputs)
+    x = vocab_embedding.ids_to_embedding(inputs, context)
     if self.positional_embedding or self.sinusoid_positional_embedding:
       if self.sinusoid_positional_embedding:
         pos_emb_var = sinusoid_positional_embedding_weights(
@@ -2086,7 +2086,8 @@ class VocabEmbedding(object):
         ensemble_dim=ensemble_dim,
         initializer=initializer)
 
-  def ids_to_embedding(self, ids):
+  def ids_to_embedding(self, ids, context):
+    del context
     ret = mtf.gather(self._embedding_weights, ids, self._vocab_dim)
     if self._scale_variable_like_classifier_weights:
       ret *= self._output_dim.size ** 0.5
