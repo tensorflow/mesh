@@ -2060,7 +2060,7 @@ def serialize_num_microbatches(batch_dim,
       sequence_length,
       batch_per_replica,
       num_microbatches)
-  return num_microbatches
+  return int(num_microbatches)
 
 
 @gin.configurable
