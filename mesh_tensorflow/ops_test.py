@@ -22,6 +22,8 @@ from __future__ import print_function
 from absl.testing import parameterized
 
 import mesh_tensorflow as mtf
+from mesh_tensorflow import test_utils as mtf_test_utils
+import numpy as np
 import tensorflow.compat.v1 as tf
 from tensorflow.python.framework import test_util  # pylint:disable=g-direct-tensorflow-import
 
@@ -190,6 +192,53 @@ class MeshTensorFlowTest(parameterized.TestCase, tf.test.TestCase):
     self.assertEqual(mesh_impl.tensor_dimension_to_mesh_axis(heads), 1)
     self.assertEqual(mesh_impl.tensor_layout(mtf.Shape([batch, length, d_ff])),
                      mtf.TensorLayout([0, None, 1]))
+
+  @parameterized.parameters({
+      "pool_fn": np.mean,
+      "pool_fn_mtf": mtf.reduce_mean
+  }, {
+      "pool_fn": np.max,
+      "pool_fn_mtf": mtf.reduce_max
+  }, {
+      "pool_fn": np.min,
+      "pool_fn_mtf": mtf.reduce_min
+  })
+  def testPoolTensor1d(self, pool_fn, pool_fn_mtf):
+    converter = mtf_test_utils.NumpyConverter()
+    pool_size = 2
+    x = np.random.randn(2, 3, 4, 5)
+    expected = np.empty(shape=[2, 3, 2, 5])
+    expected[:, :, 0, :] = pool_fn(x[:, :, 0:2, :], axis=2)
+    expected[:, :, 1, :] = pool_fn(x[:, :, 2:4, :], axis=2)
+
+    x_mtf = converter.convert_np_array_to_mtf_tensor(x, dtype=tf.float32)
+    pooled_mtf = mtf.pool_tensor_1d(
+        x_mtf,
+        pool_dim=x_mtf.shape.dims[2],
+        reduce_fn=pool_fn_mtf,
+        pool_size=pool_size)
+    actual = converter.convert_mtf_tensor_to_np_array(pooled_mtf)
+    self.assertAllClose(expected, actual)
+
+  @parameterized.parameters({"pool_size": 2}, {"pool_size": 3})
+  def testStrideTensor1d(self, pool_size):
+    converter = mtf_test_utils.NumpyConverter()
+    x = np.random.randint(0, 100, size=[2, 3, 6, 5])
+    x_mtf = converter.convert_np_array_to_mtf_tensor(x)
+    expected = x[:, :, range(0, x.shape[2], pool_size), :]
+    strided_mtf = mtf.stride_tensor_1d(
+        x_mtf, pool_dim=x_mtf.shape.dims[2], pool_size=pool_size)
+    actual = converter.convert_mtf_tensor_to_np_array(strided_mtf)
+    self.assertAllEqual(expected, actual)
+
+  def testReduceFirst(self):
+    converter = mtf_test_utils.NumpyConverter()
+    x = np.random.randint(0, 100, size=[2, 3, 6, 5])
+    x_mtf = converter.convert_np_array_to_mtf_tensor(x)
+    expected = x[:, :, 0, :]
+    reduced_mtf = mtf.reduce_first(x_mtf, reduced_dim=x_mtf.shape.dims[2])
+    actual = converter.convert_mtf_tensor_to_np_array(reduced_mtf)
+    self.assertAllEqual(expected, actual)
 
 
 class OperationSplittabilityTest(tf.test.TestCase):

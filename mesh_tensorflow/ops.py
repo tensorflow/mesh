@@ -6602,3 +6602,73 @@ def nth_largest_element(x, n, reduced_dim, name=None):
 
 def nth_smallest_element(x, n, reduced_dim, name=None):
   return -nth_largest_element(-x, n, reduced_dim, name=name)
+
+
+def pool_tensor_1d(tensor, pool_dim, reduce_fn=reduce_mean, pool_size=2):
+  """Apply 1D pooling to a tensor.
+
+  There can be multiple batch dims and other dims. The only constraint is that
+  the pool_size is divisible by the pool_dim.size.
+
+  Here is an example with pool_size = 2 and reduce_fn = reduce_mean.
+  [2, 5, 9, 15] reshape -> [[2, 5], [9, 15]] reduce -> [3.5, 12.0]
+
+  Here is another example with pool_size = 2 and reduce_fn = reduce_first, which
+  selects the first sequence element and drop the rest.
+  [2, 5, 9, 15] reshape -> [[2, 5], [9, 15]] reduce -> [2, 9]
+
+  The input tensor is first reshaped and the reduce function is applied to the
+  temporary dim (`low_dim`).
+
+  Args:
+    tensor: a Tensor with shape [<batch_dims>, length_dim, <other_dims>]
+    pool_dim: a Dimension, the dimension along with to apply pooling.
+    reduce_fn: a callable, a reduce function with a signature `reudce_fn(tensor,
+      reduced_dim)` where reduced_dim is a keyword arg.
+    pool_size: an int specifying the pooling size.
+
+  Returns:
+    a Tensor with shape [<batch_dims>, pooled_length_dim, <other_dims>]
+  """
+  high_dim = Dimension(pool_dim.name, pool_dim.size // pool_size)
+  low_dim = Dimension("_low", pool_size)
+  reshaped = replace_dimensions(tensor, pool_dim, [high_dim, low_dim])
+  return reduce_fn(reshaped, reduced_dim=low_dim)
+
+
+def stride_tensor_1d(tensor, pool_dim, pool_size=2):
+  """Apply 1D stride operation to a tensor.
+
+  1D stride operation is a special case of `pool_tensor_1d` with pool_fn =
+  reduce_first, which reduces a tensor to the first element along the
+  `pool_dim`. See the docstring of pool_tensor_1d for more detail and an
+  example.
+
+  Args:
+    tensor: a Tensor with shape [<batch_dims>, length_dim, <other_dims>]
+    pool_dim: a Dimension, the dimension along with to apply pooling.
+    pool_size: an int specifying the pooling size.
+
+  Returns:
+    a Tensor with shape [<batch_dims>, strided_length_dim, <other_dims>]
+  """
+  return pool_tensor_1d(
+      tensor, pool_dim, reduce_fn=reduce_first, pool_size=pool_size)
+
+
+def reduce_first(tensor, reduced_dim):
+  """Reduce the tensor to the first element along the `reduce_dim`.
+
+  An example with `reduced_dim` corresponding to the dimension with axis=1
+  [[2, 5], [9, 15]] -> [2, 9]
+
+  Args:
+    tensor: a Tensor with shape [<batch_dims>, length_dim, <other_dims>]
+    reduced_dim: a Dimension, the dimension to be reduced.
+
+  Returns:
+    a Tensor with shape [<batch_dims>, <other_dims>]
+  """
+  r = mtf_range(tensor.mesh, reduced_dim, dtype=tf.int32)
+  first_element_filter = cast(equal(r, 0), tensor.dtype)
+  return reduce_sum(tensor * first_element_filter, reduced_dim=reduced_dim)
