@@ -2097,8 +2097,9 @@ def get_checkpoint_iterator(checkpoint_step, model_dir, skip_until=0,
       list of ints, replace each int with the path to the checkpoint with the
       closest global step. If checkpoint_step == "all", return the path of every
       checkpoint in model_dir, starting from the earliest checkpoint. If
-      checkpoint_step is None, return `tf.train.checkpoints_iterator`
-      for `model_dir`.
+      checkpoint_step == -1, return the latest checkpoint as specified in
+      model_dir/checkpoint. If checkpoint_step is None, return
+      `tf.train.checkpoints_iterator` for `model_dir`.
     model_dir: str, directory to look for checkpoints in.
     skip_until: an integer - for "all" or "None" behavior, filter out
       checkpoint numbers that are <= skip_until.
@@ -2144,6 +2145,8 @@ def get_checkpoint_iterator(checkpoint_step, model_dir, skip_until=0,
     ckpt_steps = {get_step_from_checkpoint_path(p) for p in ckpt_paths}
     return filter(_filter_fn,
                   [_get_checkpoint_path(s) for s in sorted(list(ckpt_steps))])
+  elif checkpoint_step == -1:
+    return [tf.train.latest_checkpoint(model_dir)]
   elif checkpoint_step is None:
     checkpoints_iterator = filter(
         _filter_fn, tf.train.checkpoints_iterator(model_dir))
