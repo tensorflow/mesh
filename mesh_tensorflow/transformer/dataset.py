@@ -127,6 +127,17 @@ def pack_or_pad(
   if ensure_eos:
     eos_keys = feature_keys if isinstance(ensure_eos, bool) else ensure_eos
     dataset = ensure_dataset_eos(dataset, eos_keys)
+
+  def _features_to_int32(ex):
+    return dict([
+        (k, tf.cast(v, tf.int32)) if k in feature_keys else (k, v)
+        for k, v in ex.items()
+    ])
+
+  dataset = dataset.map(
+      _features_to_int32, num_parallel_calls=tf.data.experimental.AUTOTUNE
+  )
+
   return dataset
 
 
