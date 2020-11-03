@@ -1581,6 +1581,8 @@ class Conv1DLayer(transformer.TransformerLayer):
     x *= mask
 
     model_dim = x.shape.dims[-1]
+    input_dim = mtf.Dimension("input_dim", model_dim.size)
+    x = mtf.replace_dimensions(x, model_dim, input_dim)
     output_dim = mtf.Dimension(model_dim.name, self._output_size)
     output = mtf.layers.conv1d(
         x,
