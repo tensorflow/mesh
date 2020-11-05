@@ -1950,7 +1950,7 @@ def export_model(estimator, export_dir, vocabulary, sequence_length,
     )
 
     # Batch, and pad final batch.
-    dataset = dataset.batch(batch_size, drop_remainder=True)
+    dataset = dataset.batch(batch_size, drop_remainder=False)
     dataset = transformer_dataset.trim_and_pad_dataset(
         dataset, length=batch_size)
 
