@@ -1547,6 +1547,159 @@ class BranchedEncDecAttention(BranchedSelfAttention):
                              context, x, losses)
 
 
+class Conv1D(transformer.TransformerLayer):
+  """Parent class for convolutional layers for common decoding logics.
+
+  When convolutional layers are used in the decoder, the incremental decoding
+  requires common features such as storing and accessing the recurrent state
+  information. These features do not depend on the specifics of the
+  convolutional layer (e.g., depthwise convolution, lightweight) as long as they
+  have the fixed receptive field defined by the filter size. This class
+  provides the methods for such features.
+  """
+
+  def record_states_first_part_mode(self,
+                                    context,
+                                    x,
+                                    filter_size,
+                                    length_dim_name="length"):
+    """Record the states during the first part mode.
+
+    l: current layer index
+    k: convolution filter size
+    x(l): input tensor to layer `l` for the first_part mode with the shape
+      [<batch_dims>, length, d_model].
+
+    The first_part mode is called once before the incremental mode is called for
+    the actual decoding process. The purpose is to set the recurrent states in
+    context.states, which are accessed during the incremental mode via
+    context.get_states. There are two cases depending on partial sequences are
+    present or not.
+
+    1) with partial sequences
+    When partial sequences are present, we decode from the position after the
+    partial sequence, but we need to use the information contained in the
+    partial sequence.
+
+    x(l) = [x1, x2, 0, 0, 0]
+    context.initial_position = 2 (the actual decoding should start from index
+    2).
+    Then we record the state = [0, x1, x2]. If partial sequences are shorter
+    than the filter size, we zero pad from the left.
+
+    2) Without partial sequences
+    x(l) = [0, 0, 0, 0, 0]
+    context.initial_position = 0
+    Then we record the state = [0, 0, 0]
+
+    These two cases can be handled with the following pseudocode. Let
+    i = context.initial_position.
+    state = x[:, i-filter_size:i, :] and store this as state.
+
+    Equivalently we can shift x by filter_size and slice
+    shifted_x = shift(x, length_dim)
+    state = shifted_x[:, i:i + filter_size, :]
+
+    Args:
+      context: a transformer.Context.
+      x: a Tensor.
+      filter_size: an intger - convolution filter size.
+      length_dim_name: a string - a dimension name for the length mtf.Dimension.
+    """
+    length_dim = x.shape.dims[-2]
+
+    # Slice shifted_x[:, i:i + self.filter_size, :]
+    filter_dim = mtf.Dimension(length_dim_name, filter_size)
+    indices = mtf.range(x.mesh, filter_dim, dtype=tf.int32)
+    indices = context.initial_position + indices
+
+    # Assumes that x.shape = [<batch_dims>, length_dim, model_dim]
+    output_shape = mtf.Shape(x.shape.dims[:-2] + [filter_dim] +
+                             x.shape.dims[-1:])
+    shifted_x = mtf.shift(x, filter_size, length_dim, wrap=False)
+    state = mtf.gather(
+        shifted_x, indices, length_dim, output_shape=output_shape)
+    context.record_new_states([state])
+
+  def record_states_incremental_mode(self, context, x, filter_size,
+                                     length_dim_name="length"):
+    """Record the states during the first part mode.
+
+    l: current layer index
+    t: current decoding time step
+    k: convolution filter size
+    x(l, t): input vector to layer `l` at time step `t` for the incremental
+      mode with the shape [<batch_dims>, d_model].
+
+    During the incremental mode, the input to the conv layer x(l, t) does not
+    have the length dim because the input vector x corresponds to the current
+    decoding time step. We want to restore the input to the current layer in the
+    previous time steps (stored in the context.states) and combine with the
+    input at the current time step. This method does the following.
+
+    1) Restore the states: [x(l, t-k), ..., x(l, t-1)]
+    2) Combine with the current input: [x(l, t-k+1), ..., x(l, t-1), x(l, t)]
+    3) Store the new state and return it to be used as an input to the conv
+    layer.
+
+    It is important to note that the state being recorded is not used by the
+    next layer; it is used by the same layer but at the future time steps.
+
+    Args:
+      context: a transformer.Context.
+      x: a Tensor.
+      filter_size: an intger - convolution filter size.
+      length_dim_name: a string - a dimension name for the length mtf.Dimension.
+
+    Returns:
+      x: a Tensor of shape [<batch_dims>, filter_size, d_model].
+    """
+    # Augment x with the states
+    filter_dim = mtf.Dimension(length_dim_name, filter_size)
+    input_state = context.get_states(1)[0]
+
+    position = mtf.constant(
+        x.mesh,
+        filter_size - 1,  # Always use the last position.
+        shape=mtf.Shape(x.shape.dims[:-1]),  # Pick out batch dims.
+        dtype=tf.int32)
+
+    # [batch, d_model] -> [batch, filter, d_model]
+    x = self.update_state(
+        input_state, x, position, filter_dim, dtype=context.activation_dtype)
+
+    # new state include the input for [t-filter, ..., t] steps.
+    context.record_new_states([x])
+    return x
+
+  def update_state(self, old_state, x, position, filter_dim, dtype):
+    """Augment the current input to the old state.
+
+    [x(l, t-k), ..., x(l, t-1)], x(l, t) ->
+    [x(l, t-k+1), ..., x(l, t-1), x(l, t)]
+
+    Args:
+      old_state: a Tensor of shape [<batch_dims>, filter_size, d_model]
+      x: a Tensor of shape [<batch_dims>, d_model]
+      position: a Tensor of shape [<batch_dims>]
+      filter_dim: an mtf.Dimension corresponding to the filter size.
+      dtype: a mtf.VariableDType
+
+    Returns:
+      new_state: a Tensor of shape [<batch_dims>, filter_size, d_model].
+    """
+    # [<batch_dims>, length, d_model]
+    shifted_state = mtf.shift(old_state, -1, filter_dim, wrap=False)
+
+    # [<batch_dims>, length]
+    one_hot = mtf.one_hot(position, filter_dim, dtype=dtype)
+
+    # [<batch_dims>, length, d_model]
+    shifted_x = one_hot * x
+    new_state = shifted_state + shifted_x
+    return new_state
+
+
 @gin.configurable
 class Conv1DLayer(transformer.TransformerLayer):
   """1D convolution over sequence length with model dim as channels.
