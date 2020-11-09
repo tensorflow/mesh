@@ -20,6 +20,7 @@ import mesh_tensorflow as mtf
 from mesh_tensorflow import test_utils
 from mesh_tensorflow.transformer import transformer
 from mesh_tensorflow.transformer import transformer_layers
+import mock
 import numpy as np
 import tensorflow.compat.v1 as tf
 
@@ -215,6 +216,129 @@ class TransformerLayersTest(tf.test.TestCase):
     expected = np.empty(shape=old_state.shape)
     expected[:, :filter_size - 1, :] = old_state[:, 1:, :]
     expected[:, -1, :] = x
+    self.assertAllClose(actual, expected)
+
+  def test_separable_conv1d_call_same_input_output_dims(self):
+    batch = 2
+    d_model = 6
+    length = 3
+    inputs = np.random.randint(0, 10, size=[batch, length])
+    inputs_mtf = self.converter.convert_np_array_to_mtf_tensor(
+        inputs, dim_names=["batch", "length"])
+    # Dummy context with necessary information for Conv1DLayer.call
+    Context = collections.namedtuple("Context",
+                                     ["inputs", "activation_dtype", "mode"])
+    context = Context(
+        inputs=inputs_mtf, activation_dtype=tf.float32, mode="train")
+    x = np.random.randn(batch, length, d_model)
+    x_mtf = self.converter.convert_np_array_to_mtf_tensor(
+        x, dtype=tf.float32, dim_names=["batch", "length", "d_model"])
+
+    min_relative_pos = -1
+    max_relative_pos = 2
+    conv_layer = transformer_layers.SeparableConv1DLayer(
+        min_relative_pos=min_relative_pos,
+        max_relative_pos=max_relative_pos,
+        output_size=d_model)
+
+    output_mtf = conv_layer.call(context, x_mtf)
+    self.assertAllEqual([batch, length, d_model],
+                        output_mtf.shape.to_integer_list)
+
+  def test_conv1d_call_incremental_mode(self):
+    batch = 2
+    d_model = 6
+    length = 4
+    filter_size = 3
+    output_size = 2
+
+    state = np.random.randn(batch, filter_size, d_model)
+    context = get_dummy_decoder_context(
+        self.converter,
+        batch=batch,
+        d_model=d_model,
+        length=length,
+        state=state)
+
+    x = np.random.randn(batch, d_model)
+    x_mtf = self.converter.convert_np_array_to_mtf_tensor(
+        x, dtype=tf.float32, dim_names=["batch", "d_model"])
+
+    conv_filter = np.random.randn(1, filter_size, d_model, output_size)
+
+    def mock_initializer():
+      # pylint: disable=unused-argument
+      def conv_init(shape, dtype, **unused_kwargs):
+        return conv_filter
+      return conv_init
+
+    with mock.patch.object(tf, "glorot_uniform_initializer", mock_initializer):
+      conv_layer = transformer_layers.Conv1DLayer(
+          filter_size=filter_size, output_size=output_size)
+      output_mtf = conv_layer.call(context, x_mtf)
+    actual = self.converter.convert_mtf_tensor_to_np_array(output_mtf)
+
+    # [batch, 2, d_model], [batch, 1, d_model] -> [batch, 3, d_model]
+    padded_x = np.concatenate([state[:, 1:, :], x[:, np.newaxis, :]], axis=1)
+    # b: batch h: fake height, l: length (or filter), d: d_model, o: output_size
+    expected = np.einsum("bld,hldo->bo", padded_x, conv_filter)
+    self.assertAllClose(actual, expected)
+
+  def test_separable_conv1d_layer_incremental_mode(self):
+    batch = 2
+    d_model = 6
+    length = 4
+    filter_size = 3
+    output_size = 2
+
+    state = np.random.randn(batch, filter_size, d_model)
+    context = get_dummy_decoder_context(
+        self.converter,
+        batch=batch,
+        d_model=d_model,
+        length=length,
+        state=state)
+
+    x = np.random.randn(batch, d_model)
+    x_mtf = self.converter.convert_np_array_to_mtf_tensor(
+        x, dtype=tf.float32, dim_names=["batch", "d_model"])
+
+    max_relative_pos = 0
+    min_relative_pos = max_relative_pos - filter_size + 1
+    conv_layer = transformer_layers.SeparableConv1DLayer(
+        min_relative_pos=min_relative_pos,
+        max_relative_pos=max_relative_pos,
+        output_size=output_size)
+
+    # Non-standard implementation of depthwise convolution in the
+    #   transformer_layers.py requires somewhat complicated testing.
+    # A list of weights (length filter_size) each of shape [model_dim], which is
+    #   the depth dimension. So the total number of parameters is filter_size *
+    #   model_dim as expected for depthwise convolution.
+    all_kernel_wts = [np.random.randn(d_model) for _ in range(filter_size)]
+    all_kernel_wts_mtf = [
+        self.converter.convert_np_array_to_mtf_tensor(
+            w, dtype=tf.float32, dim_names=["d_model"]) for w in all_kernel_wts
+    ]
+    pointwise_weight = np.random.randn(d_model, output_size)
+    pointwise_weight_mtf = self.converter.convert_np_array_to_mtf_tensor(
+        pointwise_weight, dtype=tf.float32, dim_names=["d_model", "d_model"])
+    with mock.patch.object(mtf.layers,
+                           "get_dense_kernel_weights") as mock_weights:
+      mock_weights.return_value = pointwise_weight_mtf
+      output_mtf = conv_layer.call(
+          context, x_mtf, all_kernel_wts=all_kernel_wts_mtf)
+    actual = self.converter.convert_mtf_tensor_to_np_array(output_mtf)
+
+    # [filter_size, d_model]
+    conv_filter = np.array(all_kernel_wts)
+    # [batch, filter_size, d_model]
+    padded_x = np.concatenate([state[:, 1:, :], x[:, np.newaxis, :]], axis=1)
+    # b: batch, l: length (or filter), d: d_model
+    depthwise_convolved = np.einsum("bld,ld->bd", padded_x, conv_filter)
+    # The pointwise convolution can be implemented with matrix multiplication.
+    # [batch, d_model] * [d_model, output_size] -> [batch, output_size]
+    expected = np.dot(depthwise_convolved, pointwise_weight)
     self.assertAllClose(actual, expected)
 
 

@@ -1701,7 +1701,7 @@ class Conv1D(transformer.TransformerLayer):
 
 
 @gin.configurable
-class Conv1DLayer(transformer.TransformerLayer):
+class Conv1DLayer(Conv1D):
   """1D convolution over sequence length with model dim as channels.
 
   One caveat is that this layer does nothing to stop information from bleeding
@@ -1724,14 +1724,19 @@ class Conv1DLayer(transformer.TransformerLayer):
 
   def call(self, context, x, losses=None):
     """Call the layer."""
-    if context.mode == "incremental":
-      # TODO(mmatena): Implement.
-      raise NotImplementedError(
-          "incremental mode for Conv1DLayer not implemented yet.")
+    if context.mode == "first_part":
+      self.record_states_first_part_mode(context, x, self.filter_size)
 
-    # Mask padding.
-    mask = mtf.cast(mtf.not_equal(context.inputs, 0), context.activation_dtype)
-    x *= mask
+    if context.mode == "incremental":
+      x = self.record_states_incremental_mode(context, x, self.filter_size)
+      padding = "VALID"
+    else:
+      # The first_part mode also needs masking because it may have partial
+      # sequences.
+      mask = mtf.cast(
+          mtf.not_equal(context.inputs, 0), context.activation_dtype)
+      x *= mask
+      padding = "SAME"
 
     model_dim = x.shape.dims[-1]
     input_dim = mtf.Dimension("input_dim", model_dim.size)
@@ -1741,16 +1746,28 @@ class Conv1DLayer(transformer.TransformerLayer):
         x,
         output_dim=output_dim,
         filter_size=self._filter_size,
-        padding="SAME",
+        padding=padding,
         filter_initializer=tf.glorot_uniform_initializer())
+
+    if context.mode == "incremental":
+      filter_dim = mtf.Dimension("length", self.filter_size)
+
+      # [batch_dims, 1, output_dim] -> [batch_dims, output_dim]
+      output = mtf.reduce_sum(
+          output, reduced_dim=mtf.Dimension(filter_dim.name, 1))
+
     if self._activation != "linear":
       activation_fn = getattr(mtf, self._activation)
       output = activation_fn(output)
     return output
 
+  @property
+  def filter_size(self):
+    return self._filter_size
+
 
 @gin.configurable
-class SeparableConv1DLayer(transformer.TransformerLayer):
+class SeparableConv1DLayer(Conv1D):
   """1D separable convolution over sequence length with model dim as channels.
 
   One caveat is that this layer does nothing to stop information from bleeding
@@ -1794,18 +1811,19 @@ class SeparableConv1DLayer(transformer.TransformerLayer):
   def call(self, context, x, losses=None, all_kernel_wts=None):
     """Call the layer."""
 
-    if context.mode == "incremental":
-      # TODO(mmatena): Implement.
-      raise NotImplementedError(
-          "incremental mode for Conv1DLayer not implemented yet.")
+    if context.mode == "first_part":
+      self.record_states_first_part_mode(context, x, self.filter_size)
 
-    # Mask padding.
-    # TODO(karishmamalkan): Change the inputs_for_mask_creation to use decoder
-    # when using with decoder
-    inputs_for_mask_creation = context.inputs
-    mask = mtf.cast(
-        mtf.not_equal(inputs_for_mask_creation, 0), context.activation_dtype)
-    x *= mask
+    if context.mode == "incremental":
+      x = self.record_states_incremental_mode(context, x, self.filter_size)
+    else:
+      # Mask padding.
+      # TODO(karishmamalkan): Change the inputs_for_mask_creation to use decoder
+      # when using with decoder
+      inputs_for_mask_creation = context.inputs
+      mask = mtf.cast(
+          mtf.not_equal(inputs_for_mask_creation, 0), context.activation_dtype)
+      x *= mask
 
     model_dim = x.shape.dims[-1]
     output_dim = mtf.Dimension(model_dim.name, self._output_size)
@@ -1821,10 +1839,21 @@ class SeparableConv1DLayer(transformer.TransformerLayer):
         ._pointwise_filter_initializer_scale,
         use_bias=True,
         kernel_depth_weights=all_kernel_wts)
+
+    if context.mode == "incremental":
+      filter_dim = mtf.Dimension("length", self.filter_size)
+      # Drop unnecessary portion [batch, length, d_model] -> [batch, d_model]
+      # Only the last sequence position is relevant.
+      output = mtf.gather(output, [self.filter_size - 1], filter_dim)
+
     if self._activation != "linear":
       activation_fn = getattr(mtf, self._activation)
       output = activation_fn(output)
     return output
+
+  @property
+  def filter_size(self):
+    return self._max_relative_pos - self._min_relative_pos + 1
 
 
 @gin.configurable
