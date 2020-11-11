@@ -42,6 +42,7 @@ import six
 import tensorflow.compat.v1 as tf
 import tensorflow_datasets as tfds
 
+from tensorflow.core.protobuf import rewriter_config_pb2  # pylint: disable=g-direct-tensorflow-import
 from tensorflow.python.ops import resources  # pylint: disable=g-direct-tensorflow-import
 from tensorflow.python.tpu import tpu_config  # pylint: disable=g-direct-tensorflow-import
 from tensorflow.python.tpu import tpu_estimator  # pylint: disable=g-direct-tensorflow-import
@@ -1513,10 +1514,20 @@ def get_estimator(model_type, vocabulary, mesh_shape,
       per_host_input_for_training=tpu_config.InputPipelineConfig.BROADCAST,
   )
 
+  session_config = None
+  if use_tpu:
+    # meta-optimizer drastically slows down startup time and has little benefit
+    # when running on TPU.
+    session_config = tf.ConfigProto(
+        graph_options=tf.GraphOptions(
+            rewrite_options=rewriter_config_pb2.RewriterConfig(
+                disable_meta_optimizer=True)))
+
   run_config = tpu_config.RunConfig(
       cluster=cluster,
       model_dir=model_dir,
       tpu_config=my_tpu_config,
+      session_config=session_config,
       # We use a saver hook, so disable checkpoints here to prevent double
       # saving.
       save_checkpoints_steps=None,
@@ -2070,7 +2081,7 @@ def serialize_num_microbatches(batch_dim,
       sequence_length,
       batch_per_replica,
       num_microbatches)
-  return num_microbatches
+  return int(num_microbatches)
 
 
 @gin.configurable
