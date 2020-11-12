@@ -1780,12 +1780,21 @@ def eval_model(estimator,
           max_sequence_length["targets"] = max(
               max_sequence_length["targets"], len(ex["targets"]))
           examples.append(ex)
-          inputs.append(ex["inputs_plaintext"])
-          targets.append(
-              eval_dataset.postprocess_fn(
-                  tf.compat.as_text(ex["targets_plaintext"]),
-                  example=ex, is_target=True)
-          )
+          if "inputs_plaintext" in ex:
+            inputs.append(ex["inputs_plaintext"])
+          else:
+            inputs.append(ex["inputs"])
+          if "targets_plaintext" in ex:
+            targets.append(
+                eval_dataset.postprocess_fn(
+                    tf.compat.as_text(ex["targets_plaintext"]),
+                    example=ex, is_target=True)
+            )
+          else:
+            targets.append(
+                eval_dataset.postprocess_fn(
+                    ex["targets"], example=ex, is_target=True)
+            )
         if output_eval_examples:
           targets_filename = os.path.join(
               eval_summary_dir,
@@ -1850,8 +1859,8 @@ def eval_model(estimator,
           num_examples=sum(len(cex) for cex in cached_examples.values()))
     else:
       outputs = [
-          tf.compat.as_text(d) for d in
-          decode(estimator, input_fn, vocabulary, checkpoint_path)
+          d.decode("utf-8") if isinstance(d, bytes) else d
+          for d in decode(estimator, input_fn, vocabulary, checkpoint_path)
       ]
     for eval_dataset in eval_datasets:
       # Extract the portion of decodes corresponding to this dataset
