@@ -1837,7 +1837,7 @@ def eval_model(estimator,
     # Concatenate all dataset inputs to only have to do one decode loop
     combined_ds = None
     for eval_dataset in eval_datasets:
-      # Only cache targets for those tasks with eval functions provides
+      # Only evaluate tasks with metrics.
       if eval_dataset.metric_fns:
         ds = eval_dataset.dataset_fn(sequence_length=sequence_length)
         ds = ds.map(_filter_features)
