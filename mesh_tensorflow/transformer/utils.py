@@ -288,6 +288,7 @@ def tpu_estimator_model_fn(model_type,
                            score_in_predict_mode=False,
                            variable_filter=None,
                            init_checkpoint=None,
+                           init_variable_filter="",
                            ensemble_inputs=None,
                            mesh_devices=None,
                            model_info_file=None,
@@ -328,6 +329,9 @@ def tpu_estimator_model_fn(model_type,
     init_checkpoint: a string, if not None then read in variables from this
       checkpoint path when initializing variables. Will only initialize
       variables that appear both in the current graph and the checkpoint.
+    init_variable_filter: a string, used only when init_checkpoint is set.
+      controls which variables are loaded from the checkpoint using regex.
+      if empty string (default), all variables from the checkpoint are loaded.
     ensemble_inputs: an optional integer - pass the size of the ensemble to
       train an ensemble where each model gets different inputs.
       You also need to configure Unitransformer.ensemble  to the right size.
@@ -712,6 +716,11 @@ def tpu_estimator_model_fn(model_type,
 
         if init_checkpoint:
           ckpt_vars = {v for v, _ in tf.train.list_variables(init_checkpoint)}
+
+          if init_variable_filter:
+            pattern = re.compile(init_variable_filter)
+            ckpt_vars = [v for v in ckpt_vars if pattern.search(v)]
+
           global_vars = {v.op.name for v in tf.global_variables()}
           restore_vars = ckpt_vars.intersection(global_vars)
           tf.logging.info("Initializing variables from %s:", init_checkpoint)
