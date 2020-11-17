@@ -719,7 +719,7 @@ def tpu_estimator_model_fn(model_type,
 
           if init_variable_filter:
             pattern = re.compile(init_variable_filter)
-            ckpt_vars = [v for v in ckpt_vars if pattern.search(v)]
+            ckpt_vars = {v for v in ckpt_vars if pattern.search(v)}
 
           global_vars = {v.op.name for v in tf.global_variables()}
           restore_vars = ckpt_vars.intersection(global_vars)
