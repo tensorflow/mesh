@@ -1073,16 +1073,16 @@ def _top_2_gating(
   """
   group_size_dim, unused_input_dim = inputs.shape.dims[-2:]
 
+  # The internals of this function run in float32.
+  # bfloat16 seems to reduce quality.
+  gate_inputs = mtf.to_float(inputs)
+
   raw_gates = mtf.layers.dense(
-      inputs, experts_dim, use_bias=False,
+      gate_inputs, experts_dim, use_bias=False,
       expert_dims=outer_expert_dims,
       variable_dtype=variable_dtype,
       name=name)
   raw_gates = mtf.softmax(raw_gates, experts_dim)
-
-  # The internals of this function run in float32.
-  #   bfloat16 seems to reduce quality.
-  raw_gates = mtf.to_float(raw_gates)
 
   expert_capacity_f = float(expert_capacity_dim.size)
 
