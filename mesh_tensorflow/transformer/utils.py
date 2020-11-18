@@ -413,6 +413,8 @@ def tpu_estimator_model_fn(model_type,
     ensemble_dims = ([mtf.Dimension("ensemble", ensemble_inputs)]
                      if ensemble_inputs else [])
 
+    predict_batch_size = features.pop("predict_batch_size", None)
+
     mtf_features = {}
     for key, x in features.items():
       # Some auxiliary features may have been generated in packing.
@@ -544,6 +546,10 @@ def tpu_estimator_model_fn(model_type,
 
       inputs = _maybe_detokenize(inputs, inputs_vocabulary(vocabulary))
       outputs = _maybe_detokenize(outputs, targets_vocabulary(vocabulary))
+
+      if predict_batch_size is not None:
+        inputs = inputs[:predict_batch_size]
+        outputs = outputs[:predict_batch_size]
 
       predictions = {
           "inputs": inputs,
@@ -1954,6 +1960,7 @@ def export_model(estimator, export_dir, vocabulary, sequence_length,
                       else inputs_vocabulary(vocabulary))
       targets = str_placeholder(input_key)
 
+      predict_batch_size = tf.shape(targets)[0]
       dataset = tf.data.Dataset.from_tensor_slices({input_key: targets})
       dataset = transformer_dataset.encode_all_features(dataset, vocab_to_use)
 
@@ -1965,6 +1972,7 @@ def export_model(estimator, export_dir, vocabulary, sequence_length,
       inputs = str_placeholder("inputs")
       targets = str_placeholder("targets")
 
+      predict_batch_size = tf.shape(inputs)[0]
       dataset = tf.data.Dataset.from_tensor_slices(
           {"inputs": inputs, "targets": targets})
       dataset = transformer_dataset.encode_all_features(dataset, vocabulary)
@@ -1979,11 +1987,13 @@ def export_model(estimator, export_dir, vocabulary, sequence_length,
     )
 
     # Batch, and pad final batch.
+    tf.debugging.assert_less_equal(predict_batch_size, batch_size)
     dataset = dataset.batch(batch_size, drop_remainder=False)
     dataset = transformer_dataset.trim_and_pad_dataset(
         dataset, length=batch_size)
 
     features = tf.data.experimental.get_single_element(dataset)
+    features["predict_batch_size"] = predict_batch_size
     return tf.estimator.export.ServingInputReceiver(
         features=features, receiver_tensors=receiver_tensors)
 
