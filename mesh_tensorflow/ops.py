@@ -26,6 +26,7 @@ import operator
 import os
 import re
 
+import gin
 from mesh_tensorflow import utils
 import numpy as np
 import six
@@ -438,6 +439,7 @@ class Graph(object):
 
     return name
 
+  @gin.configurable
   def rewrite_stack_variables(self,
                               max_combined_variable_size=2 ** 30,
                               max_combined_slice_size=2 ** 27,
