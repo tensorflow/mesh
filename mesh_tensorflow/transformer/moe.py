@@ -420,6 +420,18 @@ def transformer_moe_layer_v1(
                                  num_groups_dim, expert_capacity_dim, input_dim
                              ]))
 
+  # Extra reshape reduces communication cost for model-parallel versions.
+  # For model-parallel versions, this reshape causes an mtf.slice and for non-
+  # model-parallel versions, this has no effect.
+  d_model_split_dim = mtf.Dimension("d_model_split", input_dim.size)
+  expert_inputs = mtf.reshape(
+      expert_inputs,
+      mtf.Shape([
+          outer_batch_dim, experts_dim, batch_dim_unsplit, expert_capacity_dim,
+          d_model_split_dim
+      ]))
+
+  # Split over batch -> split over experts
   expert_inputs = mtf.reshape(
       expert_inputs,
       mtf.Shape([
@@ -446,6 +458,17 @@ def transformer_moe_layer_v1(
         reduced_dims=hidden.shape.dims[-1:], variable_dtype=variable_dtype,
         name=layer_name)
 
+    # Extra reshape reduces communication cost for model-parallel versions.
+    # For model-parallel versions, this reshape causes an mtf.slice and for non-
+    # model-parallel versions, this has no effect.
+    expert_output = mtf.reshape(
+        expert_output,
+        mtf.Shape([
+            outer_batch_dim, experts_dim_unsplit, num_groups_dim,
+            expert_capacity_dim, d_model_split_dim
+        ]))
+
+    # Split over experts -> split over batch
     expert_output = mtf.reshape(
         expert_output,
         mtf.Shape([
