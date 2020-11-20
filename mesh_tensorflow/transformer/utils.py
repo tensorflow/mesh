@@ -1456,7 +1456,8 @@ def score_from_dataset(estimator, vocabulary, batch_size, sequence_length,
     dataset = None
     for scoring_dataset in scoring_datasets:
       ds = scoring_dataset.dataset_fn()
-      ds = ds.map(_filter_features)
+      ds = ds.map(
+          _filter_features, num_parallel_calls=tf.data.experimental.AUTOTUNE)
       dataset = dataset.concatenate(ds) if dataset else ds
 
     dataset = dataset.batch(batch_size, drop_remainder=False)
@@ -1855,7 +1856,8 @@ def eval_model(estimator,
       # Only evaluate tasks with metrics.
       if eval_dataset.metric_fns:
         ds = eval_dataset.dataset_fn(sequence_length=sequence_length)
-        ds = ds.map(_filter_features)
+        ds = ds.map(
+            _filter_features, num_parallel_calls=tf.data.experimental.AUTOTUNE)
         combined_ds = ds if not combined_ds else combined_ds.concatenate(ds)
     combined_ds = combined_ds.batch(batch_size, drop_remainder=False)
     # Pad the final batch.
@@ -2431,7 +2433,8 @@ def run(tpu_job_name,
       )
     def _input_fn(params, eval_dataset):
       del params
-      ds = eval_dataset.dataset_fn().map(_filter_features)
+      ds = eval_dataset.dataset_fn().map(
+          _filter_features, num_parallel_calls=tf.data.experimental.AUTOTUNE)
       ds = transformer_dataset.pad_dataset_with_zeroed_out_examples(ds)
       ds = (ds.batch(batch_size * (ensemble_inputs or 1), drop_remainder=True)
             .prefetch(tf.data.experimental.AUTOTUNE))
