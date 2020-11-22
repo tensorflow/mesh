@@ -1233,43 +1233,6 @@ def clean_decodes(ids, eos_id=1, pad_id=0, length_axis=-1):
   return tf.where_v2(valid_ids, ids, pad_id)
 
 
-def _score_with_estimator(estimator, input_fn, eval_checkpoint_step, model_dir,
-                          score_postprocess_fn, vocabulary,
-                          num_examples=None):
-  """For each example returned by input_fn, compute log likelihood.
-
-  Args:
-    estimator: a TPUEstimator
-    input_fn: a function that that returns a tf.data.Dataset with examples
-      containing the string field 'targets' and optionally the field 'inputs'
-    eval_checkpoint_step: int, list of ints, or None, see `eval_model`
-      docstring.
-    model_dir: string, estimator model_dir
-    score_postprocess_fn: Function that takes in model outputs and
-      post-processes, saves, and returns then.
-    vocabulary: a vocabulary.Vocabulary or (inputs_vocabulary,
-      targets_vocabulary) tuple
-    num_examples: int, the total # of examples being scored, None if unknown
-
-  Returns:
-    a list of floats
-  """
-  checkpoint_path, = get_checkpoint_iterator(eval_checkpoint_step, model_dir)
-
-  result_iter = estimator.predict(input_fn, checkpoint_path=checkpoint_path)
-  # TODO(dei): This code is not well-designed for large-scale scoring, where the
-  # number of examples might exceed available memory.
-  results = list(result_iter)
-
-  if num_examples is None:
-    targets = [r["targets"] for r in results]
-    num_padded = next((i for i, x in enumerate(targets[::-1]) if x.any()), None)
-    num_examples = len(targets) - num_padded
-  results = results[:num_examples]
-
-  return score_postprocess_fn(results, vocabulary)
-
-
 @gin.configurable
 def save_scores(results, vocabulary,
                 scores_filename=None, save_example_text=True):
@@ -1315,6 +1278,43 @@ def save_scores(results, vocabulary,
       return scores, targets
 
   return scores
+
+
+def score_with_estimator(estimator, input_fn, eval_checkpoint_step, model_dir,
+                         vocabulary, score_postprocess_fn=save_scores,
+                         num_examples=None):
+  """For each example returned by input_fn, compute log likelihood.
+
+  Args:
+    estimator: a TPUEstimator
+    input_fn: a function that that returns a tf.data.Dataset with examples
+      containing the string field 'targets' and optionally the field 'inputs'
+    eval_checkpoint_step: int, list of ints, or None, see `eval_model`
+      docstring.
+    model_dir: string, estimator model_dir
+    vocabulary: a vocabulary.Vocabulary or (inputs_vocabulary,
+      targets_vocabulary) tuple
+    score_postprocess_fn: a function that takes in model outputs and
+      post-processes, saves, and returns them.
+    num_examples: int, the total # of examples being scored, None if unknown
+
+  Returns:
+    a list of floats
+  """
+  checkpoint_path, = get_checkpoint_iterator(eval_checkpoint_step, model_dir)
+
+  result_iter = estimator.predict(input_fn, checkpoint_path=checkpoint_path)
+  # TODO(dei): This code is not well-designed for large-scale scoring, where the
+  # number of examples might exceed available memory.
+  results = list(result_iter)
+
+  if num_examples is None:
+    targets = [r["targets"] for r in results]
+    num_padded = next((i for i, x in enumerate(targets[::-1]) if x.any()), None)
+    num_examples = len(targets) - num_padded
+  results = results[:num_examples]
+
+  return score_postprocess_fn(results, vocabulary)
 
 
 def _maybe_decode_python(ids_or_strs, vocabulary):
@@ -1408,9 +1408,9 @@ def score_from_strings(estimator, vocabulary, model_type, batch_size,
     dataset = dataset.batch(batch_size, drop_remainder=True)
     return dataset.prefetch(tf.data.experimental.AUTOTUNE)
 
-  return _score_with_estimator(
+  return score_with_estimator(
       estimator, input_fn, eval_checkpoint_step, model_dir,
-      score_postprocess_fn, vocabulary, len(targets))
+      vocabulary, score_postprocess_fn, len(targets))
 
 
 @gin.configurable
@@ -1467,9 +1467,9 @@ def score_from_dataset(estimator, vocabulary, batch_size, sequence_length,
     dataset = dataset.prefetch(tf.data.experimental.AUTOTUNE)
     return dataset
 
-  return _score_with_estimator(
+  return score_with_estimator(
       estimator, input_fn, eval_checkpoint_step, model_dir,
-      score_postprocess_fn, vocabulary, None)
+      vocabulary, score_postprocess_fn, None)
 
 
 def get_estimator(model_type, vocabulary, mesh_shape,
@@ -1871,8 +1871,8 @@ def eval_model(estimator,
     tf.logging.info("Checkpoint path %s" % checkpoint_path)
     global_step = int(get_step_from_checkpoint_path(checkpoint_path))
     if eval_with_score:
-      outputs, _ = _score_with_estimator(
-          estimator, input_fn, global_step, model_dir, save_scores, vocabulary,
+      outputs, _ = score_with_estimator(
+          estimator, input_fn, global_step, model_dir, vocabulary,
           num_examples=sum(len(cex) for cex in cached_examples.values()))
     else:
       outputs = [
