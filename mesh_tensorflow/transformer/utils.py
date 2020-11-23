@@ -1918,7 +1918,7 @@ def eval_model(estimator,
 
 
 def export_model(estimator, export_dir, vocabulary, sequence_length,
-                 model_type, score_mode=False, batch_size=1,
+                 model_type, eval_with_score=False, batch_size=1,
                  checkpoint_path=None):
   """Export a model in TF SavedModel format to be used for inference on CPUs.
 
@@ -1931,7 +1931,7 @@ def export_model(estimator, export_dir, vocabulary, sequence_length,
     sequence_length: an integer or a dict from feature-key to integer
       the (packed) sequence length, e.g. {"inputs": 512, "targets": 128}
     model_type: a string, see `get_estimator` docstring for details.
-    score_mode: If True, compute log-likelihood scores of targets.
+    eval_with_score: If True, compute log-likelihood scores of targets.
       If False, do inference to generate outputs.
     batch_size: int, number of sequences per batch. Should match estimator.
     checkpoint_path: str, path to checkpoint. If None (default), use the most
@@ -1953,12 +1953,12 @@ def export_model(estimator, export_dir, vocabulary, sequence_length,
     def str_placeholder(name):
       return tf.placeholder(dtype=tf.string, shape=[None], name=name)
 
-    if model_type == "lm" or not score_mode:
+    if model_type == "lm" or not eval_with_score:
       # In this case, users of exported model provide only one feature, which is
       # "targets" if scoring or "inputs" if doing prediction.
 
-      input_key = "targets" if score_mode else "inputs"
-      vocab_to_use = (targets_vocabulary(vocabulary) if score_mode
+      input_key = "targets" if eval_with_score else "inputs"
+      vocab_to_use = (targets_vocabulary(vocabulary) if eval_with_score
                       else inputs_vocabulary(vocabulary))
       targets = str_placeholder(input_key)
 
