@@ -623,12 +623,12 @@ class RecomputeGradTest(tf.test.TestCase):
 
 
 class ComplexManipulationTest(tf.test.TestCase):
-  def setUP(self):
+  def setUp(self):
     super(ComplexManipulationTest, self).setUp()
     self.graph = mtf.Graph()
     self.mesh = mtf.Mesh(self.graph, "my_mesh")
 
-  def test_to_complex(self):
+  def testToComplex(self):
     tensor = tf.random.normal([1, 10, 4])
     mtf_shape = [mtf.Dimension(f'dim_{i}', s) for i, s in enumerate(tensor.shape)]
     tensor_mesh = mtf.import_tf_tensor(self.mesh, tensor, shape=mtf_shape)
@@ -646,7 +646,7 @@ class ComplexManipulationTest(tf.test.TestCase):
       tf.complex(tensor[..., 0:2], tensor[..., 2:4]),
     )
 
-  def test_split_complex(self):
+  def testSplitComplex(self):
     tensor = tf.complex(
       tf.random.normal([1, 10, 2]),
       tf.random.normal([1, 10, 2]),
