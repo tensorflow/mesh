@@ -10,11 +10,10 @@ class FFTTest(tf.test.TestCase):
     self.mesh = mtf.Mesh(self.graph, "my_mesh")
     volume_size = 32
     batch_dim = mtf.Dimension("batch", 1)
-    cols_dim = mtf.Dimension("cols", volume_size)
-    volume_channels_dim = mtf.Dimension('channels', 1)
     slices_dim = mtf.Dimension("slices", volume_size)
     rows_dim = mtf.Dimension("rows", volume_size)
-    self.shape = [batch_dim, slices_dim, rows_dim, cols_dim, volume_channels_dim]
+    cols_dim = mtf.Dimension("cols", volume_size)
+    self.shape = [batch_dim, slices_dim, rows_dim, cols_dim,]
     volume_shape = [d.size for d in self.shape]
     self.volume = tf.random.normal(volume_shape)
     self.volume_mesh = mtf.import_tf_tensor(self.mesh, self.volume, shape=self.shape)
