@@ -45,21 +45,21 @@ class FFTBaseOperation(mtf.Operation):
       # Before performing any operations, we check the splitting
       split_axes = []
       for i in range(3):
-          split_axes.append(mesh_impl.tensor_dimension_to_mesh_axis(x.shape.dims[-3:][i]))
+        split_axes.append(mesh_impl.tensor_dimension_to_mesh_axis(x.shape.dims[-3:][i]))
 
       # Perform transform followed by tranposes
       for i in range(2):
-          # Apply FFT along last axis
-          slices = mesh_impl.slicewise(self.tf_op, slices)
+        # Apply FFT along last axis
+        slices = mesh_impl.slicewise(self.tf_op, slices)
 
-          # Before transposing the array, making sure the new last dimension will
-          # be contiguous
-          split_axes, slices = self._make_sure_contiguous(
-            mesh_impl,
-            split_axes,
-            slices,
-            naxes,
-          )
+        # Before transposing the array, making sure the new last dimension will
+        # be contiguous
+        split_axes, slices = self._make_sure_contiguous(
+          mesh_impl,
+          split_axes,
+          slices,
+          naxes,
+        )
 
       # Apply transform along last axis
       slices = mesh_impl.slicewise(self.tf_op, slices)
@@ -80,7 +80,7 @@ class FFT3DOperation(FFTBaseOperation):
     name: A name for the operation (optional).
 
   Returns:
-    A Tensor of shape `input.shape[:-3] + freq_dims`.
+    A Tensor of shape `input.shape[:-3] + freq_dims[1] + freq_dims[2] + freq_dims[0]`.
   """
   def __init__(self, inputs,  dims, name=None):
     super(FFT3DOperation, self).__init__(inputs, dims, inverse=False, name=name)
