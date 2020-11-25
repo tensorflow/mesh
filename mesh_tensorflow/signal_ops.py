@@ -25,8 +25,8 @@ class FFTBaseOperation(mtf.Operation):
       dims_reordered = dims
     else:
       dims_reordered = [dims[1], dims[2], dims[0]]
-      self._output_shape = mtf.Shape(inputs.shape[:-3]+dims_reordered)
-      self._outputs = [mtf.Tensor(self, mtf.Shape(self._output_shape), inputs.dtype)]
+    self._output_shape = mtf.Shape(inputs.shape[:-3]+dims_reordered)
+    self._outputs = [mtf.Tensor(self, mtf.Shape(self._output_shape), inputs.dtype)]
 
   def gradient(self, grad_ys):
     dy = grad_ys[0]
@@ -112,7 +112,7 @@ def fft3d(x, freq_dims, name=None):
   """
   return FFT3DOperation(x, freq_dims, name).outputs[0]
 
-class iFFT3DOperation(mtf.Operation):
+class iFFT3DOperation(FFTBaseOperation):
   """
   Computes the inverse 3-dimensional discrete Fourier transform over the inner-most 3
   dimensions of input tensor. Note that the input FFT is assumed transposed.
@@ -125,46 +125,20 @@ class iFFT3DOperation(mtf.Operation):
   Returns:
     A Tensor of shape `input.shape[:-3] + dims`.
   """
-  def __init__(self, input,  dims, name=None):
-    super(iFFT3DOperation, self).__init__([input], name=name or "iFFT3D")
-    self._dims = dims
-    self._output_shape = mtf.Shape(input.shape[:-3]+dims)
-    self._outputs = [mtf.Tensor(self, mtf.Shape(self._output_shape), input.dtype)]
+  def __init__(self, inputs,  dims, name=None):
+    super(iFFT3DOperation, self).__init__(inputs, dims, inverse=True, name=name)
 
-  def gradient(self, grad_ys):
-    dy = grad_ys[0]
-    ky, kz, kx = self.inputs[0].shape[-3:]
-    return [fft3d(dy, [kx, ky, kz])]
+  def _make_sure_contiguous(self, mesh_impl, split_axes, slices, naxes):
+    if split_axes[0] is not None:
+      slices = mesh_impl.alltoall(slices, split_axes[0],  naxes-1,  naxes-3)
+      split_axes[-1] = split_axes[0]
+      split_axes[0] = None
+    perm = np.arange(naxes)
+    perm[-3:] = np.roll(perm[-3:], shift=-1)
+    slices = mesh_impl.slicewise(lambda x: tf.transpose(x, perm), slices)
+    split_axes = [split_axes[1], split_axes[2], split_axes[0]]
+    return split_axes, slices
 
-  def lower(self, lowering):
-    mesh_impl = lowering.mesh_impl(self)
-    x = self.inputs[0]
-    naxes = len(x.shape)
-    slices = lowering.tensors[self.inputs[0]]
-    # Before performing any operations, we check the splitting
-    split_axes = []
-    for i in range(3):
-        split_axes.append(mesh_impl.tensor_dimension_to_mesh_axis(x.shape.dims[-3:][i]))
-
-    # Perform FFT followed by tranposes
-    for i in range(2):
-        # Apply FFT along last axis
-        slices = mesh_impl.slicewise(tf.spectral.ifft, slices)
-
-        # Before transposing the array, making sure the new last dimension will
-        # be contiguous
-        if split_axes[0] is not None:
-            slices = mesh_impl.alltoall(slices, split_axes[0],  naxes-1,  naxes-3)
-            split_axes[-1] = split_axes[0]
-            split_axes[0] = None
-        perm = np.arange(len(x.shape))
-        perm[-3:] = np.roll(perm[-3:], shift=-1)
-        slices = mesh_impl.slicewise(lambda x: tf.transpose(x, perm), slices)
-        split_axes = [split_axes[1], split_axes[2], split_axes[0]]
-
-    # Apply FFT along last axis
-    slices = mesh_impl.slicewise(tf.spectral.ifft, slices)
-    lowering.set_tensor_lowering(self.outputs[0], slices)
 
 def ifft3d(x, dims, name=None):
   """
