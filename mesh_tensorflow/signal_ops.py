@@ -3,21 +3,12 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import collections
-import functools
-import itertools
-import operator
-import os
-import re
-
-from mesh_tensorflow import utils
 import numpy as np
-import six
-from six.moves import xrange  # pylint: disable=redefined-builtin
 
 import tensorflow.compat.v1 as tf
 
 from mesh_tensorflow import ops_with_redefined_builtins as mtf
+
 
 class FFT3DOperation(mtf.Operation):
   """
