@@ -10,7 +10,7 @@ class FFTTest(tf.test.TestCase):
     self.mesh = mtf.Mesh(self.graph, "my_mesh")
     volume_size = 32
     batch_dim = mtf.Dimension("batch", 1)
-    slices_dim = mtf.Dimension("slices", volume_size)
+    slices_dim = mtf.Dimension("slices", volume_size//2)
     rows_dim = mtf.Dimension("rows", volume_size)
     cols_dim = mtf.Dimension("cols", volume_size)
     self.shape = [batch_dim, slices_dim, rows_dim, cols_dim,]
@@ -26,8 +26,7 @@ class FFTTest(tf.test.TestCase):
     outputs = fft3d(self.volume_mesh, freq_dims=self.shape[1:4])
     assert len(outputs.shape) == 4
     assert outputs.dtype == tf.complex64
-    # assert outputs.shape == mtf.Shape(self.shape)
-    assert [d.size for d in outputs.shape] == [d.size for d in self.shape]
+    assert set(outputs.shape) == set(mtf.Shape(self.shape))
     mesh_impl = mtf.placement_mesh_impl.PlacementMeshImpl(
       shape=[], layout={}, devices=[""])
     lowering = mtf.Lowering(self.graph, {self.mesh: mesh_impl})
@@ -49,8 +48,7 @@ class FFTTest(tf.test.TestCase):
     )
     assert len(outputs.shape) == 4
     assert outputs.dtype == tf.complex64
-    # assert outputs.shape == mtf.Shape(self.shape)
-    assert [d.size for d in outputs.shape] == [d.size for d in self.shape]
+    assert set(outputs.shape) == set(mtf.Shape(self.shape))
     mesh_impl = mtf.placement_mesh_impl.PlacementMeshImpl(
       shape=[], layout={}, devices=[""])
     lowering = mtf.Lowering(self.graph, {self.mesh: mesh_impl})
