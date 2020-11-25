@@ -52,9 +52,7 @@ class FFTBaseOperation(mtf.Operation):
         # Apply FFT along last axis
         slices = mesh_impl.slicewise(self.tf_op, slices)
 
-        # Before transposing the array, making sure the new last dimension will
-        # be contiguous
-        split_axes, slices = self._make_sure_contiguous(
+        split_axes, slices = self._transpose(
           mesh_impl,
           split_axes,
           slices,
@@ -65,7 +63,7 @@ class FFTBaseOperation(mtf.Operation):
       slices = mesh_impl.slicewise(self.tf_op, slices)
       lowering.set_tensor_lowering(self.outputs[0], slices)
 
-  def _make_sure_contiguous(self, *args):
+  def _transpose(self, *args):
       raise NotImplementedError('This function needs to be implemented')
 
 
@@ -85,7 +83,9 @@ class FFT3DOperation(FFTBaseOperation):
   def __init__(self, inputs,  dims, name=None):
     super(FFT3DOperation, self).__init__(inputs, dims, inverse=False, name=name)
 
-  def _make_sure_contiguous(self, mesh_impl, split_axes, slices, naxes):
+  def _transpose(self, mesh_impl, split_axes, slices, naxes):
+      # Before transposing the array, making sure the new last dimension will
+      # be contiguous
       if split_axes[-2] is not None:
           slices = mesh_impl.alltoall(slices, split_axes[-2],  naxes-1,  naxes-2)
           split_axes[-1] = split_axes[-2]
@@ -128,7 +128,9 @@ class iFFT3DOperation(FFTBaseOperation):
   def __init__(self, inputs,  dims, name=None):
     super(iFFT3DOperation, self).__init__(inputs, dims, inverse=True, name=name)
 
-  def _make_sure_contiguous(self, mesh_impl, split_axes, slices, naxes):
+  def _transpose(self, mesh_impl, split_axes, slices, naxes):
+    # Before transposing the array, making sure the new last dimension will
+    # be contiguous
     if split_axes[0] is not None:
       slices = mesh_impl.alltoall(slices, split_axes[0],  naxes-1,  naxes-3)
       split_axes[-1] = split_axes[0]
