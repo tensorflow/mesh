@@ -6600,3 +6600,74 @@ def nth_largest_element(x, n, reduced_dim, name=None):
 
 def nth_smallest_element(x, n, reduced_dim, name=None):
   return -nth_largest_element(-x, n, reduced_dim, name=name)
+
+def to_complex(x, complex_dim=None):
+  """Gathers the real and imaginary of a tensor in a complex tensor
+
+  Args:
+    x: a float Tensor
+    complex_dim: a Dimension where both the real and imaginary parts of the
+      tensor are. Defaults to None, which corresponds to the last
+      dimension of the tensor.
+  Returns:
+    a Tensor, complex-valued
+  """
+  if complex_dim is None:
+    complex_dim = x.shape[-1]
+  x_real, x_imag = split(x, complex_dim, 2)
+  x_real = cast(x_real, tf.complex64)
+  x_imag = cast(x_imag, tf.complex64)
+  x_complex = x_real + 1j * x_imag
+  return x_complex
+
+def split_complex(x, complex_dim=None):
+  """Splits a complex tensor into real and imaginary, concatenated
+
+  Args:
+    x: a float Tensor
+    complex_dim: a Dimension where you want the split to happen.
+      Defaults to None, which corresponds to the last dimension of the tensor.
+  Returns:
+    a Tensor, float-valued
+  """
+  op = SplitComplexOperation(x, complex_dim=complex_dim)
+  output = op.outputs[0]
+  return output
+
+class SplitComplexOperation(Operation):
+  def __init__(self, split_input, complex_dim=None, name=None):
+    super().__init__([split_input], name=name or 'split_complex')
+    if complex_dim is None:
+        self._split_dim = split_input.shape.dims[-1]
+        self._split_axis = -1
+    else:
+        self._split_dim = complex_dim
+        self._split_axis = split_input.shape.index(complex_dim)
+    self._splittable_dims, self._unsplittable_dims = (
+      self._initialize_splittable_and_unsplittable_dims(
+        "splittable", [self._split_dim.name],
+      )
+    )
+    output_shape = split_input.shape.resize_dimension(
+      self._split_dim.name,
+      self._split_dim.size*2,
+    )
+    self._outputs = [Tensor(self, output_shape, tf.float32)]
+
+    def gradient(self, grad_ys):
+      dy = grad_ys[0]
+      dy_complex = to_complex(dy)
+      return [dy_complex]
+
+    def lower(self, lowering):
+      mesh_impl = lowering.mesh_impl(self)
+      split_input = self.inputs[0]
+      if mesh_impl.tensor_dimension_to_mesh_axis(self._split_dim) is not None:
+        raise ValueError("can't slice along complex split dimension")
+      def tf_fn(tf_input):
+        tf_real = tf.math.real(tf_input)
+        tf_imag = tf.math.imag(tf_input)
+        output = tf.concat([tf_real, tf_imag], axis=self._split_axis)
+        return output
+      y = mesh_impl.slicewise(tf_fn, lowering.tensors[split_input])
+      lowering.set_tensor_lowering(self.outputs[0], y)
