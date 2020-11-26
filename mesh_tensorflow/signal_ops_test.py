@@ -53,8 +53,8 @@ class FFTTest(tf.test.TestCase):
       shape=[], layout={}, devices=[""])
     lowering = mtf.Lowering(self.graph, {self.mesh: mesh_impl})
     outputs_tf = lowering.export_to_tf_tensor(outputs)
-    expected_outputs = tf.signal.ifft3d(self.volume)
-    expected_outputs = tf.transpose(expected_outputs, perm=[0, 3, 1, 2])
+    volume = tf.transpose(self.volume, perm=[0, 3, 1, 2])
+    expected_outputs = tf.signal.ifft3d(volume)
     self.assertAllClose(
       outputs_tf,
       expected_outputs,
