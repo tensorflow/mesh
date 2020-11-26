@@ -10,7 +10,7 @@ import tensorflow.compat.v1 as tf
 from mesh_tensorflow import ops_with_redefined_builtins as mtf
 
 
-class FFTBaseOperation(mtf.Operation):
+class FFT3DBaseOperation(mtf.Operation):
   def __init__(self, inputs, dims, inverse=False, name=None):
     self.inverse = inverse
     if self.inverse:
@@ -67,7 +67,7 @@ class FFTBaseOperation(mtf.Operation):
       raise NotImplementedError('This function needs to be implemented')
 
 
-class FFT3DOperation(FFTBaseOperation):
+class FFT3DOperation(FFT3DBaseOperation):
   """
   Computes the 3-dimensional discrete Fourier transform over the inner-most 3
   dimensions of input tensor. Note that the output FFT is transposed.
@@ -112,7 +112,7 @@ def fft3d(x, freq_dims, name=None):
   """
   return FFT3DOperation(x, freq_dims, name).outputs[0]
 
-class iFFT3DOperation(FFTBaseOperation):
+class iFFT3DOperation(FFT3DBaseOperation):
   """
   Computes the inverse 3-dimensional discrete Fourier transform over the inner-most 3
   dimensions of input tensor. Note that the input FFT is assumed transposed.
