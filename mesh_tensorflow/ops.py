@@ -6600,3 +6600,54 @@ def nth_largest_element(x, n, reduced_dim, name=None):
 
 def nth_smallest_element(x, n, reduced_dim, name=None):
   return -nth_largest_element(-x, n, reduced_dim, name=name)
+
+def to_complex(x, complex_dim=None):
+  """Gathers the real and imaginary of a tensor in a complex tensor
+
+  Args:
+    x: a float Tensor
+    complex_dim: a Dimension where both the real and imaginary parts of the
+      tensor are. Defaults to None, which corresponds to the last
+      dimension of the tensor.
+  Returns:
+    a Tensor, complex-valued
+  """
+  if complex_dim is None:
+    complex_dim = x.shape[-1]
+  x_real, x_imag = split(x, complex_dim, 2)
+  x_real = cast(x_real, tf.complex64)
+  x_imag = cast(x_imag, tf.complex64)
+  x_complex = x_real + 1j * x_imag
+  return x_complex
+
+def split_complex(x, complex_dim=None):
+  """Splits a complex tensor into real and imaginary, concatenated
+
+  Args:
+    x: a float Tensor
+    complex_dim: a Dimension where you want the split to happen.
+      Defaults to None, which corresponds to the last dimension of the tensor.
+  Returns:
+    a Tensor, float-valued
+  """
+  if complex_dim is None:
+    split_dim = x.shape.dims[-1]
+    split_axis = -1
+  else:
+    split_dim = complex_dim
+    split_axis = x.shape.index(complex_dim)
+  splittable_dims = [d for d in x.shape if d != split_dim]
+  def tf_fn(tf_input):
+    tf_real = tf.math.real(tf_input)
+    tf_imag = tf.math.imag(tf_input)
+    output = tf.concat([tf_real, tf_imag], axis=split_axis)
+    return output
+  output = slicewise(
+    tf_fn,
+    [x],
+    output_shape=x.shape.resize_dimension(split_dim.name, split_dim.size*2),
+    output_dtype=tf.float32,
+    splittable_dims=splittable_dims,
+    name='split_complex',
+  )
+  return output

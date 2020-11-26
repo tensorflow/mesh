@@ -622,6 +622,51 @@ class RecomputeGradTest(tf.test.TestCase):
                         self.evaluate(expected_dx))
 
 
+class ComplexManipulationTest(tf.test.TestCase):
+  def setUp(self):
+    super(ComplexManipulationTest, self).setUp()
+    self.graph = mtf.Graph()
+    self.mesh = mtf.Mesh(self.graph, "my_mesh")
+
+  def testToComplex(self):
+    tensor = tf.random.normal([1, 10, 4])
+    mtf_shape = [mtf.Dimension(f'dim_{i}', s) for i, s in enumerate(tensor.shape)]
+    tensor_mesh = mtf.import_tf_tensor(self.mesh, tensor, shape=mtf_shape)
+    outputs = mtf.to_complex(tensor_mesh)
+    assert outputs.dtype == tf.complex64
+    assert len(outputs.shape) == 3
+    assert outputs.shape[-1].size == 2
+    assert [s.size for s in outputs.shape[:-1]] == [s.size for s in tensor_mesh.shape[:-1]]
+    mesh_impl = mtf.placement_mesh_impl.PlacementMeshImpl(
+      shape=[], layout={}, devices=[""])
+    lowering = mtf.Lowering(self.graph, {self.mesh: mesh_impl})
+    outputs_tf = lowering.export_to_tf_tensor(outputs)
+    self.assertAllEqual(
+      outputs_tf,
+      tf.complex(tensor[..., 0:2], tensor[..., 2:4]),
+    )
+
+  def testSplitComplex(self):
+    tensor = tf.complex(
+      tf.random.normal([1, 10, 2]),
+      tf.random.normal([1, 10, 2]),
+    )
+    mtf_shape = [mtf.Dimension(f'dim_{i}', s) for i, s in enumerate(tensor.shape)]
+    tensor_mesh = mtf.import_tf_tensor(self.mesh, tensor, shape=mtf_shape)
+    outputs = mtf.split_complex(tensor_mesh)
+    assert outputs.dtype == tf.float32
+    assert len(outputs.shape) == 3
+    assert outputs.shape[-1].size == 4
+    assert [s.size for s in outputs.shape[:-1]] == [s.size for s in tensor_mesh.shape[:-1]]
+    mesh_impl = mtf.placement_mesh_impl.PlacementMeshImpl(
+        shape=[], layout={}, devices=[""])
+    lowering = mtf.Lowering(self.graph, {self.mesh: mesh_impl})
+    outputs_tf = lowering.export_to_tf_tensor(outputs)
+    self.assertAllEqual(
+        outputs_tf,
+        tf.concat([tf.math.real(tensor), tf.math.imag(tensor)], axis=-1),
+    )
+
 if __name__ == "__main__":
   tf.disable_v2_behavior()
   tf.enable_eager_execution()
