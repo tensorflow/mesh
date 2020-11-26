@@ -138,6 +138,15 @@ def separate_vocabularies(inputs=gin.REQUIRED, targets=gin.REQUIRED):
   return (inputs, targets)
 
 
+@gin.configurable
+def init_checkpoint_variable_mapping(name, mapping_fn=None):
+  """Maps from varaible name in graph to variable name in checkpoint."""
+  if mapping_fn:
+    return mapping_fn(name)
+  else:
+    return name
+
+
 # TODO(katherinelee): Update layout_rules string when noam updates the
 # definition in run
 def build_model(model_type="bitransformer",
@@ -728,15 +737,20 @@ def tpu_estimator_model_fn(model_type,
             ckpt_vars = {v for v in ckpt_vars if pattern.search(v)}
 
           global_vars = {v.op.name for v in tf.global_variables()}
-          restore_vars = ckpt_vars.intersection(global_vars)
+          restore_vars = {
+              v for v in global_vars if init_checkpoint_variable_mapping(v)
+              in ckpt_vars}
           tf.logging.info("Initializing variables from %s:", init_checkpoint)
           tf.logging.debug("\n".join(sorted(restore_vars)))
           tf.logging.info("Variables in %s but not in graph:", init_checkpoint)
-          tf.logging.info("\n".join(sorted(ckpt_vars - global_vars)))
+          tf.logging.info("\n".join(sorted(
+              ckpt_vars -
+              {init_checkpoint_variable_mapping(v) for v in global_vars})))
           tf.logging.info("Variables in graph but not in %s:", init_checkpoint)
-          tf.logging.info("\n".join(sorted(global_vars - ckpt_vars)))
+          tf.logging.info("\n".join(sorted(global_vars - restore_vars)))
           tf.train.init_from_checkpoint(
-              init_checkpoint, {v: v for v in restore_vars}
+              init_checkpoint,
+              {init_checkpoint_variable_mapping(v): v for v in restore_vars}
           )
 
         # Copy master variables to slices. Must be called first.
