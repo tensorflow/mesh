@@ -22,6 +22,7 @@ from __future__ import print_function
 from absl.testing import parameterized
 
 import mesh_tensorflow as mtf
+from mesh_tensorflow import test_utils
 import mock
 import numpy as np
 
@@ -467,6 +468,77 @@ class LayersTest(parameterized.TestCase, tf.test.TestCase):
     actual = self.evaluate(actual_output)
 
     self.assertAllClose(actual, [[0, 0], [1, -1], [5, -5], [4, -4]])
+
+  def testConv1dValidPadding(self):
+    converter = test_utils.NumpyConverter()
+    batch = 2
+    d_model = 6
+    d_out = 1
+    length = 4
+    filter_size = 3
+
+    x = np.random.randn(batch, length, d_model)
+    x_mtf = converter.convert_np_array_to_mtf_tensor(
+        x, dtype=tf.float32, dim_names=["batch", "length", "d_model"])
+
+    conv_filter = np.random.randn(1, filter_size, d_model, d_out)
+    initializer = lambda shape, dtype, **kwargs: conv_filter
+    output_mtf = mtf.layers.conv1d(
+        x_mtf,
+        output_dim=mtf.Dimension("output_dim", d_out),
+        filter_size=filter_size,
+        padding="VALID",
+        filter_initializer=initializer)
+    actual = converter.convert_mtf_tensor_to_np_array(output_mtf)
+
+    # Expected length is 2.
+    expected = np.empty(shape=(batch, 2, d_out), dtype=np.float32)
+
+    # [filter_size, d_model]
+    current_filter = conv_filter[0, :, :, 0]
+    # b: batch, k: filter_size, d: d_model.
+    expected[:, 0] = np.einsum("bkd,kd->b", x[:, :filter_size, :],
+                               current_filter).reshape(batch, 1)
+    expected[:, 1] = np.einsum("bkd,kd->b", x[:, 1:, :],
+                               current_filter).reshape(batch, 1)
+    self.assertAllClose(actual, expected)
+
+  def testConv1dValidPaddingMultipleBatchDims(self):
+    converter = test_utils.NumpyConverter()
+    batch = 2
+    outer_batch = 3
+    d_model = 6
+    d_out = 1
+    length = 4
+    filter_size = 3
+
+    x = np.random.randn(outer_batch, batch, length, d_model)
+    x_mtf = converter.convert_np_array_to_mtf_tensor(
+        x,
+        dtype=tf.float32,
+        dim_names=["outer_batch", "batch", "length", "d_model"])
+
+    conv_filter = np.random.randn(1, filter_size, d_model, d_out)
+    initializer = lambda shape, dtype, **kwargs: conv_filter
+    output_mtf = mtf.layers.conv1d(
+        x_mtf,
+        output_dim=mtf.Dimension("output_dim", d_out),
+        filter_size=filter_size,
+        padding="VALID",
+        filter_initializer=initializer)
+    actual = converter.convert_mtf_tensor_to_np_array(output_mtf)
+
+    # Expected length is 2.
+    expected = np.empty(shape=(outer_batch, batch, 2, d_out), dtype=np.float32)
+
+    # Effective filter: [filter_size, d_model]
+    f = conv_filter[0, :, :, 0]
+    # o: outer_batch, b: batch, k: filter_size, d: d_model.
+    expected[:, :, 0] = np.einsum("obkd,kd->ob", x[:, :, :filter_size, :],
+                                  f).reshape(outer_batch, batch, 1)
+    expected[:, :, 1] = np.einsum("obkd,kd->ob", x[:, :, 1:, :],
+                                  f).reshape(outer_batch, batch, 1)
+    self.assertAllClose(actual, expected)
 
   @mock.patch.object(tf, "truncated_normal_initializer", autospec=True)
   @test_util.run_in_graph_and_eager_modes()

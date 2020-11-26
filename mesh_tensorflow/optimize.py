@@ -20,7 +20,9 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import functools
 import re
+
 import gin
 from mesh_tensorflow import layers
 from mesh_tensorflow import ops_with_redefined_builtins as mtf
@@ -364,7 +366,8 @@ class AdafactorOptimizer(Optimizer):
     return adafactor_decay_rate_pow(0.8)
 
   def _learning_rate_default(self, multiply_by_parameter_scale):
-    learning_rate = tf.minimum(tf.math.rsqrt(step_num() + 1.0), 0.01)
+    step_num = tf.cast(tf.train.get_or_create_global_step(), tf.float32)
+    learning_rate = tf.minimum(tf.math.rsqrt(step_num + 1.0), 0.01)
     if (not multiply_by_parameter_scale
         and not layers.unit_scaling_convention()):
       learning_rate *= 0.05
@@ -384,19 +387,21 @@ def adafactor_decay_rate_adam(beta2):
   return decay
 
 
-def adafactor_decay_rate_pow(exponent):
+@gin.configurable
+def adafactor_decay_rate_pow(exponent, offset=0):
   """Second moment decay rate where memory-length grows as step_num^exponent.
+
+  For fine-tuning, you may want to gin-configure offset to equal the starting
+  step-number for the fine-tuning phase.
 
   Args:
     exponent: a float between 0 and 1
+    offset: an integer (the starting step number)
   Returns:
     a scalar
   """
-  return 1.0 - tf.pow((step_num() + 1.0), -exponent)
-
-
-def step_num():
-  return tf.cast(tf.train.get_or_create_global_step(), tf.float32)
+  step_num = tf.cast(tf.train.get_or_create_global_step() - offset, tf.float32)
+  return 1.0 - tf.pow((step_num + 1.0), -exponent)
 
 
 def adafactor_optimizer_from_hparams(hparams, lr):
@@ -430,3 +435,140 @@ def adafactor_optimizer_from_hparams(hparams, lr):
 
 def reduce_rms(x):
   return mtf.sqrt(mtf.reduce_mean(mtf.square(x)))
+
+
+@gin.configurable
+def auto_train_steps(batch_size,
+                     sequence_length,
+                     train_tokens=2 ** 36):
+  """Automatically compute number of training steps.
+
+  Since the batch size and sequence length can vary across experiments, we
+  specify the amount of training in terms of (non-unique) input tokens processed
+  over the course of training the model.  The number of steps is computed as
+
+    train_steps = train_tokens // (batch_size * sequence_length)
+
+  Args:
+    batch_size: an integer
+    sequence_length: an integer or a dict from feature-key to integer
+      the (packed) sequence length, e.g. {"inputs": 512, "targets": 128}
+    train_tokens: an integer (train_steps * batch_size * sequence_length)
+  Returns:
+    an integer
+  """
+  return train_tokens // (batch_size * max(sequence_length.values()))
+
+
+# Workaround by copying this over
+# Note: Importing this from transformers gives some circular import problems.
+@gin.configurable
+def product_learning_rate(step,
+                          total_train_steps,
+                          factors=gin.REQUIRED,
+                          offset=0):
+  """Learning rate is the product of one or more factors.
+
+  Takes a list of factors which are either numbers or learning-rate functions
+  each taking step and total_train_step arguments.
+
+  If `offset` is nonzero, then subtract offset from the step and from
+  total_train_steps before computing the learning rate.
+
+  Args:
+    step: a tf.Scalar
+    total_train_steps: a number
+    factors: a list of numbers and/or functions
+    offset: an optional float
+
+  Returns:
+    a tf.Scalar, the learning rate for the step.
+  """
+  ret = 1.0
+  for f in factors:
+    ret *= f(step - offset, total_train_steps - offset) if callable(f) else f
+  return ret
+
+
+def compute_lr_for_step(schedules, learning_rate, batch_size, sequence_length):
+  """Get actual LR for step."""
+  actual_lr_rates = []
+  for lr_schedule in schedules:
+    if lr_schedule is None:
+      actual_lr_rates.append(learning_rate)
+    else:
+      converted_schedule = functools.partial(
+          product_learning_rate, factors=lr_schedule)
+      train_steps = auto_train_steps(batch_size, sequence_length)
+      converted_schedule = functools.partial(
+          converted_schedule, total_train_steps=train_steps)
+      if callable(converted_schedule):
+        # the following happens on CPU since TPU can't handle summaries.
+        with mtf.utils.outside_all_rewrites():
+          converted_schedule = converted_schedule(
+              step=tf.train.get_global_step())
+          tf.summary.scalar("alt_learning_rate", converted_schedule)
+      actual_lr_rates.append(converted_schedule)
+  return actual_lr_rates
+
+
+@gin.configurable
+class AdafactorWithMultiLRSchedule(AdafactorOptimizer):
+  """Adafactor with Multiple LR schedule."""
+
+  def __init__(self,
+               variable_search=None,
+               alt_lr_schedules=None,
+               batch_size=gin.REQUIRED,
+               sequence_length=gin.REQUIRED,
+               **kwargs
+               ):
+    """Construct a new Adafactor optimizer.
+
+    See class comment.
+
+    Args:
+      variable_search: list of regex strings to use alt learning rate.
+      alt_lr_schedules: list of learning_rate_schedules
+      batch_size: int, batch size of model
+      sequence_length: int, length of training.
+      **kwargs: Adafactor keyword args
+
+    Raises:
+      ValueError: if absolute_update_scale and relative_update_scale_fn are both
+        present or both absent.
+    """
+    super(AdafactorWithMultiLRSchedule, self).__init__(
+        **kwargs
+    )
+    self.variable_search = variable_search
+    self.alt_lr_schedules = alt_lr_schedules
+    # need these to get train steps
+    # TODO(yitay): Figure out how to get batch size w/o needing pre-computing
+    # For now set to 128 in accordance with default setting.
+    self.batch_size = batch_size
+    self.sequence_length = sequence_length
+
+  def apply_grad(self, grad, var):
+    if self.alt_lr_schedules is None or self.variable_search is None:
+      return super(AdafactorWithMultiLRSchedule, self).apply_grad(grad, var)
+
+    actual_lr_rates = compute_lr_for_step(self.alt_lr_schedules,
+                                          self._learning_rate,
+                                          self.batch_size,
+                                          self.sequence_length
+                                          )
+    # Modify learning rate for exception variables
+    for idx, variable_search in enumerate(self.variable_search):
+      if re.search(variable_search, var.name) is not None:
+        # finds variable in LR schedule
+        old_lr = self._learning_rate
+        # get n-th learning rate schedule
+        self._learning_rate = actual_lr_rates[idx]
+        assignments = super(AdafactorWithMultiLRSchedule,
+                            self).apply_grad(grad, var)
+        self._learning_rate = old_lr
+      else:
+        assignments = super(AdafactorWithMultiLRSchedule,
+                            self).apply_grad(grad, var)
+    return assignments

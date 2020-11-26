@@ -717,7 +717,7 @@ class UTLayerStack(transformer.TransformerLayer):
     Returns:
       a Tensor
     """
-    return transformer.layer_norm(context, x, self._norm_epsilon, name)
+    return mtf.layers.layer_norm(x, context.model.model_dim, self._norm_epsilon)
 
   @property
   def num_layers(self):

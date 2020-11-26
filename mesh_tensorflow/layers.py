@@ -356,8 +356,23 @@ class VarianceScalingInitializer(DenseInitializer):
 def conv1d(x, output_dim, filter_size=3, stride=1, **kw_args):
   """1D Convolution.
 
+  x can have multiple batch dims. The last dimension is considered the channel
+  dimension and the second-last dimension is the width dimension.
+
+  This function supports either "SAME" padding or "VALID" padding. The padding
+  type is specified by kwarg `padding` to conv2d, which transform the input
+  tensor x as follows:
+
+  padding="SAME"
+  [batch, fake_height, length, d_model]
+    -> [batch, fake_height, length, output_dim]
+
+  padding="VALID"
+  [batch, fake_height, length, d_model]
+    -> [batch, fake_height, output_length, output_dim]
+
   Args:
-    x: a mtf.Tensor of format NWC.
+    x: a mtf.Tensor of format NWC where N can be multiple batch dimensions.
     output_dim: a mtf.Dimension, indicating the output channel dimension.
     filter_size: a positive integer, the filter width.
     stride: a positive integer, the stride.
@@ -375,12 +390,11 @@ def conv1d(x, output_dim, filter_size=3, stride=1, **kw_args):
       filter_size=(1, filter_size),
       strides=(1, stride),
       **kw_args)
-  return mtf.reshape(
-      output,
-      mtf.Shape([
-          d for d in x.shape.dims
-          if d != fake_height_dim and d != x.shape.dims[-1]
-      ] + [output_dim]))
+
+  output_length_dim = output.shape.dims[-2]
+  output_shape = output.shape.dims[:-3] + [output_length_dim] + [output_dim]
+  output_shape = mtf.Shape(output_shape)
+  return mtf.reshape(output, output_shape)
 
 
 def _depthwise_conv1d_hack(x,
