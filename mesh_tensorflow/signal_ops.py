@@ -19,7 +19,7 @@ class FFT3DBaseOperation(mtf.Operation):
     else:
       self.default_name = 'FFT3D'
       self.tf_op = tf.spectral.fft
-    super(FFTBaseOperation, self).__init__([inputs], name=name or self.default_name)
+    super(FFT3DBaseOperation, self).__init__([inputs], name=name or self.default_name)
     self._dims = dims
     if self.inverse:
       dims_reordered = dims
