@@ -6644,7 +6644,7 @@ def split_complex(x, complex_dim=None):
     return output
   output = slicewise(
     tf_fn,
-    x,
+    [x],
     output_shape=x.shape.resize_dimension(split_dim.name, split_dim.size*2),
     output_dtype=tf.float32,
     splittable_dims=splittable_dims,
