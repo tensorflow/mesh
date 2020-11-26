@@ -66,7 +66,7 @@ def attention(q,
     Tensor with shape q.shape - key_dim + value_dim
   """
   orig_q_shape = q.shape
-  q, k, v, bias = _maybe_reshape_attention_input_for_2d_sharding(
+  q, k, v, bias = maybe_reshape_attention_input_for_2d_sharding(
       context, q, k, v, bias, [key_dim, value_dim])
   logits = mtf.layers.us_einsum([q, k], reduced_dims=[key_dim])
   if bias is not None:
@@ -241,7 +241,11 @@ def synthetic_attention(q,
                             dtype=context.variable_dtype)
       r = mtf.einsum([r1, r2], r_shape)
       r = mtf.slice(r, 0, memory_length_dim.size, memory_length_dim.name)
-      r = mtf.slice(r, 0, length_dim.size, length_dim.name)
+      if context.mode == "incremental":
+        r = mtf.gather(r, context.position, r.shape.get_dim_by_name("length"))
+      else:
+        length_dim = q.shape.get_dim_by_name("length")
+        r = mtf.slice(r, 0, length_dim.size, "length")
       logits = r
     elif synthesize_mode == "dense_minus":
       # Dense Synthesizer Model
@@ -258,7 +262,8 @@ def synthetic_attention(q,
       else:
         length_dim = q.shape.get_dim_by_name("length")
         logits = mtf.slice(logits, 0, length_dim.size, "length")
-    elif synthesize_mode == "random_plus_alpha":
+    elif synthesize_mode == "random_plus_alpha" or \
+        synthesize_mode == "random_plus":
       # Mixture Random Synthesizer with learnable Alpha
       tf.logging.info("Using Random Plus Alpha")
       logits = mtf.einsum([q, k], reduced_dims=[key_dim])
@@ -275,14 +280,18 @@ def synthetic_attention(q,
       else:
         length_dim = q.shape.get_dim_by_name("length")
         r = mtf.slice(r, 0, length_dim.size, length_dim.name)
-      alpha = mtf.get_variable(context.mesh,
-                               "alpha",
-                               mtf.Shape([mtf.Dimension("alpha", 1)]),
-                               initializer=tf.zeros_initializer(),
-                               dtype=context.variable_dtype)
-      alpha = mtf.sigmoid(alpha)
-      logits = ((1-alpha) * logits) + (alpha * r)
-    elif synthesize_mode == "dense_plus_alpha":
+      if "alpha" in synthesize_mode:
+        alpha = mtf.get_variable(context.mesh,
+                                 "alpha",
+                                 mtf.Shape([mtf.Dimension("alpha", 1)]),
+                                 initializer=tf.zeros_initializer(),
+                                 dtype=context.variable_dtype)
+        alpha = mtf.sigmoid(alpha)
+        logits = ((1-alpha) * logits) + (alpha * r)
+      else:
+        logits = logits + r
+    elif synthesize_mode == "dense_plus_alpha" or \
+        synthesize_mode == "dense_plus":
       # Mixture Dense Synthesizer with learnable alpha
       tf.logging.info("Using Dense Plus Alpha Scaling")
       logits = mtf.einsum([q, k], reduced_dims=[key_dim])
@@ -298,13 +307,16 @@ def synthetic_attention(q,
       else:
         length_dim = q.shape.get_dim_by_name("length")
         r = mtf.slice(r, 0, length_dim.size, "length")
-      alpha = mtf.get_variable(context.mesh,
-                               "alpha",
-                               mtf.Shape([mtf.Dimension("alpha", 1)]),
-                               initializer=tf.zeros_initializer(),
-                               dtype=context.variable_dtype)
-      alpha = mtf.sigmoid(alpha)
-      logits = ((1-alpha) * logits) + (alpha * r)
+      if "alpha" in synthesize_mode:
+        alpha = mtf.get_variable(context.mesh,
+                                 "alpha",
+                                 mtf.Shape([mtf.Dimension("alpha", 1)]),
+                                 initializer=tf.zeros_initializer(),
+                                 dtype=context.variable_dtype)
+        alpha = mtf.sigmoid(alpha)
+        logits = ((1-alpha) * logits) + (alpha * r)
+      else:
+        logits = logits + r
   if bias is not None:
     logits += bias
 
@@ -344,7 +356,8 @@ class AttentionParams(object):
                combine_dims=True,
                ensemble_dim=None,
                keep_query_heads_dims=False,
-               fold_scaling_into_initializer=True):
+               fold_scaling_into_initializer=True,
+               make_attention_vars=True):
     """Create attention parameters.
 
     combine_dims is a hack for faster execution.  The heads and key/value
@@ -368,9 +381,13 @@ class AttentionParams(object):
       keep_query_heads_dims: a boolean, if true keep the query_heads_dims in the
         output.
       fold_scaling_into_initializer: a boolean
+      make_attention_vars: a boolean, whether to make the attention variables.
+        This is typically True. Only set to False for ExpertsAttention which
+        creates variables inside the moe.MoE1D-call.
     """
     if shared_kv and key_dim != value_dim:
       raise ValueError("shared_kv requires key_dim == value_dim")
+    self.mesh = mesh
     self.query_input_dim = query_input_dim
     self.memory_input_dim = memory_input_dim
     self.output_dim = output_dim
@@ -378,53 +395,84 @@ class AttentionParams(object):
     self.value_dim = value_dim
     self.query_heads_dims = query_heads_dims or []
     self.memory_heads_dims = memory_heads_dims or []
+    self.variable_dtype = variable_dtype
     self.shared_kv = shared_kv
     self.no_query = no_query
     self.combine_dims = combine_dims
     self.keep_query_heads_dims = keep_query_heads_dims
     self.fold_scaling_into_initializer = fold_scaling_into_initializer
+    self.make_attention_vars = make_attention_vars
+
     if combine_dims:
-      q_shape = [query_input_dim, _combined_dim(self.q_dims)]
-      k_shape = [memory_input_dim, _combined_dim(self.k_dims)]
-      v_shape = [memory_input_dim, _combined_dim(self.v_dims)]
-      o_shape = [_combined_dim(self.o_dims), output_dim]
+      self.q_shape = [query_input_dim, _combined_dim(self.q_dims)]
+      self.k_shape = [memory_input_dim, _combined_dim(self.k_dims)]
+      self.v_shape = [memory_input_dim, _combined_dim(self.v_dims)]
+      self.o_shape = [_combined_dim(self.o_dims), output_dim]
     else:
-      q_shape = [query_input_dim] + self.q_dims
-      k_shape = [memory_input_dim] + self.k_dims
-      v_shape = [memory_input_dim] + self.v_dims
-      o_shape = self.o_dims + [output_dim]
+      self.q_shape = [query_input_dim] + self.q_dims
+      self.k_shape = [memory_input_dim] + self.k_dims
+      self.v_shape = [memory_input_dim] + self.v_dims
+      self.o_shape = self.o_dims + [output_dim]
+    if ensemble_dim:
+      self.q_shape = [ensemble_dim] + self.q_shape
+      self.k_shape = [ensemble_dim] + self.k_shape
+      self.v_shape = [ensemble_dim] + self.v_shape
+      self.o_shape = [ensemble_dim] + self.o_shape
+
+    self.init_weights()
+
+  def init_weights(self):
+    """Initialize attention projection matrices."""
     if mtf.layers.unit_scaling_convention():
       init = tf.random_normal_initializer(stddev=1.0)
       q_init = init
       kv_init = init
       o_init = init
     else:
-      stddev = query_input_dim.size ** -0.5
+      stddev = self.query_input_dim.size ** -0.5
       if self.fold_scaling_into_initializer:
-        stddev *= key_dim.size ** -0.5
+        stddev *= self.key_dim.size ** -0.5
       q_init = tf.random_normal_initializer(stddev=stddev)
       kv_init = tf.random_normal_initializer(
-          stddev=memory_input_dim.size ** -0.5)
+          stddev=self.memory_input_dim.size ** -0.5)
       o_init = tf.random_normal_initializer(
-          stddev=mtf.Shape(self.query_heads_dims + [value_dim]).size ** -0.5)
-    if ensemble_dim:
-      q_shape = [ensemble_dim] + q_shape
-      k_shape = [ensemble_dim] + k_shape
-      v_shape = [ensemble_dim] + v_shape
-      o_shape = [ensemble_dim] + o_shape
-    if not self.no_query:
-      self.wq = mtf.get_variable(
-          mesh, "q", q_shape, initializer=q_init, dtype=variable_dtype)
-    if shared_kv:
-      self.wkv = mtf.get_variable(
-          mesh, "kv", k_shape, initializer=kv_init, dtype=variable_dtype)
-    else:
-      self.wk = mtf.get_variable(
-          mesh, "k", k_shape, initializer=kv_init, dtype=variable_dtype)
-      self.wv = mtf.get_variable(
-          mesh, "v", v_shape, initializer=kv_init, dtype=variable_dtype)
+          stddev=mtf.Shape(self.query_heads_dims + [self.value_dim]).size**-0.5)
+
+    # Toggle producing wq, wv, wk which are not needed for the ExpertsAttention
+    if self.make_attention_vars:
+      if not self.no_query:
+        self.wq = mtf.get_variable(
+            self.mesh,
+            "q",
+            self.q_shape,
+            initializer=q_init,
+            dtype=self.variable_dtype)
+      if self.shared_kv:
+        self.wkv = mtf.get_variable(
+            self.mesh,
+            "kv",
+            self.k_shape,
+            initializer=kv_init,
+            dtype=self.variable_dtype)
+      else:
+        self.wk = mtf.get_variable(
+            self.mesh,
+            "k",
+            self.k_shape,
+            initializer=kv_init,
+            dtype=self.variable_dtype)
+        self.wv = mtf.get_variable(
+            self.mesh,
+            "v",
+            self.v_shape,
+            initializer=kv_init,
+            dtype=self.variable_dtype)
     self.wo = mtf.get_variable(
-        mesh, "o", o_shape, initializer=o_init, dtype=variable_dtype)
+        self.mesh,
+        "o",
+        self.o_shape,
+        initializer=o_init,
+        dtype=self.variable_dtype)
 
   def compute_q(self, query_antecedent):
     """Compute query Tensor q.
@@ -537,6 +585,107 @@ class AttentionParams(object):
   @property
   def o_dims(self):
     return self.query_heads_dims + [self.value_dim]
+
+
+class ExpertsAttentionParams(AttentionParams):
+  """Create attention parameters using experts-layer."""
+
+  def __init__(self,
+               mesh,
+               query_input_dim,
+               memory_input_dim,
+               output_dim,
+               key_dim,
+               value_dim,
+               query_heads_dims,
+               memory_heads_dims,
+               variable_dtype,
+               shared_kv=False,
+               no_query=False,
+               combine_dims=True,
+               ensemble_dim=None,
+               keep_query_heads_dims=False,
+               fold_scaling_into_initializer=True,
+               context=None,
+               experts_hparams=None):
+    super(ExpertsAttentionParams, self).__init__(
+        mesh=mesh,
+        query_input_dim=query_input_dim,
+        memory_input_dim=memory_input_dim,
+        output_dim=output_dim,
+        key_dim=key_dim,
+        value_dim=value_dim,
+        query_heads_dims=query_heads_dims,
+        memory_heads_dims=memory_heads_dims,
+        variable_dtype=variable_dtype,
+        shared_kv=shared_kv,
+        no_query=no_query,
+        combine_dims=combine_dims,
+        ensemble_dim=ensemble_dim,
+        keep_query_heads_dims=keep_query_heads_dims,
+        fold_scaling_into_initializer=fold_scaling_into_initializer,
+        make_attention_vars=False)
+
+    self.context = context
+
+    # ExpertsAttention, for simplicitly, asserts that combine_dims is True, and
+    # for efficiency, that shared_kv is True.
+    if not self.combine_dims:
+      raise ValueError("self.combine_dims must be True for ExpertsAttention")
+    if not self.shared_kv:
+      raise ValueError("self.shared_kv must be True for ExpertsAttention")
+    if mtf.layers.unit_scaling_convention():
+      raise NotImplementedError
+
+    moe_output_dims = self.q_shape[-1]
+    tf.logging.info("ExpertsAttention moe_hidden_size: {}".format(
+        experts_hparams.hidden_size))
+    tf.logging.info("moe_output_dims: {}".format(moe_output_dims))
+    self.moe_layer = mtf.transformer.moe.MoE1D(
+        moe_gating=experts_hparams.moe_gating,
+        num_experts=experts_hparams.num_experts,
+        loss_coef=experts_hparams.loss_coef,
+        group_size=experts_hparams.group_size,
+        min_expert_capacity=experts_hparams.min_expert_capacity,
+        capacity_factor_train=experts_hparams.capacity_factor_train,
+        capacity_factor_eval=experts_hparams.capacity_factor_eval,
+        rand_1_policy_train=experts_hparams.rand_1_policy_train,
+        rand_1_policy_eval=experts_hparams.rand_1_policy_eval,
+        rand_1_dropout=experts_hparams.rand_1_dropout,
+        rand_1_temperature=experts_hparams.rand_1_temperature,
+        rand_1_jitter=experts_hparams.rand_1_jitter,
+        switch_top_k=experts_hparams.switch_top_k,
+        hidden_size=experts_hparams.hidden_size,
+        output_dim=moe_output_dims,
+        use_experts_attention=experts_hparams.use_experts_attention)
+
+  def _compute_merge_qkv(self, antecedent):
+    """Computes qkv all in one call using MoE layer."""
+    # NOTE: This assumes querty and memory antecedent are the same
+    qk = self.moe_layer.call(self.context, antecedent)
+    # Split qk here since they went through experts-layers
+    q, k = qk
+
+    # Scale query
+    q *= self.key_dim.size ** -0.5
+    self._q = mtf.replace_dimensions(q, q.shape.dims[-1], self.q_dims)
+    self._k = mtf.replace_dimensions(k, k.shape.dims[-1], self.k_dims)
+
+  def compute_q(self, query_antecedent):
+    self._compute_merge_qkv(query_antecedent)
+    return self._q
+
+  def compute_k(self, memory_antecedent):
+    del memory_antecedent
+    return self._k
+
+  def compute_kv(self, memory_antecedent):
+    del memory_antecedent
+    return self._k
+
+  def compute_v(self, memory_antecedent):
+    del memory_antecedent
+    raise NotImplementedError("ExpertsAttention uses shared_kv = True.")
 
 
 def _combined_dim(dims):
@@ -689,7 +838,7 @@ def visibility_mask_to_attention_bias(visible, dtype):
   return mtf.cast(mtf.logical_not(visible), dtype) * -1e9
 
 
-def _maybe_reshape_attention_input_for_2d_sharding(
+def maybe_reshape_attention_input_for_2d_sharding(
     context, q, k, v, bias, unsplittable_dims):
   """Reshape the inputs to attention to split over an unused mesh dimension.
 

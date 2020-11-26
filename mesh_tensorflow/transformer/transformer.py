@@ -769,7 +769,7 @@ class Unitransformer(object):
     off_value = self.label_smoothing / output_vocab_dim.size
     on_value = 1.0 - self.label_smoothing + off_value
     soft_targets = mtf.one_hot(
-        targets,
+        mtf.maximum(targets, 0),
         output_vocab_dim,
         dtype=context.activation_dtype,
         on_value=on_value,
@@ -779,8 +779,7 @@ class Unitransformer(object):
         soft_targets,
         output_vocab_dim,
         z_loss=self.z_loss if context.train else 0.0)
-    weights = mtf.layers.weights_nonzero(
-        targets, dtype=context.activation_dtype)
+    weights = mtf.cast(mtf.greater(targets, 0), context.activation_dtype)
     if self.loss_on_targets_only:
       weights *= mtf.cast(mtf.logical_not(delimited_lm_inputs_mask(targets)),
                           dtype=context.activation_dtype)
@@ -819,7 +818,7 @@ class Unitransformer(object):
           ensemble_dim=self.ensemble_dim)
     if context.train:
       inputs = mtf.dropout(inputs, rate=self.token_dropout_rate)
-    x = vocab_embedding.ids_to_embedding(inputs)
+    x = vocab_embedding.ids_to_embedding(inputs, context)
     if self.positional_embedding or self.sinusoid_positional_embedding:
       if self.sinusoid_positional_embedding:
         pos_emb_var = sinusoid_positional_embedding_weights(
@@ -895,6 +894,7 @@ class Unitransformer(object):
       if self.ensemble_dim:
         # The ensembling should not decrease the gradient to each model
         ret /= self.ensemble_dim.size
+      tf.logging.info("loss denominator: %d" % ret)
       return float(ret)
 
   def call_simple(self,
@@ -919,8 +919,8 @@ class Unitransformer(object):
 
     Args:
       inputs: an int32 Tensor with shape [<batch_dims>, length_dim] For training
-        autoregressive models this should be equal to mtf.shift(targets,
-        offset=1, dim=length_dim, wrap=False)
+        autoregressive models this should be equal to
+        autoregressive_inputs(targets, sequence_id).
       targets: an optional int32 Tensor with shape [<batch_dims>, length_dim]
       compute_loss: a boolean
       mode: a tf.estimator.ModeKeys
@@ -1096,7 +1096,7 @@ class Unitransformer(object):
         inputs=inputs,
         encoder_inputs=encoder_inputs)
 
-    shifted_inputs = mtf.shift(inputs, offset=1, dim=length_dim, wrap=False)
+    shifted_inputs = autoregressive_inputs(inputs)
     with tf.variable_scope(self.name):
       logits = self._call_internal(context_first_part, shifted_inputs)
     del logits
@@ -1271,7 +1271,7 @@ class Unitransformer(object):
         inputs=inputs,
         encoder_inputs=encoder_inputs)
 
-    shifted_inputs = mtf.shift(inputs, offset=1, dim=length_dim, wrap=False)
+    shifted_inputs = autoregressive_inputs(inputs)
     with tf.variable_scope(self.name):
       logits = self._call_internal(context_first_part, shifted_inputs)
     del logits
@@ -1329,6 +1329,8 @@ class Unitransformer(object):
 def shift_targets(targets, bos_id=0, eos_id=1):
   """Transforms decoder labels to decoder inputs.
 
+  DEPRECATED - use autoregressive_inputs()
+
   Args:
     targets: decoder labels
     bos_id: begin of sequence id, defaults to 0
@@ -1337,6 +1339,8 @@ def shift_targets(targets, bos_id=0, eos_id=1):
   Returns:
     Decoder inputs.
   """
+  tf.logging.warning("warning: shift_targets is deprecated - "
+                     "use autoregressive_inputs() instead.")
   length_dim = targets.shape.dims[-1]
   shifted_targets = mtf.shift(targets, offset=1, dim=length_dim, wrap=False)
   # We should have a 0 at the beginning of each sequence rather than the
@@ -1350,6 +1354,37 @@ def shift_targets(targets, bos_id=0, eos_id=1):
             mtf.not_equal(targets, 0))) * bos_id
 
   return shifted_targets
+
+
+def autoregressive_inputs(targets, sequence_id=None):
+  """Generate inputs for an autoregressive model, by shifting the targets.
+
+  For the first element of each sequence, the returned input id is 0.
+
+  For a "packed" dataset, also pass the sequence_id tensor, which aligns
+  with the targets tensor and contains different values for different
+  concatenated examples.
+
+  Args:
+    targets: a tf.int32 Tensor with shape [..., length_dim]
+    sequence_id: an optional Tensor with the same shape as targets
+
+  Returns:
+    a Tensor with dtype tf.int32 and the same shape as targets.
+  """
+  length_dim = targets.shape.dims[-1]
+  inputs = mtf.shift(targets, offset=1, dim=length_dim, wrap=False)
+  # Negative ids are used to indicate masked loss during training.
+  # Switch them back to positive numbers.
+  inputs = mtf.abs(inputs)
+  # We should have a 0 at the beginning of each sequence rather than the
+  # shifted EOS (e.g. 1) from the previous sequence.
+  if sequence_id is not None:
+    not_first_in_sequence = mtf.equal(
+        sequence_id,
+        mtf.shift(sequence_id, offset=1, dim=length_dim, wrap=False))
+    inputs *= mtf.to_int32(not_first_in_sequence)
+  return inputs
 
 
 @gin.configurable
@@ -1483,7 +1518,7 @@ class Bitransformer(object):
           encoder_sequence_id)
 
     logits, loss = self.decoder.call_simple(
-        shift_targets(targets),
+        autoregressive_inputs(targets, sequence_id=decoder_sequence_id),
         targets,
         compute_loss,
         mode=mode,
@@ -1608,7 +1643,8 @@ class StudentTeacher(object):
                teacher,
                temperature=None,
                fraction_soft=None,
-               teacher_checkpoint=None):
+               teacher_checkpoint=None,
+               initialize_student_weights=False):
     """Create a StudentTeacher.
 
     Args:
@@ -1622,12 +1658,16 @@ class StudentTeacher(object):
         training.
       teacher_checkpoint: a string, the path to the teacher checkpoint that we
         wish to use. Required only when training.
+      initialize_student_weights: a boolean, if true then initialize any
+        of the student weights whose name matches those in the teacher
+        checkpoint.
     """
     self.student = student
     self.teacher = teacher
     self.temperature = temperature
     self.fraction_soft = fraction_soft
     self.teacher_checkpoint = teacher_checkpoint
+    self.initialize_student_weights = initialize_student_weights
 
   def call_simple(self,
                   inputs,
@@ -1697,8 +1737,7 @@ class StudentTeacher(object):
         z_loss=z_loss)
 
     # Ignore losses from padding regions.
-    weights = mtf.layers.weights_nonzero(
-        targets, dtype=variable_dtype.activation_dtype)
+    weights = mtf.cast(mtf.greater(targets, 0), soft_loss.dtype)
     soft_loss = (mtf.reduce_sum(soft_loss * weights) /
                  self.student.loss_denominator(targets, num_microbatches))
 
@@ -1729,7 +1768,7 @@ class StudentTeacher(object):
         raise ValueError("unrecognized class")
 
   def initialize(self):
-    """Initialize the teacher model from the checkpoint.
+    """Initialize the teacher and maybe student model from the checkpoint.
 
     This function will be called after the graph has been constructed.
     """
@@ -1738,6 +1777,31 @@ class StudentTeacher(object):
       return
     vars_to_restore = tf.get_collection(
         tf.GraphKeys.GLOBAL_VARIABLES, scope="teacher")
+
+    if self.initialize_student_weights:
+      student_vars_to_restore = tf.get_collection(
+          tf.GraphKeys.GLOBAL_VARIABLES, scope="student")
+      # See what variables exist in the checkpoint
+      ckpt_vars = set([
+          name for name, _ in tf.train.list_variables(self.teacher_checkpoint)])
+      student_load_dict = {}
+      # Loop over all student variables and see if any can be loaded from ckpt
+      for var in student_vars_to_restore:
+        var_name = var.name[len("student/"):].split(":")[0]
+        if var_name in ckpt_vars:
+          student_load_dict[var_name] = var
+        else:
+          tf.logging.info("Student variable not found in ckpt: {}".format(
+              var_name))
+
+      loaded_vars = set(student_load_dict.keys())
+      tf.logging.info("Variables not restored from ckpt for student: {}".format(
+          ckpt_vars - loaded_vars))
+
+      tf.train.init_from_checkpoint(
+          self.teacher_checkpoint, student_load_dict)
+
+    # Initialize teacher weights
     tf.train.init_from_checkpoint(
         self.teacher_checkpoint,
         {v.name[len("teacher/"):].split(":")[0]: v for v in vars_to_restore})
@@ -1818,7 +1882,8 @@ def make_bitransformer(
     layout=None,
     mesh_shape=None,
     encoder_name="encoder",
-    decoder_name="decoder"):
+    decoder_name="decoder",
+    bitransformer_cls=Bitransformer):
   """Gin-configurable bitransformer constructor.
 
   In your config file you need to set the encoder and decoder layers like this:
@@ -1841,8 +1906,10 @@ def make_bitransformer(
       Some layers (e.g. MoE layers) cheat by looking at layout and mesh_shape
     encoder_name: optional - a string giving the Unitransformer encoder name.
     decoder_name: optional - a string giving the Unitransformer decoder name.
+    bitransformer_cls: a class that implements the bitransformer with the
+      encoder and decoder both of which are Unitransformer instances.
   Returns:
-    a Bitransformer
+    a bitransformer_cls instance
   """
   with gin.config_scope("encoder"):
     encoder = Unitransformer(
@@ -1862,7 +1929,7 @@ def make_bitransformer(
         name=decoder_name,
         layout=layout,
         mesh_shape=mesh_shape)
-  return Bitransformer(encoder, decoder)
+  return bitransformer_cls(encoder, decoder)
 
 
 @gin.configurable
@@ -2019,7 +2086,8 @@ class VocabEmbedding(object):
         ensemble_dim=ensemble_dim,
         initializer=initializer)
 
-  def ids_to_embedding(self, ids):
+  def ids_to_embedding(self, ids, context):
+    del context
     ret = mtf.gather(self._embedding_weights, ids, self._vocab_dim)
     if self._scale_variable_like_classifier_weights:
       ret *= self._output_dim.size ** 0.5
