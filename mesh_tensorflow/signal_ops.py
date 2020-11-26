@@ -87,7 +87,7 @@ class FFT3DBaseOperation(mtf.Operation):
         split_axes = [split_axes[2], split_axes[0], split_axes[1]]
 
     perm = np.arange(naxes)
-    perm[-3:] = np.roll(perm[-3:], shift=-1)
+    perm[-3:] = np.roll(perm[-3:], shift=-1 if self.inverse else 1)
     slices = mesh_impl.slicewise(lambda x: tf.transpose(x, perm), slices)
     return split_axes, slices
 
@@ -119,4 +119,4 @@ def ifft3d(x, dims, name=None):
   Returns:
     A Tensor of shape `input.shape[:-3] + dims`.
   """
-  return FFT3DBaseOperation(x, freq_dims, inverse=True, name=name).outputs[0]
+  return FFT3DBaseOperation(x, dims, inverse=True, name=name).outputs[0]
