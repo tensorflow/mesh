@@ -108,7 +108,7 @@ def fft3d(x, freq_dims, name=None):
     name: A name for the operation (optional).
 
   Returns:
-    A Tensor of shape `input.shape[:-3] + freq_dims`.
+    A Tensor of shape `input.shape[:-3] + freq_dims[1] + freq_dims[2] + freq_dims[0]`.
   """
   return FFT3DOperation(x, freq_dims, name).outputs[0]
 
