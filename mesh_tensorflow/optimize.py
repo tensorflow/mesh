@@ -572,3 +572,71 @@ class AdafactorWithMultiLRSchedule(AdafactorOptimizer):
         assignments = super(AdafactorWithMultiLRSchedule,
                             self).apply_grad(grad, var)
     return assignments
+
+
+@gin.configurable
+class AdamWithMultiLRSchedule(AdamWeightDecayOptimizer):
+  """An  Adam optimizer that includes "correct" L2 weight decay.
+
+  Adam optimizer that is able to processes multiple learning rate schedules
+  for different variables within the optimizer class itself. This function
+  takes in a list of variables to search and a list of corresponding
+  alt lr schedules.
+
+  The original variables are processed with the original learning rate
+  controlled from outside the loop.
+
+  Learning rate schedule should use the product learning rate.
+  """
+
+  def __init__(self,
+               variable_search=None,
+               alt_lr_schedules=None,
+               batch_size=gin.REQUIRED,
+               sequence_length=gin.REQUIRED,
+               **kwargs
+               ):
+    """Adam LR with multi LR schedule.
+
+    Args:
+      variable_search: list of regex strings to use alt learning rate.
+      alt_lr_schedules: list of learning_rate_schedules
+      batch_size: int, batch size of model
+      sequence_length: int, length of training.
+      **kwargs: Adam keyword args
+    """
+    super(AdamWithMultiLRSchedule, self).__init__(
+        **kwargs
+    )
+    self.variable_search = variable_search
+    self.alt_lr_schedules = alt_lr_schedules
+    # need these to get train steps
+    # TODO(yitay): Figure out how to get batch size w/o needing pre-computing
+    # For now set to 128 in accordance with default setting.
+    self.batch_size = batch_size
+    self.sequence_length = sequence_length
+
+  def apply_grad(self, grad, var):
+    if self.alt_lr_schedules is None or self.variable_search is None:
+      return super(AdamWithMultiLRSchedule, self).apply_grad(grad, var)
+
+    actual_lr_rates = compute_lr_for_step(self.alt_lr_schedules,
+                                          self.learning_rate,
+                                          self.batch_size,
+                                          self.sequence_length
+                                          )
+
+    # Modify learning rate for exception variables
+    for idx, variable_search in enumerate(self.variable_search):
+      if re.search(variable_search, var.name) is not None:
+        # finds variable in LR schedule
+        old_lr = self.learning_rate
+        # get n-th learning rate schedule
+        self.learning_rate = actual_lr_rates[idx]
+        assignments = super(AdamWithMultiLRSchedule,
+                            self).apply_grad(grad, var)
+        self.learning_rate = old_lr
+      else:
+        assignments = super(AdamWithMultiLRSchedule,
+                            self).apply_grad(grad, var)
+    return assignments
