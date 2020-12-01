@@ -441,7 +441,7 @@ class Graph(object):
 
   @gin.configurable
   def rewrite_stack_variables(self,
-                              max_combined_variable_size=2 ** 30,
+                              max_combined_variable_size=2 ** 29,
                               max_combined_slice_size=2 ** 27,
                               mesh_to_impl=None):
     """Rewrite the current graph to combine variables.
