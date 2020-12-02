@@ -119,6 +119,7 @@ def pack_or_pad(
     a tf.data.Dataset where all features have fixed shape [length].
   """
   feature_keys = set(feature_keys or tf.data.get_output_shapes(dataset).keys())
+
   if pack:
     dataset = pack_dataset(dataset, length=length, keys=feature_keys)
   # Pad/trim length of each example to length.
@@ -127,16 +128,6 @@ def pack_or_pad(
   if ensure_eos:
     eos_keys = feature_keys if isinstance(ensure_eos, bool) else ensure_eos
     dataset = ensure_dataset_eos(dataset, eos_keys)
-
-  def _features_to_int32(ex):
-    return dict([
-        (k, tf.cast(v, tf.int32)) if k in feature_keys else (k, v)
-        for k, v in ex.items()
-    ])
-
-  dataset = dataset.map(
-      _features_to_int32, num_parallel_calls=tf.data.experimental.AUTOTUNE
-  )
 
   return dataset
 
@@ -725,8 +716,18 @@ def _pack_with_custom_ops(dataset, keys, length):
           k2 + "_position": k2_position,
       })
     return packed
-  dataset = dataset.map(map_fn_custom,
-                        num_parallel_calls=tf.data.experimental.AUTOTUNE)
+
+  def _cast_features(dataset, dtype):
+    return dataset.map(
+        lambda ex: {k: tf.cast(ex[k], dtype) for k in keys},
+        num_parallel_calls=tf.data.experimental.AUTOTUNE
+    )
+
+  # Custom ops require tf.int64
+  dataset = _cast_features(dataset, tf.int64)
+  dataset = dataset.map(
+      map_fn_custom, num_parallel_calls=tf.data.experimental.AUTOTUNE)
+  dataset = _cast_features(dataset, tf.int32)
   dataset = dataset.unbatch()
   return dataset
 
