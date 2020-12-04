@@ -34,7 +34,8 @@ def attention(q,
               dropout_rate=0.0,
               dropout_broadcast_dims=None,
               extra_logit=None,
-              context=None):
+              context=None,
+              float32_logits=True):
   """Dot-product attention - doesn't use positional dimensions.
 
   key_dim is a Dimension representing the channels in the queries and keys
@@ -61,6 +62,8 @@ def attention(q,
     dropout_broadcast_dims: an optional list of mtf.Dimension
     extra_logit: an optional scalar or tensor
     context: an optional Transformer.Context
+    float32_logits: a boolean - if True, then compute logits in float32 to avoid
+      numerical issues with bfloat16
 
   Returns:
     Tensor with shape q.shape - key_dim + value_dim
@@ -68,10 +71,14 @@ def attention(q,
   orig_q_shape = q.shape
   q, k, v, bias = maybe_reshape_attention_input_for_2d_sharding(
       context, q, k, v, bias, [key_dim, value_dim])
+  if float32_logits:
+    k = mtf.cast(k, tf.float32)
+    q = mtf.cast(q, tf.float32)
   logits = mtf.layers.us_einsum([q, k], reduced_dims=[key_dim])
   if bias is not None:
-    logits += bias
+    logits += mtf.cast(bias, logits.dtype)
   weights = mtf.softmax(logits, memory_length_dim, extra_logit=extra_logit)
+  weights = mtf.cast(weights, v.dtype)
   if dropout_rate != 0.0:
     weights = mtf.dropout(
         weights, 1.0 - dropout_rate,
