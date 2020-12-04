@@ -67,7 +67,7 @@ def _filter_features(ex):
   return {k: v for k, v in ex.items() if k in _MODEL_FEATURES}
 
 
-def parse_gin_defaults_and_flags():
+def parse_gin_defaults_and_flags(skip_unknown=False, finalize_config=True):
   """Parses all default gin files and those provided via flags."""
   # Register .gin file search paths with gin
   for gin_file_path in FLAGS.gin_location_prefix:
@@ -75,8 +75,12 @@ def parse_gin_defaults_and_flags():
   # Set up the default values for the configurable parameters. These values will
   # be overridden by any user provided gin files/parameters.
   gin.parse_config_file(
-      pkg_resources.resource_filename(__name__, _DEFAULT_CONFIG_FILE))
-  gin.parse_config_files_and_bindings(FLAGS.gin_file, FLAGS.gin_param)
+      pkg_resources.resource_filename(__name__, _DEFAULT_CONFIG_FILE),
+      skip_unknown=skip_unknown)
+  gin.parse_config_files_and_bindings(
+      FLAGS.gin_file, FLAGS.gin_param,
+      skip_unknown=skip_unknown,
+      finalize_config=finalize_config)
 
 
 # TODO(noam): maybe add gin-config to mtf.get_variable so we can delete
