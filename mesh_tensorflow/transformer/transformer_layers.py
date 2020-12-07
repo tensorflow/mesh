@@ -632,7 +632,7 @@ def relative_position_spans(context, num_sentinels=gin.REQUIRED):
   Args:
     context: a Context
     num_sentinels: an integer.  Should have the same value as
-       sentencepiece_vocabulary.SentencePieceVocabulary.extra_ids
+       SentencePieceVocabulary.extra_ids
   Returns:
     a Tensor
   """
