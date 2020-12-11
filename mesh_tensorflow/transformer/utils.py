@@ -479,8 +479,8 @@ def tpu_estimator_model_fn(model_type,
 
     # Detokenize in the graph if supported by vocabulary and accelerator.
     def _maybe_detokenize(ids, vocab):
-      if not use_tpu and hasattr(vocab, "decode_tf"):
-        return vocab.decode_tf(ids)
+      if not use_tpu and hasattr(vocab, "tf_tokenizer"):
+        return vocab.tf_tokenizer.detokenize(ids)
       return ids
     if mode == "score":
       # compute log-likelihoods per sequence
