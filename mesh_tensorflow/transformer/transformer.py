@@ -877,7 +877,7 @@ class Unitransformer(object):
     """Denominator applied to losses.
 
     This is usually the size of the targets tensor (omitting ensemble
-    dimensions).  Alternitively, it is an override value passed to the
+    dimensions).  Alternatively, it is an override value passed to the
     class constructor.
 
     Args:
