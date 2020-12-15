@@ -437,29 +437,6 @@ def reduce_rms(x):
   return mtf.sqrt(mtf.reduce_mean(mtf.square(x)))
 
 
-@gin.configurable
-def auto_train_steps(batch_size,
-                     sequence_length,
-                     train_tokens=2 ** 36):
-  """Automatically compute number of training steps.
-
-  Since the batch size and sequence length can vary across experiments, we
-  specify the amount of training in terms of (non-unique) input tokens processed
-  over the course of training the model.  The number of steps is computed as
-
-    train_steps = train_tokens // (batch_size * sequence_length)
-
-  Args:
-    batch_size: an integer
-    sequence_length: an integer or a dict from feature-key to integer
-      the (packed) sequence length, e.g. {"inputs": 512, "targets": 128}
-    train_tokens: an integer (train_steps * batch_size * sequence_length)
-  Returns:
-    an integer
-  """
-  return train_tokens // (batch_size * max(sequence_length.values()))
-
-
 # Workaround by copying this over
 # Note: Importing this from transformers gives some circular import problems.
 @gin.configurable
@@ -490,7 +467,9 @@ def product_learning_rate(step,
   return ret
 
 
-def compute_lr_for_step(schedules, learning_rate, batch_size, sequence_length):
+@gin.configurable
+def compute_lr_for_step(schedules, learning_rate,
+                        train_steps=524288):
   """Get actual LR for step."""
   actual_lr_rates = []
   for lr_schedule in schedules:
@@ -499,7 +478,6 @@ def compute_lr_for_step(schedules, learning_rate, batch_size, sequence_length):
     else:
       converted_schedule = functools.partial(
           product_learning_rate, factors=lr_schedule)
-      train_steps = auto_train_steps(batch_size, sequence_length)
       converted_schedule = functools.partial(
           converted_schedule, total_train_steps=train_steps)
       if callable(converted_schedule):
@@ -519,8 +497,6 @@ class AdafactorWithMultiLRSchedule(AdafactorOptimizer):
   def __init__(self,
                variable_search=None,
                alt_lr_schedules=None,
-               batch_size=gin.REQUIRED,
-               sequence_length=gin.REQUIRED,
                **kwargs
                ):
     """Construct a new Adafactor optimizer.
@@ -530,8 +506,6 @@ class AdafactorWithMultiLRSchedule(AdafactorOptimizer):
     Args:
       variable_search: list of regex strings to use alt learning rate.
       alt_lr_schedules: list of learning_rate_schedules
-      batch_size: int, batch size of model
-      sequence_length: int, length of training.
       **kwargs: Adafactor keyword args
 
     Raises:
@@ -543,11 +517,6 @@ class AdafactorWithMultiLRSchedule(AdafactorOptimizer):
     )
     self.variable_search = variable_search
     self.alt_lr_schedules = alt_lr_schedules
-    # need these to get train steps
-    # TODO(yitay): Figure out how to get batch size w/o needing pre-computing
-    # For now set to 128 in accordance with default setting.
-    self.batch_size = batch_size
-    self.sequence_length = sequence_length
 
   def apply_grad(self, grad, var):
     if self.alt_lr_schedules is None or self.variable_search is None:
@@ -555,8 +524,6 @@ class AdafactorWithMultiLRSchedule(AdafactorOptimizer):
 
     actual_lr_rates = compute_lr_for_step(self.alt_lr_schedules,
                                           self._learning_rate,
-                                          self.batch_size,
-                                          self.sequence_length
                                           )
     # Modify learning rate for exception variables
     for idx, variable_search in enumerate(self.variable_search):
@@ -592,8 +559,6 @@ class AdamWithMultiLRSchedule(AdamWeightDecayOptimizer):
   def __init__(self,
                variable_search=None,
                alt_lr_schedules=None,
-               batch_size=gin.REQUIRED,
-               sequence_length=gin.REQUIRED,
                **kwargs
                ):
     """Adam LR with multi LR schedule.
@@ -601,8 +566,6 @@ class AdamWithMultiLRSchedule(AdamWeightDecayOptimizer):
     Args:
       variable_search: list of regex strings to use alt learning rate.
       alt_lr_schedules: list of learning_rate_schedules
-      batch_size: int, batch size of model
-      sequence_length: int, length of training.
       **kwargs: Adam keyword args
     """
     super(AdamWithMultiLRSchedule, self).__init__(
@@ -610,20 +573,13 @@ class AdamWithMultiLRSchedule(AdamWeightDecayOptimizer):
     )
     self.variable_search = variable_search
     self.alt_lr_schedules = alt_lr_schedules
-    # need these to get train steps
-    # TODO(yitay): Figure out how to get batch size w/o needing pre-computing
-    # For now set to 128 in accordance with default setting.
-    self.batch_size = batch_size
-    self.sequence_length = sequence_length
 
   def apply_grad(self, grad, var):
     if self.alt_lr_schedules is None or self.variable_search is None:
       return super(AdamWithMultiLRSchedule, self).apply_grad(grad, var)
 
     actual_lr_rates = compute_lr_for_step(self.alt_lr_schedules,
-                                          self.learning_rate,
-                                          self.batch_size,
-                                          self.sequence_length
+                                          self.learning_rate
                                           )
 
     # Modify learning rate for exception variables
