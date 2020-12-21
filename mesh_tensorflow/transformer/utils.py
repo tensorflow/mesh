@@ -1280,14 +1280,14 @@ def save_scores(results, vocabulary,
 
   if save_example_text:
     # Targets will always exist.
-    targets = [r.get("targets_plaintext", r["targets"]) for r in results]
+    targets = [r.get("targets_pretokenized", r["targets"]) for r in results]
     targets = _maybe_decode_python(targets, targets_vocabulary(vocabulary))
     if scores_filename is not None:
       write_lines_to_file(targets, scores_filename+".targets")
 
     # Inputs may only exist for some tasks.
     if "inputs" in results[0]:
-      inputs = [r.get("inputs_plaintext", r["inputs"]) for r in results]
+      inputs = [r.get("inputs_pretokenized", r["inputs"]) for r in results]
       inputs = _maybe_decode_python(inputs, inputs_vocabulary(vocabulary))
       if scores_filename is not None:
         write_lines_to_file(inputs, scores_filename+".inputs")
@@ -1741,8 +1741,8 @@ def eval_model(estimator,
         - name: string, the task name
         - dataset_fn: function which returns a tf.data.Dataset of tokenized and
           padded examples. Must not require any arguments and must include the
-          feature keys 'inputs' and 'targets_plaintext'.
-        - postprocess_fn: function which converts plaintext targets to values
+          feature keys 'inputs' and 'targets_pretokenized'.
+        - postprocess_fn: function which converts original targets to values
           that can be processed by a `metric_fn`.
         - list_of_metric_fns: list of metric functions with the call signature
           `metric_fn(targets, predictions)` which returns a dict mapping
@@ -1795,7 +1795,7 @@ def eval_model(estimator,
   # Pre-load in all of the targets once before entering continuous eval loop
   cached_targets = {}
   cached_examples = {}
-  # Need to create a separate graph for loading in plaintext targets
+  # Need to create a separate graph for loading in original targets
   # or else TF will complain that we modified the graph
   max_sequence_length = {"inputs": 0, "targets": 0}
 
@@ -1814,20 +1814,15 @@ def eval_model(estimator,
           max_sequence_length["targets"] = max(
               max_sequence_length["targets"], len(ex["targets"]))
           examples.append(ex)
-          if "inputs_plaintext" in ex:
-            inputs.append(ex["inputs_plaintext"])
-          else:
-            inputs.append(ex["inputs"])
-          if "targets_plaintext" in ex:
+          if "inputs_pretokenized" in ex:
+            inputs.append(ex["inputs_pretokenized"])
+          if "targets_pretokenized" in ex:
+            targets_pretokenized = ex["targets_pretokenized"]
+            if isinstance(targets_pretokenized, bytes):
+              targets_pretokenized = targets_pretokenized.decode("utf-8")
             targets.append(
                 eval_dataset.postprocess_fn(
-                    tf.compat.as_text(ex["targets_plaintext"]),
-                    example=ex, is_target=True)
-            )
-          else:
-            targets.append(
-                eval_dataset.postprocess_fn(
-                    ex["targets"], example=ex, is_target=True)
+                    targets_pretokenized, example=ex, is_target=True)
             )
         if output_eval_examples:
           targets_filename = os.path.join(
