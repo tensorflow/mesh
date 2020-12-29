@@ -453,10 +453,10 @@ def tpu_estimator_model_fn(model_type,
             (mode, model_type, "" if should_exist else " not", feature_name))
         if "lm" in model_type:
           message += (
-              "\nA common mistake is that model_type=\"lm\" should be used "
-              "with tasks that produce inputs and targets, while "
-              "model_type=\"delimited_lm\" should be used with tasks that "
-              "produce targets only.")
+              "\nA common mistake is that model_type=\"delimited_lm\" should "
+              "be used with tasks that produce inputs and targets, while "
+              "model_type=\"lm\" should be used with tasks that produce "
+              "targets only.")
         raise ValueError(message)
 
     # Verify that the right features exist, and transform them if necessary
