@@ -946,6 +946,8 @@ def _rand_1_gating(
 
   if policy == "argmax" or policy == "input_dropout" or policy == "input_jitter":
     expert_gate, expert_index = mtf.top_1(raw_gates, reduced_dim=experts_dim)
+    if train:
+      mtf.scalar_summary("expert_gate", mtf.reduce_mean(expert_gate))
   elif policy == "sample":
     expert_index = mtf.sample_with_temperature(
         gate_logits, experts_dim, temperature=hparams.moe_rand_1_temperature)
@@ -1004,6 +1006,12 @@ def _rand_1_gating(
       mtf.less(position_in_expert, expert_capacity_float),
       dtype=raw_gates.dtype)
   expert_mask_flat = mtf.reduce_sum(expert_mask, reduced_dim=experts_dim)
+
+  if train:
+    total_routed = mtf.reduce_sum(expert_mask_flat)
+    importance = mtf.cast(importance, dtype=total_routed.dtype)
+    mtf.scalar_summary("fraction_routed",
+                       total_routed / mtf.reduce_sum(importance))
 
   # Mask out the experts that have overflowed expert capacity. Sparsify the
   # expert_gate.
