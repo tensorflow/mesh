@@ -1,5 +1,5 @@
 # coding=utf-8
-# Copyright 2020 The Mesh TensorFlow Authors.
+# Copyright 2021 The Mesh TensorFlow Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -246,7 +246,8 @@ class BitransformerFunnel(transformer.Bitransformer):
   See base class for details.
 
   This class updates the encoder's information passed to the decoder in order to
-  account for the reduced sequence length.
+  account for the reduced sequence length. This update is done in `call_simple`
+  and `decode` methods.
   """
 
   def call_simple(self,
@@ -335,3 +336,101 @@ class BitransformerFunnel(transformer.Bitransformer):
     if loss is not None and encoder_loss is not None:
       loss += encoder_loss
     return logits, loss
+
+  @gin.configurable(module="BitransformerFunnel")
+  def decode(self,
+             inputs,
+             variable_dtype=mtf.VariableDType(tf.float32),
+             beam_size=1,
+             alpha=0.6,
+             temperature=0.0,
+             sampling_keep_top_k=-1,
+             decode_length_multiplier=1.5,
+             decode_length_constant=10,
+             max_decode_length=None):
+    """Sampling or beam search for Funnel Transformer.
+
+    Args:
+      inputs: a Tensor with shape [<batch_dims>, beam_dim, length_dim]
+      variable_dtype: a mtf.VariableDType
+      beam_size: an integer >= 1
+      alpha: a floating point value (length bonus for beam search)
+      temperature: a value between 0 and 1 (must be 0 if beam_size > 1)
+        0.0 means argmax, 1.0 means sample according to predicted distribution.
+      sampling_keep_top_k: a value between 1 and vocab_size used to sample from
+        only the k most likely logits. Set to -1 to sample from all logits.
+      decode_length_multiplier: a float
+      decode_length_constant: a float
+      max_decode_length: an optional integer
+
+    Returns:
+      a Tensor with shape [<batch_dims>, beam_dim, length_dim]
+    """
+    encoder_layer_outputs = []
+    shared_params = self._shared_params(inputs.mesh, variable_dtype)
+    encoder_sequence_id = mtf.minimum(inputs, 1)
+    encoder_output, encoder_loss = self.encoder.call_simple(
+        inputs=inputs,
+        targets=None,
+        compute_loss=False,
+        mode=tf.estimator.ModeKeys.PREDICT,
+        variable_dtype=variable_dtype,
+        sequence_id=encoder_sequence_id,
+        shared_params=shared_params,
+        layer_outputs=encoder_layer_outputs)
+    del encoder_loss
+    encoder_output = mtf.layers.rename_length_to_memory_length(encoder_output)
+
+    # The sequence_id is updated inside the layer_stack due to pooling. So we
+    # need to use the updated sequence_id stored in the context.
+    encoder_sequence_id = self.encoder.layer_stack.context.sequence_id
+    encoder_sequence_id = mtf.layers.rename_length_to_memory_length(
+        encoder_sequence_id)
+    batch_dims = inputs.shape[:-1]
+    length_dim = inputs.shape[-1]
+    if max_decode_length is None:
+      decode_length_dim = length_dim
+    else:
+      decode_length_dim = mtf.Dimension("length", max_decode_length)
+    if beam_size == 1:
+      ids_shape = mtf.Shape(batch_dims + [decode_length_dim])
+      partial_sequences = mtf.zeros(inputs.mesh, ids_shape, dtype=tf.int32)
+      return self.decoder.sample_autoregressive(
+          partial_sequences,
+          temperature=temperature,
+          sampling_keep_top_k=sampling_keep_top_k,
+          variable_dtype=variable_dtype,
+          encoder_output=encoder_output,
+          encoder_sequence_id=encoder_sequence_id,
+          encoder_inputs=mtf.layers.rename_length_to_memory_length(inputs),
+          shared_params=shared_params,
+          has_partial_sequences=False,
+          encoder_layer_outputs=encoder_layer_outputs)
+    else:
+      if temperature != 0:
+        raise ValueError(
+            "don't know how to beam search with nonzero temperature")
+      if sampling_keep_top_k != -1:
+        raise ValueError(
+            "don't know how to beam search with top-k value other than -1.")
+      # beam search
+      beam_dim = mtf.Dimension("beam", beam_size)
+      ids_shape = mtf.Shape(batch_dims + [beam_dim, decode_length_dim])
+      partial_sequences = mtf.zeros(inputs.mesh, ids_shape, dtype=tf.int32)
+      input_length = mtf.reduce_sum(
+          mtf.to_float(mtf.cast(inputs, tf.bool)),
+          reduced_dim=length_dim)
+      max_input_length = mtf.reduce_max(input_length)
+      decode_length = mtf.cast(
+          max_input_length * decode_length_multiplier
+          + decode_length_constant, tf.int32)
+      return self.decoder.beam_search(
+          partial_sequences,
+          decode_length,
+          variable_dtype=variable_dtype,
+          encoder_output=encoder_output,
+          encoder_sequence_id=encoder_sequence_id,
+          encoder_inputs=inputs,
+          alpha=alpha,
+          shared_params=shared_params,
+          encoder_layer_outputs=encoder_layer_outputs)
