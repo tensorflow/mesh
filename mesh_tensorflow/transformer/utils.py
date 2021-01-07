@@ -1606,9 +1606,11 @@ def get_estimator(model_type, vocabulary, mesh_shape,
   return estimator
 
 
+@gin.configurable
 def train_model(estimator, vocabulary, sequence_length, batch_size,
                 train_dataset_fn, train_steps, ensemble_inputs,
-                dataset_split="train", skip_seen_data=False):
+                dataset_split="train", skip_seen_data=False,
+                seen_data_init_step=0):
   """Train a Mesh-TF model.
 
   Args:
@@ -1634,6 +1636,8 @@ def train_model(estimator, vocabulary, sequence_length, batch_size,
       restarts to skip already seen data. This flag is only consistent when
       every setting (such as batch size and random seed) on the model is the
       same between the original run and the new run.
+    seen_data_init_step: an integer, when `skip_seen_data` is True, skip seen
+      steps from this starting point. Useful when finetuning.
   """
 
   def input_fn(params):
@@ -1651,8 +1655,10 @@ def train_model(estimator, vocabulary, sequence_length, batch_size,
     # already been seen.
     if skip_seen_data and estimator.latest_checkpoint() is not None:
       recovered_step = estimator.get_variable_value("global_step")
-      tf.logging.info("Skipping %d steps of data.", recovered_step)
-      dataset = dataset.skip(recovered_step)
+      steps_to_skip = recovered_step - seen_data_init_step
+      if steps_to_skip > 0:
+        tf.logging.info("Skipping %d steps of data.", steps_to_skip)
+        dataset = dataset.skip(steps_to_skip)
     return dataset
 
   estimator.train(input_fn=input_fn, max_steps=train_steps)
