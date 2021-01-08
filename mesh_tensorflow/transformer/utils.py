@@ -1991,9 +1991,18 @@ def export_model(estimator, export_dir, vocabulary, sequence_length,
       targets = str_placeholder("targets")
 
       predict_batch_size = tf.shape(inputs)[0]
-      dataset = tf.data.Dataset.from_tensor_slices(
-          {"inputs": inputs, "targets": targets})
-      dataset = transformer_dataset.encode_all_features(dataset, vocabulary)
+
+      inputs_dataset = transformer_dataset.encode_all_features(
+          tf.data.Dataset.from_tensor_slices({"inputs": inputs}),
+          inputs_vocabulary(vocabulary))
+
+      targets_dataset = transformer_dataset.encode_all_features(
+          tf.data.Dataset.from_tensor_slices({"targets": targets}),
+          targets_vocabulary(vocabulary))
+
+      dataset = tf.data.Dataset.zip((inputs_dataset, targets_dataset))
+      dataset = dataset.map(lambda x, y: {**x, **y},
+                            num_parallel_calls=tf.data.experimental.AUTOTUNE)
 
       receiver_tensors = {"inputs": inputs, "targets": targets}
 
