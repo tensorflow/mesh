@@ -1606,7 +1606,6 @@ def get_estimator(model_type, vocabulary, mesh_shape,
   return estimator
 
 
-@gin.configurable
 def train_model(estimator, vocabulary, sequence_length, batch_size,
                 train_dataset_fn, train_steps, ensemble_inputs,
                 dataset_split="train", skip_seen_data=False,
@@ -2282,6 +2281,7 @@ def run(tpu_job_name,
         ensemble_inputs=None,
         train_model_fn=train_model,
         skip_seen_data=False,
+        seen_data_init_step=0,
         output_eval_examples=True):
   """Run training, eval, or inference depending on `mode`.
 
@@ -2349,6 +2349,8 @@ def run(tpu_job_name,
       restarts to skip already seen data. This flag is only consistent when
       every setting (such as batch size and random seed) on the model is the
       same between the original run and the new run.
+    seen_data_init_step: an integer, when `skip_seen_data` is True, skip seen
+      steps from this starting point. Useful when finetuning.
     output_eval_examples: a boolean, is `True` by default. Used to decide
       whether to output whether to dump inputs, targets, and predictions of the
       eval examples in plaintext to eval_summary_dir.
@@ -2440,7 +2442,8 @@ def run(tpu_job_name,
 
     train_model_fn(estimator, vocabulary, sequence_length, batch_size,
                    train_dataset_fn, train_steps, ensemble_inputs,
-                   skip_seen_data=skip_seen_data)
+                   skip_seen_data=skip_seen_data,
+                   seen_data_init_step=seen_data_init_step)
 
   elif mode == "perplexity_eval":
     if eval_dataset_fn is None:
