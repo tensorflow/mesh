@@ -53,12 +53,12 @@ class MoE1D(transformer.TransformerLayer):
                activation="relu",
                moe_gating="top_2",
                min_expert_capacity=4,
-               rand_1_policy_train="input_jitter",
-               rand_1_policy_eval="input_jitter",
-               rand_1_dropout=0.1,
-               rand_1_temperature=1.0,
-               rand_1_jitter=1e-2,
-               switch_top_k=4,
+               switch_policy_train="input_jitter",
+               switch_policy_eval="input_jitter",
+               switch_dropout=0.1,
+               switch_temperature=1.0,
+               switch_jitter=1e-2,
+               ntlb_top_k=4,
                output_dim=None,
                use_experts_attention=False):
     self._hparams = HParams(
@@ -76,13 +76,13 @@ class MoE1D(transformer.TransformerLayer):
         moe_second_threshold_train=second_threshold_train,
         moe_second_threshold_eval=second_threshold_eval,
         moe_dropout_rate=dropout_rate,
-        moe_rand_1_policy_train=rand_1_policy_train,
-        moe_rand_1_policy_eval=rand_1_policy_eval,
-        moe_rand_1_dropout=rand_1_dropout,
-        moe_rand_1_temperature=rand_1_temperature,
-        moe_rand_1_jitter=rand_1_jitter,
+        moe_switch_policy_train=switch_policy_train,
+        moe_switch_policy_eval=switch_policy_eval,
+        moe_switch_dropout=switch_dropout,
+        moe_switch_temperature=switch_temperature,
+        moe_switch_jitter=switch_jitter,
         moe_output_dim=output_dim,
-        moe_switch_top_k=switch_top_k,
+        moe_ntlb_top_k=ntlb_top_k,
         moe_use_experts_attention=use_experts_attention)
     self._activation = activation
 
@@ -389,8 +389,8 @@ def transformer_moe_layer_v1(
         variable_dtype=variable_dtype,
         importance=nonpadding,
         num_microbatches=num_microbatches)
-  elif hparams.moe_gating == "rand_1":
-    dispatch_tensor, combine_tensor, loss = _rand_1_gating(
+  elif hparams.moe_gating == "switch":
+    dispatch_tensor, combine_tensor, loss = _switch_gating(
         inputs=inputs,
         outer_expert_dims=None,
         experts_dim=experts_dim_unsplit,
@@ -400,8 +400,8 @@ def transformer_moe_layer_v1(
         variable_dtype=variable_dtype,
         importance=nonpadding,
         num_microbatches=num_microbatches)
-  elif hparams.moe_gating == "switch":
-    dispatch_tensor, combine_tensor, loss = _switch_gating(
+  elif hparams.moe_gating == "ntlb":
+    dispatch_tensor, combine_tensor, loss = _ntlb_gating(
         inputs=inputs,
         outer_expert_dims=None,
         experts_dim=experts_dim_unsplit,
@@ -774,26 +774,26 @@ def transformer_moe_layer_v2(
   return output, (loss_outer + loss_inner) * hparams.moe_loss_coef
 
 
-def _switch_gating(inputs,
-                   outer_expert_dims,
-                   experts_dim,
-                   expert_capacity_dim,
-                   hparams,
-                   train,
-                   variable_dtype,
-                   importance=None,
-                   name="switch_gating",
-                   num_microbatches=None):
-  """Compute a switch top-1 gating with no-token-left behind behavior."""
+def _ntlb_gating(inputs,
+                 outer_expert_dims,
+                 experts_dim,
+                 expert_capacity_dim,
+                 hparams,
+                 train,
+                 variable_dtype,
+                 importance=None,
+                 name="ntlb_gating",
+                 num_microbatches=None):
+  """Compute Switch gating with no-token-left behind (NTLB) behavior."""
   # SELECT EXPERT
   if train:
-    policy = hparams.moe_rand_1_policy_train
+    policy = hparams.moe_switch_policy_train
   else:
-    policy = hparams.moe_rand_1_policy_eval
+    policy = hparams.moe_switch_policy_eval
 
   # Input perturbations
   if train and policy == "input_jitter":
-    inputs = mtf.layers.multiplicative_jitter(inputs, hparams.moe_rand_1_jitter)
+    inputs = mtf.layers.multiplicative_jitter(inputs, hparams.moe_switch_jitter)
 
   gate_logits = mtf.layers.dense(
       inputs,
@@ -809,7 +809,7 @@ def _switch_gating(inputs,
   raw_gates = mtf.to_float(raw_gates)
 
   # Top-k operation
-  k_dim = mtf.Dimension("k", hparams.moe_switch_top_k)
+  k_dim = mtf.Dimension("k", hparams.moe_ntlb_top_k)
   expert_gate, expert_index = mtf.top_k(
       raw_gates, reduced_dim=experts_dim, k_dim=k_dim)
   expert_mask = mtf.one_hot(expert_index, experts_dim)
@@ -913,16 +913,16 @@ def _switch_gating(inputs,
   return dispatch_tensor, combine_tensor, loss
 
 
-def _rand_1_gating(
+def _switch_gating(
     inputs, outer_expert_dims, experts_dim, expert_capacity_dim,
-    hparams, train, variable_dtype, importance=None, name="rand_1_gating",
+    hparams, train, variable_dtype, importance=None, name="switch_gating",
     num_microbatches=None):
-  """Compute a random top-1 gating."""
+  """Compute Switch gating."""
   # SELECT EXPERT
   if train:
-    policy = hparams.moe_rand_1_policy_train
+    policy = hparams.moe_switch_policy_train
   else:
-    policy = hparams.moe_rand_1_policy_eval
+    policy = hparams.moe_switch_policy_eval
 
   # The internals of this function run in float32.
   #   bfloat16 seems to reduce quality.
@@ -930,10 +930,10 @@ def _rand_1_gating(
 
   # Input perturbations
   if train and policy == "input_dropout":
-    gate_inputs = mtf.dropout(gate_inputs, 1.0 - hparams.moe_rand_1_dropout)
+    gate_inputs = mtf.dropout(gate_inputs, 1.0 - hparams.moe_switch_dropout)
   elif train and policy == "input_jitter":
     gate_inputs = mtf.layers.multiplicative_jitter(gate_inputs,
-                                                   hparams.moe_rand_1_jitter)
+                                                   hparams.moe_switch_jitter)
 
   gate_logits = mtf.layers.dense(
       gate_inputs,
@@ -950,15 +950,14 @@ def _rand_1_gating(
       mtf.scalar_summary("expert_gate", mtf.reduce_mean(expert_gate))
   elif policy == "sample":
     expert_index = mtf.sample_with_temperature(
-        gate_logits, experts_dim, temperature=hparams.moe_rand_1_temperature)
+        gate_logits, experts_dim, temperature=hparams.moe_switch_temperature)
     expert_gate = mtf.gather(raw_gates, expert_index, dim=experts_dim)
   else:
-    raise ValueError("Unknown rand_1 policy %s" % policy)
+    raise ValueError("Unknown Switch gating policy %s" % policy)
 
   expert_mask = mtf.one_hot(expert_index, experts_dim, dtype=raw_gates.dtype)
 
   # LOAD BALANCING LOSS
-  # TODO(liamfedus): Check entropy loss.
   group_size_dim = inputs.shape[-2]
   density_1 = mtf.reduce_mean(expert_mask, reduced_dim=group_size_dim)
   density_1_proxy = mtf.reduce_mean(raw_gates, reduced_dim=group_size_dim)
