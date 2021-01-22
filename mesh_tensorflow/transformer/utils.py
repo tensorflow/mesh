@@ -1282,6 +1282,18 @@ def save_scores(results, vocabulary,
     if scores_filename is not None:
       write_lines_to_file(targets, scores_filename+".targets")
 
+    # Write sequence lengths
+    def get_sequence_length(tokens, pad_id=0):
+      tokens = np.array(tokens)
+      if not np.isin(pad_id, tokens):
+        return len(tokens)
+      # Argmax returns the index of the first occurrence of pad_id.
+      return np.argmax(tokens == pad_id)
+
+    seq_lengths = [get_sequence_length(r["targets"]) for r in results]
+    if scores_filename is not None:
+      write_lines_to_file(seq_lengths, scores_filename+".lengths")
+
     # Inputs may only exist for some tasks.
     if "inputs" in results[0]:
       inputs = [r.get("inputs_pretokenized", r["inputs"]) for r in results]
