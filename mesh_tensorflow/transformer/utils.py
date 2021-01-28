@@ -1220,8 +1220,11 @@ def decode_from_file(estimator,
     return dataset
 
   checkpoint_step = get_step_from_checkpoint_path(checkpoint_path)
-  decodes = decode(
-      estimator, input_fn, vocabulary, checkpoint_path=checkpoint_path)
+  decodes = [
+      d.decode("utf-8") if isinstance(d, bytes) else d
+      for d in decode(estimator, input_fn, vocabulary, checkpoint_path)
+  ]
+
   # Remove any padded examples
   dataset_size = len(inputs) * repeats
   decodes = decodes[:dataset_size]
