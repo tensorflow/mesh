@@ -1099,8 +1099,8 @@ def decode(estimator,
       targets_vocabulary) tuple
     checkpoint_path: an optional string
 
-  Returns:
-    list of decoded strings
+  Yields:
+    decoded strings
   """
   result_iter = estimator.predict(
       input_fn, checkpoint_path=checkpoint_path)
@@ -1110,18 +1110,16 @@ def decode(estimator,
       return value
     return vocab.decode([int(x) for x in value])
 
-  decodes = []
   for i, result in enumerate(result_iter):
     input_string = _maybe_detokenize(
         result["inputs"], inputs_vocabulary(vocabulary))
     output_string = _maybe_detokenize(
         result["outputs"], targets_vocabulary(vocabulary))
-    decodes.append(output_string)
+    yield output_string
     if i & (i - 1) == 0:
       # LOG every power of 2.
       tf.logging.info("decoded {}: {}".format(i, input_string))
       tf.logging.info("            -> {}".format(output_string))
-  return decodes
 
 
 @gin.configurable
@@ -1220,8 +1218,8 @@ def decode_from_file(estimator,
     return dataset
 
   checkpoint_step = get_step_from_checkpoint_path(checkpoint_path)
-  decodes = decode(
-      estimator, input_fn, vocabulary, checkpoint_path=checkpoint_path)
+  decodes = list(decode(
+      estimator, input_fn, vocabulary, checkpoint_path=checkpoint_path))
   # Remove any padded examples
   dataset_size = len(inputs) * repeats
   decodes = decodes[:dataset_size]
