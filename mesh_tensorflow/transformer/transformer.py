@@ -1643,6 +1643,7 @@ class StudentTeacher(object):
                teacher,
                temperature=None,
                fraction_soft=None,
+               distill_start_step=0,
                teacher_checkpoint=None,
                initialize_student_weights=False):
     """Create a StudentTeacher.
@@ -1656,6 +1657,8 @@ class StudentTeacher(object):
         target cross entropy to the training loss. The rest of the loss will be
         the cross entropy with the one-hot actual label. Required only when
         training.
+      distill_start_step: an int, training steps after which teacher loss is
+        incorporated in the overall loss.
       teacher_checkpoint: a string, the path to the teacher checkpoint that we
         wish to use. Required only when training.
       initialize_student_weights: a boolean, if true then initialize any
@@ -1666,6 +1669,7 @@ class StudentTeacher(object):
     self.teacher = teacher
     self.temperature = temperature
     self.fraction_soft = fraction_soft
+    self.distill_start_step = distill_start_step
     self.teacher_checkpoint = teacher_checkpoint
     self.initialize_student_weights = initialize_student_weights
 
@@ -1740,9 +1744,15 @@ class StudentTeacher(object):
     weights = mtf.cast(mtf.greater(targets, 0), soft_loss.dtype)
     soft_loss = (mtf.reduce_sum(soft_loss * weights) /
                  self.student.loss_denominator(targets, num_microbatches))
+    global_step = tf.train.get_or_create_global_step()
+    current_fraction_soft = tf.cast(
+        tf.cond(
+            tf.math.greater(global_step, self.distill_start_step),
+            lambda: self.fraction_soft, lambda: tf.constant(0.0)),
+        dtype=tf.bfloat16)
 
-    loss = (1.0 - self.fraction_soft) * hard_loss \
-           + self.temperature**2 * self.fraction_soft * soft_loss
+    loss = (1.0 - current_fraction_soft) * hard_loss \
+           + self.temperature**2 * current_fraction_soft * soft_loss
 
     return student_logits, loss
 
