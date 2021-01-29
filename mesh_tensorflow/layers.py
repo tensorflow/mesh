@@ -1101,6 +1101,108 @@ def softmax_cross_entropy_with_logits(logits, targets, vocab_dim, z_loss=0.0):
   return loss
 
 
+def kl_divergence(y_true, y_pred, reduced_dim, weights=None, epsilon=1e-6):
+  """Kullback-Leibler-Divergence between `y_true` and `y_pred`.
+
+  Computes: `loss = y_true * log(y_true / y_pred)`
+  From: tf.keras.losses.KLDivergence (Custom implementation with mtf)
+  See: https://en.wikipedia.org/wiki/Kullback%E2%80%93Leibler_divergence
+
+  Args:
+    y_true: mtf.Tensor, target predictions (distribution).
+    y_pred: mtf.Tensor, actual predictions (distribution).
+    reduced_dim: mtf.Dimension, reduction dimension for sum.
+    weights: Optional mtf.Tensor, indicator for padded regions.
+    epsilon: float, minimum value for numerical stability.
+  Returns:
+    scalar: K-L Divergence loss.
+  Raises:
+    ValueError: if the shapes do not match or reduced_dim is not valid.
+  """
+  if set(y_true.shape.dims) != set(y_pred.shape.dims):
+    raise ValueError(
+        "`y_true` and `y_pred` must be of the same shape. "
+        f"Currently they are {y_true.shape.dims} and {y_pred.shape.dims}")
+  if reduced_dim not in y_true.shape.dims:
+    raise ValueError(
+        f"`reduced_dim` must be a valid dimension (from {y_true.shape.dims}).")
+  if weights is None:
+    weights = 1.
+
+  def _clip(x, min_value, max_value):
+    # Clip values for numerical stability.
+    x = mtf.maximum(x, min_value)
+    x = mtf.minimum(x, max_value)
+    return x
+
+  y_true = _clip(y_true, epsilon, 1.)
+  y_pred = _clip(y_pred, epsilon, 1.)
+  mtf.reduce_sum(weights * y_true * mtf.log(y_true / y_pred),
+                 reduced_dim=reduced_dim)
+
+
+def mean_squared_error(y_true, y_pred, reduced_dim, weights=None):
+  """L2-Loss between `y_true` and `y_pred`.
+
+  Args:
+    y_true: mtf.Tensor, target logits.
+    y_pred: mtf.Tensor, actual logits.
+    reduced_dim: mtf.Dimension, reduction dimension for sum.
+    weights: Optional mtf.Tensor, indicator for padded regions.
+  Returns:
+    scalar: L2 loss.
+  Raises:
+    ValueError: if the shapes do not match or reduced_dim is not valid.
+  """
+  if set(y_true.shape.dims) != set(y_pred.shape.dims):
+    raise ValueError(
+        "`y_true` and `y_pred` must be of the same shape. "
+        f"Currently they are {y_true.shape.dims} and {y_pred.shape.dims}")
+  if reduced_dim not in y_true.shape.dims:
+    raise ValueError(
+        f"`reduced_dim` must be a valid dimension (from {y_true.shape.dims}).")
+  if weights is None:
+    weights = 1.
+  return mtf.reduce_sum(weights * mtf.square(y_true - y_pred),
+                        reduced_dim=reduced_dim)
+
+
+def cosine_embedding_distance(y_true, y_pred, reduced_dim, weights=None,
+                              epsilon=1e-6):
+  """Cosine embedding distance between `y_true` and `y_pred`.
+
+  Args:
+    y_true: mtf.Tensor, target logits.
+    y_pred: mtf.Tensor, actual logits.
+    reduced_dim: mtf.Dimension, reduction dimension for sum.
+    weights: Optional mtf.Tensor, indicator for padded regions.
+    epsilon: float, for numerical stability.
+  Returns:
+    scalar: mean cosine embedding distance.
+  Raises:
+    ValueError: if the shapes do not match or reduced_dim is not valid.
+  """
+  if set(y_true.shape.dims) != set(y_pred.shape.dims):
+    raise ValueError(
+        "`y_true` and `y_pred` must be of the same shape. "
+        f"Currently they are {y_true.shape.dims} and {y_pred.shape.dims}")
+  if reduced_dim not in y_true.shape.dims:
+    raise ValueError(
+        f"`reduced_dim` must be a valid dimension (from {y_true.shape.dims}).")
+  if weights is None:
+    weights = 1.
+
+  def _l2_normalize(x):
+    square_sum = mtf.reduce_sum(mtf.square(x), reduced_dim=reduced_dim,
+                                output_shape=x.shape)
+    x_inv_norm = mtf.rsqrt(mtf.maximum(square_sum, epsilon))
+    return mtf.multiply(x, x_inv_norm)
+
+  y_true = _l2_normalize(y_true)
+  y_pred = _l2_normalize(y_pred)
+  return mtf.reduce_sum(weights * y_true * y_pred, reduced_dim=reduced_dim)
+
+
 def sigmoid_cross_entropy_with_logits(logits, targets):
   """Sigmoid cross-entropy loss.
 
