@@ -1155,6 +1155,43 @@ def write_lines_to_file(lines, filename):
       output_file.write("{}\n".format(str(line).replace("\n", " ")))
 
 
+def _get_combined_dataset_input_fn(
+    datasets, batch_size, sequence_length, check_for_metrics=False):
+  """Creates input function for estimator for inference, eval, and scoring.
+
+  Args:
+    datasets: A list of mesh_tensorflow.transformer.dataset.EvalDataset tuples.
+      These will get combined together into a single tf.data.Dataset.
+    batch_size: an integer
+    sequence_length: an integer or a dict from feature-key to integer
+      the (packed) sequence length, e.g. {"inputs": 512, "targets": 128}
+    check_for_metrics: If True, then only include datasets which have associated
+      metric functions.
+
+  Returns:
+    An input function for estimator.
+  """
+  def input_fn(params):
+    """Input function for estimator."""
+    del params
+
+    combined_ds = None
+    for dataset in datasets:
+      if not check_for_metrics or dataset.metric_fns:
+        ds = dataset.dataset_fn(sequence_length=sequence_length)
+        ds = ds.map(
+            _filter_features, num_parallel_calls=tf.data.experimental.AUTOTUNE)
+        combined_ds = ds if not combined_ds else combined_ds.concatenate(ds)
+
+    combined_ds = combined_ds.batch(batch_size, drop_remainder=False)
+    # Pad the final batch.
+    combined_ds = transformer_dataset.trim_and_pad_dataset(
+        combined_ds, length=batch_size)
+    combined_ds = combined_ds.prefetch(tf.data.experimental.AUTOTUNE)
+    return combined_ds
+  return input_fn
+
+
 def get_step_from_checkpoint_path(checkpoint_path):
   """Returns the global step for the checkpoint at `checkpoint_path`.
 
@@ -1228,6 +1265,89 @@ def decode_from_file(estimator,
 
 
 @gin.configurable
+def decode_from_dataset(estimator,
+                        vocabulary,
+                        model_type,
+                        batch_size,
+                        sequence_length,
+                        checkpoint_path=None,
+                        infer_dataset_fn=gin.REQUIRED,
+                        dataset_split="validation",
+                        decode_output_dir=gin.REQUIRED):
+  """Decode using inputs from the Task examples and writes results to files.
+
+  Args:
+    estimator: a TPUEstimator
+    vocabulary: a mtf.transformer.vocabulary.Vocabulary
+    model_type: a string
+    batch_size: an integer
+    sequence_length: an integer or a dict from feature-key to integer
+      the (packed) sequence length, e.g. {"inputs": 512, "targets": 128}
+    checkpoint_path: Checkpoint to use for inference.
+    infer_dataset_fn: A function returning a list of dataset.EvalDataset tuples.
+      See `eval_dataset_fn` argument to `eval_model` for details.
+    dataset_split: str, which dataset split to load.
+    decode_output_dir: a string, where to write inputs, targets, and decodes.
+  """
+  if model_type != "lm":
+    raise ValueError("This function currently only supports decoder-only LMs.")
+
+  infer_datasets = infer_dataset_fn(
+      sequence_length=sequence_length,
+      vocabulary=vocabulary,
+      dataset_split=dataset_split,)
+
+  input_fn = _get_combined_dataset_input_fn(
+      infer_datasets, batch_size, sequence_length)
+
+  checkpoint_step = get_step_from_checkpoint_path(checkpoint_path)
+  # TODO(dei): Deal with case where decode() does not return the right number
+  # of outputs. This can happen if the generator in decode() has failures.
+  decodes = list(decode(
+      estimator, input_fn, vocabulary, checkpoint_path=checkpoint_path))
+
+  tf.logging.info("Caching inference examples.")
+  with tf.Graph().as_default():
+    for infer_dataset in infer_datasets:
+      ds = infer_dataset.dataset_fn()
+
+      # Create list of postprocessed text targets
+      examples_for_ds = list(tfds.as_numpy(ds))
+      examples_for_ds = _maybe_add_pretokenized_features(
+          examples_for_ds, vocabulary)
+
+      # Extract the portion of decodes corresponding to this dataset
+      dataset_size = len(examples_for_ds)
+      predictions = decodes[:dataset_size]
+
+      # Remove the used decodes.
+      del decodes[:dataset_size]
+
+      # Write the predictions to file.
+      predictions_filename = os.path.join(
+          decode_output_dir,
+          "{}_{}_predictions".format(infer_dataset.name, checkpoint_step),
+      )
+      write_lines_to_file(predictions, predictions_filename)
+
+      # Write the ground-truth targets to file.
+      targets = []
+      for ex in examples_for_ds:
+        targets_pretokenized = ex["targets_pretokenized"]
+        targets.append(infer_dataset.postprocess_fn(
+            targets_pretokenized, example=ex, is_target=True))
+      targets_filename = os.path.join(
+          decode_output_dir, "{}_targets".format(infer_dataset.name))
+      write_lines_to_file(targets, targets_filename)
+
+      # Write the inputs to a file.
+      inputs = [ex["inputs_pretokenized"] for ex in examples_for_ds]
+      inputs_filename = os.path.join(
+          decode_output_dir, "{}_inputs".format(infer_dataset.name))
+      write_lines_to_file(inputs, inputs_filename)
+
+
+@gin.configurable
 def clean_decodes(ids, eos_id=1, pad_id=0, length_axis=-1):
   """Replaces everything after EOS with PAD (along last axis).
 
@@ -1274,9 +1394,10 @@ def save_scores(results, vocabulary,
     write_lines_to_file(["%f" % f for f in scores], scores_filename+".scores")
 
   if save_example_text:
+    results = _maybe_add_pretokenized_features(results, vocabulary)
+
     # Targets will always exist.
     targets = [r.get("targets_pretokenized", r["targets"]) for r in results]
-    targets = _maybe_decode_python(targets, targets_vocabulary(vocabulary))
     if scores_filename is not None:
       write_lines_to_file(targets, scores_filename+".targets")
 
@@ -1295,7 +1416,6 @@ def save_scores(results, vocabulary,
     # Inputs may only exist for some tasks.
     if "inputs" in results[0]:
       inputs = [r.get("inputs_pretokenized", r["inputs"]) for r in results]
-      inputs = _maybe_decode_python(inputs, inputs_vocabulary(vocabulary))
       if scores_filename is not None:
         write_lines_to_file(inputs, scores_filename+".inputs")
       return scores, inputs, targets
@@ -1342,14 +1462,38 @@ def score_with_estimator(estimator, input_fn, eval_checkpoint_step, model_dir,
   return score_postprocess_fn(results, vocabulary)
 
 
-def _maybe_decode_python(ids_or_strs, vocabulary):
-  """Decode if ids_or_strs is not yet strings in pure python."""
+def _maybe_add_pretokenized_features(examples, vocabulary):
+  """Ensures decoded versions of "inputs" and "targets" exist in each example.
 
-  if ids_or_strs:
-    if isinstance(ids_or_strs[0], np.ndarray) and np.issubdtype(
-        ids_or_strs[0].dtype, np.integer):
-      ids_or_strs = [vocabulary.decode(t.tolist()) for t in ids_or_strs]
-  return ids_or_strs
+  Args:
+    examples: List of example dictionaries containing mappings from feature
+      name to np.array of integers.
+    vocabulary: The vocabulary.
+
+  Returns:
+    examples dictionary with decoded plaintext entries for each feature in
+    features that was present in the original example.
+  """
+  vocabulary = {"inputs": inputs_vocabulary(vocabulary),
+                "targets": targets_vocabulary(vocabulary)}
+
+  # This is just used for logging purposes.
+  added_pretokenized = {"inputs": False, "targets": False}
+
+  for example in examples:
+    for feature_name in ["inputs", "targets"]:
+      pretokenized_feature_name = feature_name + "_pretokenized"
+      if feature_name in example and pretokenized_feature_name not in example:
+        s = vocabulary[feature_name].decode(example[feature_name].tolist())
+        example[pretokenized_feature_name] = s
+
+        if not added_pretokenized[feature_name]:
+          added_pretokenized[feature_name] = True
+          tf.logging.warning(
+              "Feature '%s' is being approximated by decoding from the"
+              "tokenized feature '%s.'",
+              pretokenized_feature_name, feature_name)
+  return examples
 
 
 @gin.configurable
@@ -1474,23 +1618,8 @@ def score_from_dataset(estimator, vocabulary, batch_size, sequence_length,
       vocabulary=vocabulary,
       dataset_split=dataset_split)
 
-  def input_fn(params):
-    """Eval input function for estimator."""
-    del params
-
-    dataset = None
-    for scoring_dataset in scoring_datasets:
-      ds = scoring_dataset.dataset_fn()
-      ds = ds.map(
-          _filter_features, num_parallel_calls=tf.data.experimental.AUTOTUNE)
-      dataset = dataset.concatenate(ds) if dataset else ds
-
-    dataset = dataset.batch(batch_size, drop_remainder=False)
-    # Pad the final batch.
-    dataset = transformer_dataset.trim_and_pad_dataset(
-        dataset, length=batch_size)
-    dataset = dataset.prefetch(tf.data.experimental.AUTOTUNE)
-    return dataset
+  input_fn = _get_combined_dataset_input_fn(
+      scoring_datasets, batch_size, sequence_length)
 
   return score_with_estimator(
       estimator, input_fn, eval_checkpoint_step, model_dir,
@@ -1681,10 +1810,8 @@ def infer_model(estimator,
                 model_type,
                 model_dir,
                 eval_checkpoint_step,
-                input_filename=None,
-                output_filename=None,
                 checkpoint_paths=None,
-                decode_from_file_fn=decode_from_file):
+                decode_fn=decode_from_file):
   """Infer a Mesh-TF model.
 
   Args:
@@ -1699,24 +1826,20 @@ def infer_model(estimator,
     model_dir: string, estimator model_dir
     eval_checkpoint_step: int, list of ints, or None, see `eval_model`
       docstring.
-    input_filename: a string, input file with examples
-    output_filename: a string, output file to save decodes
     checkpoint_paths: optional list of checkpoints to run inference for
-    decode_from_file_fn: decoding function, defaults to decode_from_file
+    decode_fn: decoding function, defaults to decode_from_file
   """
   if checkpoint_paths is None:
     checkpoint_paths = get_checkpoint_iterator(eval_checkpoint_step, model_dir)
 
   for checkpoint_path in checkpoint_paths:
-    decode_from_file_fn(
+    decode_fn(
         estimator,
         vocabulary=vocabulary,
         model_type=model_type,
         batch_size=batch_size,
         sequence_length=sequence_length,
-        checkpoint_path=checkpoint_path,
-        input_filename=input_filename,
-        output_filename=output_filename)
+        checkpoint_path=checkpoint_path)
 
 
 def eval_model(estimator,
@@ -1872,24 +1995,8 @@ def eval_model(estimator,
   if callable(estimator):
     estimator = estimator()
 
-  def input_fn(params):
-    """Eval input function for estimator."""
-    del params
-    # Concatenate all dataset inputs to only have to do one decode loop
-    combined_ds = None
-    for eval_dataset in eval_datasets:
-      # Only evaluate tasks with metrics.
-      if eval_dataset.metric_fns:
-        ds = eval_dataset.dataset_fn(sequence_length=sequence_length)
-        ds = ds.map(
-            _filter_features, num_parallel_calls=tf.data.experimental.AUTOTUNE)
-        combined_ds = ds if not combined_ds else combined_ds.concatenate(ds)
-    combined_ds = combined_ds.batch(batch_size, drop_remainder=False)
-    # Pad the final batch.
-    combined_ds = transformer_dataset.trim_and_pad_dataset(
-        combined_ds, length=batch_size)
-    combined_ds = combined_ds.prefetch(tf.data.experimental.AUTOTUNE)
-    return combined_ds
+  input_fn = _get_combined_dataset_input_fn(
+      eval_datasets, batch_size, sequence_length, check_for_metrics=True)
 
   checkpoint_paths = get_checkpoint_iterator(eval_checkpoint_step, model_dir)
   for checkpoint_path in checkpoint_paths:
