@@ -20,6 +20,7 @@ from __future__ import division
 from __future__ import print_function
 
 import copy
+import functools
 import math
 import gin
 
@@ -280,8 +281,8 @@ class SelfAttention(transformer.TransformerLayer):
     Returns:
       a Tensor or None
     """
-    min_relative_position = self.min_relative_position(context)
-    max_relative_position = self.max_relative_position(context)
+    min_relative_position = self.min_relative_position(context)  # pylint: disable=assignment-from-none
+    max_relative_position = self.max_relative_position(context)  # pylint: disable=assignment-from-none
     biases = []
     relative_position = memory_position - context.position
     if min_relative_position is not None:
@@ -1708,7 +1709,7 @@ class Conv1DLayer(Conv1D):
   across packed examples.
   """
 
-  def __init__(self, filter_size, output_size, activation="linear"):
+  def __init__(self, filter_size, output_size, activation="linear"):  # pylint: disable=super-init-not-called
     """Create a Conv1DLayer.
 
     Args:
@@ -2119,3 +2120,5 @@ class ParallelLayer(transformer.TransformerLayer):
         mtf.add_n(
             [l.call(context, x, losses=losses) for l in self.layer_classes])
         * (len(self.layer_classes) ** -0.5))
+
+
