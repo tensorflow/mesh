@@ -2210,3 +2210,35 @@ def reversible_half_residual_and_swap(x1,
         [x1, x1_backwards, x2, x2_backwards])
   else:
     return _half_residual_and_swap(x1, x1_backwards, x2, x2_backwards, f)
+
+
+@gin.configurable
+def clip_activation_gradient(x, clip_rms_norm=None):
+  """Clip activation gradients by rms-norm."""
+  tf.logging.info("clip_activation_gradient.clip_rms_norm: {}".format(
+      clip_rms_norm))
+
+  def _reduce_rms(t):
+    return mtf.sqrt(mtf.reduce_mean(mtf.square(t)))
+
+  def forward_fn(x):
+    """Identity forward pass."""
+    return mtf.identity(x)
+
+  def grad_fn(explicit_inputs, all_inputs, forward_operations, outputs,
+              output_grads):
+    del explicit_inputs, all_inputs, outputs, forward_operations
+
+    grad_ys = output_grads
+    if clip_rms_norm:
+      clipped_grad_ys = []
+      for g in grad_ys:
+        rms_norm = _reduce_rms(g)
+        clipping_denom = mtf.maximum(1.0, rms_norm / clip_rms_norm)
+        clipped_grad_ys.append(g / clipping_denom)
+      return clipped_grad_ys
+    return grad_ys
+
+  explicit_inputs = [x]
+
+  return mtf.custom_gradient(forward_fn, grad_fn, explicit_inputs)

@@ -566,6 +566,13 @@ def sublayer_dropout(x, layer_stack, context, dropout_rate=0.0):
 
 
 @gin.configurable
+def sublayer_clip_activation_gradient(x, layer_stack, context, rms_norm=1.0):
+  """Clip activation gradient by RMS-norm."""
+  del layer_stack, context
+  return mtf.layers.clip_activation_gradient(x, rms_norm)
+
+
+@gin.configurable
 def sublayer_legacy_dropout(x, layer_stack, context):
   return sublayer_dropout(x, layer_stack, context,
                           dropout_rate=layer_stack.dropout_rate)
