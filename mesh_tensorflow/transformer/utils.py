@@ -255,8 +255,8 @@ def tpu_mesh_shape(tpu_topology=gin.REQUIRED,
   if tpu_topology.startswith("v"):
     num_cores = int(tpu_topology.split("-")[-1])
   else:
-    x, y = tpu_topology.split("x")
-    num_cores = int(x) * int(y) * 2
+    tpu_dim = [int(x) for x in tpu_topology.split("x")]
+    num_cores = functools.reduce(lambda x, y: x*y, tpu_dim) * 2
   if isinstance(model_parallelism, list):
     # model_parallelism is actually a spec used to
     # construct a simd_mesh_impl.HierarchicalTiling object
