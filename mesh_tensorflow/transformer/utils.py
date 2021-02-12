@@ -1697,7 +1697,8 @@ def get_estimator(model_type, vocabulary, mesh_shape,
       tpu_config=my_tpu_config,
       session_config=session_config,
       save_checkpoints_steps=save_checkpoints_steps,
-      save_checkpoints_secs=None)
+      save_checkpoints_secs=None,
+      save_checkpoint_on_shutdown=False)
 
   transformer_model = build_model(
       model_type=model_type,
