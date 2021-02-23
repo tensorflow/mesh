@@ -773,27 +773,25 @@ def tpu_estimator_model_fn(model_type,
         gin_config_saver_hook = gin.tf.GinConfigSaverHook(
             model_dir, summarize_config=True, include_step_in_filename=False)
 
+        training_hooks = [
+            restore_hook,
+            saver_hook,
+            gin_config_saver_hook,
+        ]
+
         if use_tpu:
           return tpu_estimator.TPUEstimatorSpec(
               mode=tf.estimator.ModeKeys.TRAIN,
               loss=tf_loss,
               train_op=train_op,
               host_call=host_call,
-              training_hooks=[
-                  restore_hook,
-                  saver_hook,
-                  gin_config_saver_hook,
-              ])
+              training_hooks=training_hooks)
         else:
           return tf.estimator.EstimatorSpec(
               tf.estimator.ModeKeys.TRAIN,
               loss=tf_loss,
               train_op=train_op,
-              training_chief_hooks=[
-                  restore_hook,
-                  saver_hook,
-                  gin_config_saver_hook,
-              ])
+              training_chief_hooks=training_hooks)
     elif mode == tf.estimator.ModeKeys.EVAL:
       # perplexity eval
       logits, loss = logits_and_loss(mtf_features)
@@ -1698,9 +1696,7 @@ def get_estimator(model_type, vocabulary, mesh_shape,
       model_dir=model_dir,
       tpu_config=my_tpu_config,
       session_config=session_config,
-      # We use a saver hook, so disable checkpoints here to prevent double
-      # saving.
-      save_checkpoints_steps=None,
+      save_checkpoints_steps=save_checkpoints_steps,
       save_checkpoints_secs=None)
 
   transformer_model = build_model(
@@ -1748,7 +1744,7 @@ def get_estimator(model_type, vocabulary, mesh_shape,
 def train_model(estimator, vocabulary, sequence_length, batch_size,
                 train_dataset_fn, train_steps, ensemble_inputs,
                 dataset_split="train", skip_seen_data=False,
-                seen_data_init_step=0):
+                seen_data_init_step=0, checkpoint_input_pipeline=False):
   """Train a Mesh-TF model.
 
   Args:
@@ -1773,10 +1769,19 @@ def train_model(estimator, vocabulary, sequence_length, batch_size,
     skip_seen_data: a boolean, is `False` by default. Used when a training run
       restarts to skip already seen data. This flag is only consistent when
       every setting (such as batch size and random seed) on the model is the
-      same between the original run and the new run.
+      same between the original run and the new run. May require a significant
+      amount of time to skip a large number of steps.
     seen_data_init_step: an integer, when `skip_seen_data` is True, skip seen
       steps from this starting point. Useful when finetuning.
+    checkpoint_input_pipeline: a boolean, whether to checkpoint the input
+      pipeline in order to restart from the previous run. May require a large
+      amount of disk space for complicated input pipelines.
   """
+
+  if skip_seen_data and checkpoint_input_pipeline:
+    raise ValueError(
+        "At most one of `skip_seen_data` and `checkpoint_input_pipeline` may "
+        "be set.")
 
   def input_fn(params):
     del params
@@ -1799,7 +1804,12 @@ def train_model(estimator, vocabulary, sequence_length, batch_size,
         dataset = dataset.skip(steps_to_skip)
     return dataset
 
-  estimator.train(input_fn=input_fn, max_steps=train_steps)
+  hooks = []
+  if checkpoint_input_pipeline:
+    hooks.append(
+        tf.data.experimental.CheckpointInputPipelineHook(estimator))
+
+  estimator.train(input_fn=input_fn, max_steps=train_steps, hooks=hooks)
 
 
 @gin.configurable
@@ -2399,7 +2409,8 @@ def run(tpu_job_name,
         train_model_fn=train_model,
         skip_seen_data=False,
         seen_data_init_step=0,
-        output_eval_examples=True):
+        output_eval_examples=True,
+        checkpoint_input_pipeline=False):
   """Run training, eval, or inference depending on `mode`.
 
   Args:
@@ -2465,12 +2476,16 @@ def run(tpu_job_name,
     skip_seen_data: a boolean, is `False` by default. Used when a training run
       restarts to skip already seen data. This flag is only consistent when
       every setting (such as batch size and random seed) on the model is the
-      same between the original run and the new run.
+      same between the original run and the new run. May require a significant
+      amount of time to skip a large number of steps.
     seen_data_init_step: an integer, when `skip_seen_data` is True, skip seen
       steps from this starting point. Useful when finetuning.
     output_eval_examples: a boolean, is `True` by default. Used to decide
       whether to output whether to dump inputs, targets, and predictions of the
       eval examples in plaintext to eval_summary_dir.
+    checkpoint_input_pipeline: a boolean, whether to checkpoint the input
+      pipeline in order to restart from the previous run. May require a large
+      amount of disk space for complicated input pipelines.
   """
   if isinstance(sequence_length, int):
     sequence_length = {"inputs": sequence_length,
@@ -2560,7 +2575,8 @@ def run(tpu_job_name,
     train_model_fn(estimator, vocabulary, sequence_length, batch_size,
                    train_dataset_fn, train_steps, ensemble_inputs,
                    skip_seen_data=skip_seen_data,
-                   seen_data_init_step=seen_data_init_step)
+                   seen_data_init_step=seen_data_init_step,
+                   checkpoint_input_pipeline=checkpoint_input_pipeline)
 
   elif mode == "perplexity_eval":
     if eval_dataset_fn is None:
