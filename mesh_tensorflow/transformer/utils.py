@@ -2290,15 +2290,17 @@ def auto_train_steps(batch_size,
 
 @gin.configurable
 def get_checkpoint_iterator(checkpoint_step, model_dir, skip_until=0,
-                            stop_after=None):
+                            stop_after=None, find_closest=True):
   """Get an iterable of checkpoint paths from a provided checkpoint step(s).
 
   Args:
-    checkpoint_step: If checkpoint_step is an int, find the checkpoint with the
-      closest global step and return a singleton list. If checkpoint_step is a
-      list of ints, replace each int with the path to the checkpoint with the
-      closest global step. If checkpoint_step == "all", return the path of every
-      checkpoint in model_dir, starting from the earliest checkpoint. If
+    checkpoint_step: If checkpoint_step is an int, return a singleton list with
+      that checkpoint path in it. If find_closest, the checkpoint with the
+      closest global step will be reurned. If checkpoint_step is a
+      list of ints, replace each int with its corresponding path (if
+      find_closest, the path with the closest global step). If
+      checkpoint_step == "all", return the path of every checkpoint in
+      model_dir, starting from the earliest checkpoint. If
       checkpoint_step == -1, return the latest checkpoint as specified in
       model_dir/checkpoint. If checkpoint_step is None, return
       `tf.train.checkpoints_iterator` for `model_dir`.
@@ -2308,6 +2310,9 @@ def get_checkpoint_iterator(checkpoint_step, model_dir, skip_until=0,
     stop_after: an optional integer - for "None behavior, if specified
       stop after finding a checkpoint number that is >= stop_at. When a
       checkpoint number == stop_at is found, it is yielded before exiting.
+    find_closest: If True and a specified checkpoint step does not exist, will
+      choose the nearest checkpoint to that step. If False, then will
+      only look for a checkpoint matching the exact specified step.
 
   Returns:
     An iterable which yields checkpoint paths.
@@ -2338,6 +2343,10 @@ def get_checkpoint_iterator(checkpoint_step, model_dir, skip_until=0,
   def _get_checkpoint_path(step):
     return os.path.join(model_dir, "model.ckpt-{}".format(step))
 
+  def _get_checkpoint_path_if_exists(step):
+    path = _get_checkpoint_path(step)
+    return path if tf.train.checkpoint_exists(path) else None
+
   def _filter_fn(p):
     return get_step_from_checkpoint_path(p) > skip_until
 
@@ -2363,11 +2372,22 @@ def get_checkpoint_iterator(checkpoint_step, model_dir, skip_until=0,
       return _generate_checkpoints()
     else:
       return checkpoints_iterator
-  elif isinstance(checkpoint_step, int):
-    return [_get_checkpoint_path(_get_closest_checkpoint(checkpoint_step))]
+  elif find_closest:
+    if isinstance(checkpoint_step, int):
+      return [_get_checkpoint_path(_get_closest_checkpoint(checkpoint_step))]
+    else:
+      closests = np.unique(
+          [_get_closest_checkpoint(c) for c in checkpoint_step])
+      return [_get_checkpoint_path(closest) for closest in closests]
   else:
-    closests = np.unique([_get_closest_checkpoint(c) for c in checkpoint_step])
-    return [_get_checkpoint_path(closest) for closest in closests]
+    if isinstance(checkpoint_step, int):
+      checkpoint_step = [checkpoint_step]
+    checkpoints = [_get_checkpoint_path_if_exists(c) for c in checkpoint_step]
+    checkpoints = [c for c in checkpoints if c]
+    if not checkpoints:
+      raise ValueError("You asked for checkpoints '%s' but none were found." %
+                       str(checkpoint_step))
+    return checkpoints
 
 
 # TODO(noam): provide a more informative string for layout_rules:
