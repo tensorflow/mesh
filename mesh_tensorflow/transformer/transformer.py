@@ -549,6 +549,36 @@ def sublayer_rms_norm_subsampled(x, layer_stack, context, percentage=100.,
 
 
 @gin.configurable
+def sublayer_scale_norm(x,
+                        layer_stack,
+                        context,
+                        epsilon=1e-6,
+                        name="scale_norm"):
+  """Scale normalization.
+
+  Args:
+    x: an input mtf.Tensor
+    layer_stack: a LayerStack
+    context: a Context
+    epsilon: a float
+    name: a string
+  Returns:
+    a mtf.Tensor
+  """
+  del layer_stack
+  model_dim = context.model.model_dim
+  with tf.variable_scope(name):
+    scale = mtf.get_variable(
+        context.mesh,
+        "scale",
+        context.model.ensemble_dims,
+        initializer=tf.ones_initializer(),
+        dtype=context.variable_dtype)
+    variance = mtf.reduce_mean(mtf.square(x), reduced_dim=model_dim)
+  return x * mtf.rsqrt(variance + epsilon) * scale
+
+
+@gin.configurable
 def sublayer_residual(x, layer_stack, context):
   del layer_stack
   return x + context.current_layer_input
