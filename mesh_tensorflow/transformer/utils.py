@@ -280,7 +280,7 @@ def variable_filter_max_size(v, max_size=1e7):
   return v.size <= max_size
 
 
-@gin.configurable
+@gin.configurable(denylist=["predict_fn"])  # pass `predict_fn` through `run`
 def tpu_estimator_model_fn(model_type,
                            transformer_model,
                            vocabulary,
@@ -484,42 +484,44 @@ def tpu_estimator_model_fn(model_type,
       return ids
     if mode == "score":
       # compute log-likelihoods per sequence
+      targets = mtf_features["targets"]
       if predict_fn:
         # predict_fn contains a custom scoring function
-        # this code-path has not been tested
         scores = predict_fn(
             model=transformer_model,
             features=mtf_features,
             variable_dtype=get_variable_dtype())
-      targets = mtf_features["targets"]
-      if isinstance(transformer_model, transformer.Unitransformer):
-        length_dim = targets.shape.dims[-1]
-        inputs = transformer.autoregressive_inputs(
-            mtf_features["targets"])
-      elif isinstance(transformer_model,
-                      (transformer.Bitransformer,
-                       transformer.StudentTeacher)):
-        inputs = mtf_features["inputs"]
       else:
-        raise ValueError("unrecognized class")
-      logits, _ = transformer_model.call_simple(
-          inputs=inputs,
-          targets=targets,
-          compute_loss=False,
-          mode=mode,
-          variable_dtype=get_variable_dtype())
-      logits = mtf.cast(logits, tf.float32)
-      _, length_dim, vocab_dim = logits.shape.dims
+        if isinstance(transformer_model, transformer.Unitransformer):
+          length_dim = targets.shape.dims[-1]
+          inputs = transformer.autoregressive_inputs(
+              mtf_features["targets"])
+        elif isinstance(transformer_model,
+                        (transformer.Bitransformer,
+                         transformer.StudentTeacher)):
+          inputs = mtf_features["inputs"]
+        else:
+          raise ValueError("unrecognized class")
+        logits, _ = transformer_model.call_simple(
+            inputs=inputs,
+            targets=targets,
+            compute_loss=False,
+            mode=mode,
+            variable_dtype=get_variable_dtype())
+        logits = mtf.cast(logits, tf.float32)
+        _, length_dim, vocab_dim = logits.shape.dims
 
-      cross_entropy = mtf.layers.softmax_cross_entropy_with_logits(
-          logits, mtf_features["targets"], vocab_dim)
-      # 0=padding and negative targets are a hack to indicate no loss
-      cross_entropy *= mtf.cast(
-          mtf.greater(targets, 0), cross_entropy.dtype)
-      if model_type == "delimited_lm":
-        cross_entropy *= mtf.cast(mtf.logical_not(
-            transformer.delimited_lm_inputs_mask(targets)), cross_entropy.dtype)
-      scores = -mtf.reduce_sum(cross_entropy, reduced_dim=length_dim)
+        cross_entropy = mtf.layers.softmax_cross_entropy_with_logits(
+            logits, mtf_features["targets"], vocab_dim)
+        # 0=padding and negative targets are a hack to indicate no loss
+        cross_entropy *= mtf.cast(
+            mtf.greater(targets, 0), cross_entropy.dtype)
+        if model_type == "delimited_lm":
+          cross_entropy *= mtf.cast(mtf.logical_not(
+              transformer.delimited_lm_inputs_mask(targets)),
+                                    cross_entropy.dtype)
+        scores = -mtf.reduce_sum(cross_entropy, reduced_dim=length_dim)
+
       scores = mtf.anonymize(scores)
       targets = mtf.anonymize(targets)
       lowering = mtf.Lowering(graph, {mesh: mesh_impl}, autostack=autostack)
