@@ -587,9 +587,12 @@ def sublayer_residual(x, layer_stack, context):
 @gin.configurable
 def sublayer_dropout(x, layer_stack, context, dropout_rate=0.0):
   del layer_stack
-  return mtf.dropout(
-      x, context.train, rate=dropout_rate,
-      noise_shape=mtf.Shape(context.batch_dims + [context.model.model_dim]))
+  if context.train and dropout_rate > 0:
+    return mtf.dropout(
+        x, context.train, rate=dropout_rate,
+        noise_shape=mtf.Shape(context.batch_dims + [context.model.model_dim]))
+  else:
+    return x
 
 
 @gin.configurable

@@ -697,10 +697,13 @@ class UTLayerStack(transformer.TransformerLayer):
     return x
 
   def _dropout(self, context, x):
-    return mtf.dropout(
-        x, context.train,
-        rate=self._dropout_rate,
-        noise_shape=mtf.Shape(context.batch_dims + [context.model.model_dim]))
+    if context.train and self._dropout_rate > 0:
+      return mtf.dropout(
+          x, context.train,
+          rate=self._dropout_rate,
+          noise_shape=mtf.Shape(context.batch_dims + [context.model.model_dim]))
+    else:
+      return x
 
   def _layer_norm(self, context, x, name=None):
     """Layer normalization.

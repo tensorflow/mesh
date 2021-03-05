@@ -509,11 +509,13 @@ class Mixtape(object):
     ], self._gates_dim.name)
 
   def _dropout(self, tensor, context):
-    return mtf.dropout(
-        tensor,
-        context.train,
-        1.0 - self._dropout_rate,
-        noise_shape=tensor.shape - context.length_dim)
+    if context.train and self._dropout_rate != 0.0:
+      return mtf.dropout(
+          tensor,
+          context.train,
+          1.0 - self._dropout_rate,
+          noise_shape=tensor.shape - context.length_dim)
+    return tensor
 
   def _rearrange_sentinels(self, logits):
     """Reorder along the vocab dim so the last few tokens don't share gates."""
