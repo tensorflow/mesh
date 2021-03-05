@@ -5829,7 +5829,8 @@ def random_normal(mesh, shape, **kwargs):
   return RandomOperation(mesh, shape, tf.random.normal, **kwargs).outputs[0]
 
 
-def dropout(x, keep_prob=None, rate=None, noise_shape=None, name=None):
+def dropout(x, is_training, keep_prob=None, rate=None, noise_shape=None,
+            name=None):
   """Randomly set some elements to 0 and scale up the rest.
 
   Dropout rate should be specified in exactly one of two ways:
@@ -5842,6 +5843,8 @@ def dropout(x, keep_prob=None, rate=None, noise_shape=None, name=None):
 
   Args:
     x: a Tensor
+    is_training: a boolean, set to true while training, if false dropout becomes
+      an identity function.
     keep_prob: a float between 0.0 and 1.0
     rate: a float between 0.0 and 1.0
     noise_shape: an optional Shape (a subset of x.shape)
@@ -5858,7 +5861,7 @@ def dropout(x, keep_prob=None, rate=None, noise_shape=None, name=None):
   if noise_shape is None:
     noise_shape = x.shape
   with tf.variable_scope(name, default_name="dropout"):
-    if keep_prob == 1.0:
+    if keep_prob == 1.0 or not is_training:
       return x
     noise = cast(less(random_uniform(
         x.mesh, noise_shape,

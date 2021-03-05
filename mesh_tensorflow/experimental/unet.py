@@ -428,15 +428,14 @@ def conv_with_spatial_partition(
     bn_update_ops = []
 
   x = mtf.leaky_relu(x, 0.1)
-
-  if is_training:
-    x = mtf.dropout(x, keep_p)
+  x = mtf.dropout(x, is_training, keep_p)
 
   return x, bn_update_ops
 
 
 def deconv_with_spatial_partition(
     x, sampled_2d_slices, image_nx_dim, image_ny_dim, n_filters, keep_p,
+    is_training,
     odim_name, variable_dtype, name):
   """Deconvolution with spatial partition."""
   if sampled_2d_slices:
@@ -456,7 +455,7 @@ def deconv_with_spatial_partition(
         name=name,
     )
 
-  x = mtf.dropout(x, keep_p)
+  x = mtf.dropout(x, is_training, keep_p)
 
   return x
 
@@ -570,6 +569,7 @@ def unet_with_spatial_partition(mesh, mesh_impl, dataset_str, images, labels):
         x, FLAGS.sampled_2d_slices, image_nx_dim, image_ny_dim,
         FLAGS.n_base_filters * (2**depth),
         FLAGS.dropout_keep_p,
+        is_training,
         'conv_{}_{}'.format(depth, FLAGS.n_conv_per_block - 1),
         variable_dtype, 'deconv_{}_0'.format(depth))
     x = mtf.concat(

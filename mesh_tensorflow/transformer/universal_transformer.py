@@ -601,6 +601,7 @@ class UTLayerStack(transformer.TransformerLayer):
       output = mtf.layers.dense_relu_dense(
           ffn_inputs,
           hidden_channels=context.model.model_dim,
+          is_training=context.train,
           dropout=self.relu_dropout
       )
 
@@ -696,13 +697,10 @@ class UTLayerStack(transformer.TransformerLayer):
     return x
 
   def _dropout(self, context, x):
-    if context.train and self._dropout_rate > 0:
-      return mtf.dropout(
-          x,
-          rate=self._dropout_rate,
-          noise_shape=mtf.Shape(context.batch_dims + [context.model.model_dim]))
-    else:
-      return x
+    return mtf.dropout(
+        x, context.train,
+        rate=self._dropout_rate,
+        noise_shape=mtf.Shape(context.batch_dims + [context.model.model_dim]))
 
   def _layer_norm(self, context, x, name=None):
     """Layer normalization.

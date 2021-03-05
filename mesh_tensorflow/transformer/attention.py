@@ -79,10 +79,9 @@ def attention(q,
     logits += mtf.cast(bias, logits.dtype)
   weights = mtf.softmax(logits, memory_length_dim, extra_logit=extra_logit)
   weights = mtf.cast(weights, v.dtype)
-  if dropout_rate != 0.0:
-    weights = mtf.dropout(
-        weights, 1.0 - dropout_rate,
-        noise_shape=weights.shape - dropout_broadcast_dims)
+  weights = mtf.dropout(
+      weights, context.train, 1.0 - dropout_rate,
+      noise_shape=weights.shape - dropout_broadcast_dims)
   outputs_shape = q.shape - key_dim + value_dim
   outputs = mtf.einsum([weights, v], outputs_shape)
   outputs = mtf.reshape(outputs, orig_q_shape - key_dim + value_dim)
@@ -150,10 +149,9 @@ def hybrid_attention(q,
       lower_log_weights, memory_length_dim, extra_logit=extra_logit)
 
   weights = doubly_coeff * doubly_weights + (1. - doubly_coeff) * upper_weights
-  if dropout_rate != 0.0:
-    weights = mtf.dropout(
-        weights, 1.0 - dropout_rate,
-        noise_shape=weights.shape - dropout_broadcast_dims)
+  weights = mtf.dropout(
+      weights, context.train, 1.0 - dropout_rate,
+      noise_shape=weights.shape - dropout_broadcast_dims)
   outputs_shape = q.shape - key_dim + value_dim
   outputs = mtf.einsum([weights, v], outputs_shape)
   return outputs
@@ -328,10 +326,9 @@ def synthetic_attention(q,
     logits += bias
 
   weights = mtf.softmax(logits, memory_length_dim, extra_logit=extra_logit)
-  if dropout_rate != 0.0:
-    weights = mtf.dropout(
-        weights, 1.0 - dropout_rate,
-        noise_shape=weights.shape - dropout_broadcast_dims)
+  weights = mtf.dropout(
+      weights, context.train, 1.0 - dropout_rate,
+      noise_shape=weights.shape - dropout_broadcast_dims)
 
   if synthesize and "plus" not in synthesize_mode:
     if synthesize_mode == "dense_minus":

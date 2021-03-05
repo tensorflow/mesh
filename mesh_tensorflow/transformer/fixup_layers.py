@@ -316,9 +316,9 @@ class DenseReluDenseFixup(transformer.TransformerLayer):
         name="wi",
         kernel_initializer=self.upproject_initializer,
         expert_dims=context.model.ensemble_dims)
-    if context.train and self.dropout_rate != 0.0:
-      h = mtf.dropout(
-          h, 1.0 - self.dropout_rate, noise_shape=h.shape - context.length_dim)
+    h = mtf.dropout(
+        h, context.train, 1.0 - self.dropout_rate,
+        noise_shape=h.shape - context.length_dim)
     shift = get_single_scalar_bias(x, "shift")
     h_res = mtf.add(h, shift)
     h = mtf.reshape(h_res, h.shape)

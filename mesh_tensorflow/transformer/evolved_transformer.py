@@ -228,10 +228,7 @@ def _pad_channels_dim(tensor, size):
 
 
 def _dropout(x, context, dropout_rate):
-  if context.train and dropout_rate > 0:
-    return mtf.dropout(
-        x,
-        rate=dropout_rate,
-        noise_shape=mtf.Shape(context.batch_dims + x.shape.dims[-1:]))
-  else:
-    return x
+  return mtf.dropout(
+      x, context.train,
+      rate=dropout_rate,
+      noise_shape=mtf.Shape(context.batch_dims + x.shape.dims[-1:]))

@@ -64,9 +64,8 @@ class DenseReluDense(transformer.TransformerLayer):
                                  variable_dtype=context.variable_dtype,
                                  name="wi",
                                  expert_dims=context.model.ensemble_dims)
-    if context.train and self.dropout_rate != 0.0:
-      h = mtf.dropout(h, 1.0 - self.dropout_rate,
-                      noise_shape=h.shape - context.length_dim)
+    h = mtf.dropout(h, context.train, 1.0 - self.dropout_rate,
+                    noise_shape=h.shape - context.length_dim)
     return mtf.layers.dense(h, io_channels,
                             use_bias=self.use_bias,
                             activation=None,
@@ -858,8 +857,7 @@ class TransparentEncDecAttention(EncDecAttention):
         mtf.Shape([encoder_module_outputs_dim, decoder_module_inputs_dim]),
         initializer=tf.random_normal_initializer(stddev=stddev),
         dtype=context.variable_dtype)
-    if context.train and self.dropout_rate != 0.0:
-      w = mtf.dropout(w, 1.0 - self.dropout_rate)
+    w = mtf.dropout(w, context.train, 1.0 - self.dropout_rate)
     s = mtf.softmax(w, reduced_dim=encoder_module_outputs_dim)
     z = mtf.layers.us_einsum([s, encoder_module_outputs],
                              reduced_dims=[encoder_module_outputs_dim])
@@ -1254,7 +1252,7 @@ class TalkingHeadsSelfAttention(SelfAttention):
     # TODO(noam): make dropout_broadcast_dims configurable
     dropout_broadcast_dims = [context.length_dim]
     weights = mtf.dropout(
-        weights, rate=self.dropout_rate if context.train else 0.0,
+        weights, context.train, rate=self.dropout_rate,
         noise_shape=weights.shape - dropout_broadcast_dims)
     u = mtf.einsum([weights, v], reduced_dims=[memory_length])
     return self.compute_y(context, u)
@@ -1441,7 +1439,8 @@ class GeneralBilinearSelfAttention(SelfAttention):
     # TODO(noam): make dropout_broadcast_dims configurable
     dropout_broadcast_dims = [context.length_dim]
     weights = mtf.dropout(
-        weights, rate=self.dropout_rate if context.train else 0.0,
+        weights, context.train,
+        rate=self.dropout_rate,
         noise_shape=weights.shape - dropout_broadcast_dims)
     u = mtf.einsum([weights, m], reduced_dims=[memory_length])
     return self.compute_y(context, u)

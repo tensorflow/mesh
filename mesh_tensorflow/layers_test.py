@@ -194,7 +194,8 @@ class LayersTest(parameterized.TestCase, tf.test.TestCase):
     mtf_inputs = mtf.import_tf_tensor(
         mesh, inputs, shape=mtf.Shape([batch_dim, channels_dim]))
     mtf_outputs = mtf.layers.dense_relu_dense(mtf_inputs,
-                                              hidden_channels=hidden_dim)
+                                              hidden_channels=hidden_dim,
+                                              is_training=False)
     mesh_impl = mtf.placement_mesh_impl.PlacementMeshImpl(
         shape=[], layout={}, devices=[""])
     lowering = mtf.Lowering(graph, {mesh: mesh_impl})
@@ -232,6 +233,7 @@ class LayersTest(parameterized.TestCase, tf.test.TestCase):
         mtf_query,
         kv_channels=kv_channels_dim,
         heads=heads_dim,
+        is_training=False,
         window_size=window_size)
     mesh_impl = mtf.placement_mesh_impl.PlacementMeshImpl(
         shape=[], layout={}, devices=[""])
@@ -280,7 +282,8 @@ class LayersTest(parameterized.TestCase, tf.test.TestCase):
         mtf_query,
         mtf_key,
         mtf_value,
-        mask=None)
+        mask=None,
+        is_training=False)
     mesh_impl = mtf.placement_mesh_impl.PlacementMeshImpl(
         shape=[], layout={}, devices=[""])
     lowering = mtf.Lowering(graph, {mesh: mesh_impl})
@@ -320,7 +323,8 @@ class LayersTest(parameterized.TestCase, tf.test.TestCase):
         memory_antecedent=None,
         mask=None,
         kv_channels=kv_channels_dim,
-        heads=heads_dim)
+        heads=heads_dim,
+        is_training=False)
     mesh_impl = mtf.placement_mesh_impl.PlacementMeshImpl(
         shape=[], layout={}, devices=[""])
     lowering = mtf.Lowering(graph, {mesh: mesh_impl})

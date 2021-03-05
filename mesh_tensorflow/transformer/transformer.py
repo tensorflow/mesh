@@ -587,12 +587,9 @@ def sublayer_residual(x, layer_stack, context):
 @gin.configurable
 def sublayer_dropout(x, layer_stack, context, dropout_rate=0.0):
   del layer_stack
-  if context.train and dropout_rate > 0:
-    return mtf.dropout(
-        x, rate=dropout_rate,
-        noise_shape=mtf.Shape(context.batch_dims + [context.model.model_dim]))
-  else:
-    return x
+  return mtf.dropout(
+      x, context.train, rate=dropout_rate,
+      noise_shape=mtf.Shape(context.batch_dims + [context.model.model_dim]))
 
 
 @gin.configurable
@@ -853,8 +850,7 @@ class Unitransformer(object):
           context.variable_dtype,
           name="embedding",
           ensemble_dim=self.ensemble_dim)
-    if context.train:
-      inputs = mtf.dropout(inputs, rate=self.token_dropout_rate)
+    inputs = mtf.dropout(inputs, context.train, rate=self.token_dropout_rate)
     x = vocab_embedding.ids_to_embedding(inputs, context)
     if self.positional_embedding or self.sinusoid_positional_embedding:
       if self.sinusoid_positional_embedding:
