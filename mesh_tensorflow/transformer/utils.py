@@ -87,7 +87,7 @@ def parse_gin_defaults_and_flags(skip_unknown=False, finalize_config=True):
 #  this stupid VariableDtype class and stop passing it all over creation.
 @gin.configurable
 def get_variable_dtype(
-    master_dtype=tf.float32,
+    master_dtype=tf.bfloat16,
     slice_dtype=tf.float32,
     activation_dtype=tf.float32):
   """Datatypes to use for the run.
