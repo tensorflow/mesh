@@ -217,7 +217,8 @@ class AdafactorOptimizer(Optimizer):
                factored=True,
                epsilon1=1e-30,
                epsilon2=1e-3,
-               min_dim_size_to_factor=128):
+               min_dim_size_to_factor=128,
+               stacked_dim_names=None):
     """Construct a new Adafactor optimizer.
 
     See class comment.
@@ -234,6 +235,8 @@ class AdafactorOptimizer(Optimizer):
       epsilon2: Regularization constant for parameter scale.
       min_dim_size_to_factor: only factor accumulator if two tensor dimensions
         are at least this size.
+      stacked_dim_names: an optional list of dimension names never to be
+        factored or reduced over.
 
     Raises:
       ValueError: if absolute_update_scale and relative_update_scale_fn are both
@@ -252,6 +255,7 @@ class AdafactorOptimizer(Optimizer):
     self._epsilon1 = epsilon1
     self._epsilon2 = epsilon2
     self._min_dim_size_to_factor = min_dim_size_to_factor
+    self._stacked_dim_names = stacked_dim_names or []
 
   def _factored_dims(self, shape):
     """Should we use a factored second moment estimator.
@@ -267,9 +271,12 @@ class AdafactorOptimizer(Optimizer):
     Returns:
       either a list of 2 Dimensions or None
     """
-    if not self._factored or shape.ndims < 2:
+    if not self._factored:
       return None
-    sorted_dims = sorted(shape.dims, key=lambda d: -d.size)
+    dims = [d for d in shape.dims if d.name not in self._stacked_dim_names]
+    if len(dims) < 2:
+      return None
+    sorted_dims = sorted(dims, key=lambda d: -d.size)
     if sorted_dims[1].size < self._min_dim_size_to_factor:
       return None
     return sorted_dims[:2]
@@ -288,7 +295,10 @@ class AdafactorOptimizer(Optimizer):
     Returns:
       a Scalar
     """
-    return mtf.maximum(reduce_rms(var), self._epsilon2)
+    output_shape = [
+        d for d in var.shape.dims if d.name in self._stacked_dim_names]
+    return mtf.maximum(
+        reduce_rms(var, output_shape=output_shape), self._epsilon2)
 
   def apply_grad(self, grad, var):
     if grad is None:
@@ -433,8 +443,8 @@ def adafactor_optimizer_from_hparams(hparams, lr):
       factored=hparams.optimizer_adafactor_factored)
 
 
-def reduce_rms(x):
-  return mtf.sqrt(mtf.reduce_mean(mtf.square(x)))
+def reduce_rms(x, **kwargs):
+  return mtf.sqrt(mtf.reduce_mean(mtf.square(x), **kwargs))
 
 
 # Workaround by copying this over
