@@ -988,7 +988,8 @@ def _dynamic_text2self(mtf_features):
 
 def get_inputs_from_file(input_filename, ignore_comments=False):
   """Read data from file and strip new lines."""
-  inputs = [line.rstrip() for line in tf.io.gfile.GFile(input_filename)]
+  with tf.io.gfile.GFile(input_filename, "r") as f:
+    inputs = [line.rstrip() for line in f]
 
   # Strip the last empty line.
   if not inputs[-1]:
