@@ -27,6 +27,22 @@ from mesh_tensorflow import ops_with_redefined_builtins as mtf
 import tensorflow.compat.v1 as tf
 
 
+def summary_for_clip_activation_gradient(t, name=None, batch_dims=None):
+  """Summary for clip activation gradient."""
+
+  mtf.scalar_summary("mean/", mtf.reduce_mean(t))
+  mtf.scalar_summary("max/", mtf.reduce_max(t))
+
+  if batch_dims:
+    rms_batch = mtf.sqrt(
+        mtf.reduce_mean(mtf.square(t), output_shape=batch_dims))
+    mtf.scalar_summary("rms_mean/%s" % name, mtf.reduce_mean(rms_batch))
+    mtf.scalar_summary("rms_max/%s" % name, mtf.reduce_max(rms_batch))
+    mtf.scalar_summary(
+        "rms_var/%s" % name,
+        mtf.reduce_mean(mtf.square(rms_batch - mtf.reduce_mean(rms_batch))))
+
+
 @gin.configurable
 def unit_scaling_convention(value=False):
   """Turn this on with gin to enable the unit-scaling convention.
@@ -2236,6 +2252,7 @@ def clip_activation_gradient(x, clip_rms_norm=None):
 
   def forward_fn(x):
     """Identity forward pass."""
+    summary_for_clip_activation_gradient(x, "forward_act", x.shape[:-1])
     return mtf.identity(x)
 
   def grad_fn(explicit_inputs, all_inputs, forward_operations, outputs,
@@ -2255,3 +2272,33 @@ def clip_activation_gradient(x, clip_rms_norm=None):
   explicit_inputs = [x]
 
   return mtf.custom_gradient(forward_fn, grad_fn, explicit_inputs)
+
+
+def annealed_dropout(x, is_training, start_step, end_step,
+                     init_rate=None, noise_shape=None, name=None):
+  """Linearly anneal the dropout rate between start_step and end_step."""
+  cur_step = tf.train.get_or_create_global_step()
+  cur_step = tf.cast(cur_step, tf.float32)
+  start_step = tf.cast(start_step, tf.float32)
+  end_step = tf.cast(end_step, tf.float32)
+  fraction_complete = (cur_step - start_step) / (end_step - start_step)
+  annealed_prob = (1.0 - init_rate) + fraction_complete * init_rate
+  keep_prob = tf.minimum(annealed_prob, 1.0)
+  keep_prob = tf.cast(keep_prob, dtype=x.dtype)
+
+  noise_shape = mtf.convert_to_shape(noise_shape)
+  if noise_shape is None:
+    noise_shape = x.shape
+  with tf.variable_scope(name, default_name="dropout"):
+    if keep_prob == 1.0 or not is_training:
+      return x
+    noise = mtf.cast(
+        mtf.less(
+            mtf.random_uniform(
+                x.mesh,
+                noise_shape,
+                dtype=(x.dtype if x.dtype.is_floating else tf.float32)),
+            keep_prob), x.dtype)
+    if x.dtype.is_floating:
+      noise /= keep_prob
+    return x * noise

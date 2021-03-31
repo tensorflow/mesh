@@ -596,6 +596,32 @@ def sublayer_dropout(x, layer_stack, context, dropout_rate=0.0):
 
 
 @gin.configurable
+def sublayer_annealed_dropout(x,
+                              layer_stack,
+                              context,
+                              init_dropout_rate=0.0,
+                              start_step=None,
+                              end_step=None):
+  """Transformer sublayer which linearly anneals the dropout rate."""
+  if start_step is None:
+    raise ValueError("The start step for dropout annealing required.")
+  if end_step is None:
+    raise ValueError("The end step for dropout annealing required.")
+
+  del layer_stack
+  if context.train and init_dropout_rate > 0:
+    return mtf.layers.annealed_dropout(
+        x,
+        context.train,
+        start_step,
+        end_step,
+        init_rate=init_dropout_rate,
+        noise_shape=mtf.Shape(context.batch_dims + [context.model.model_dim]))
+  else:
+    return x
+
+
+@gin.configurable
 def sublayer_clip_activation_gradient(x, layer_stack, context, rms_norm=1.0):
   """Clip activation gradient by RMS-norm."""
   del layer_stack, context
