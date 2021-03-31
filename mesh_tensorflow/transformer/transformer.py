@@ -45,6 +45,7 @@ from __future__ import print_function
 
 import json
 import math
+import re
 
 import gin
 import mesh_tensorflow as mtf
