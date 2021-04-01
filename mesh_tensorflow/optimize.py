@@ -218,7 +218,8 @@ class AdafactorOptimizer(Optimizer):
                epsilon1=1e-30,
                epsilon2=1e-3,
                min_dim_size_to_factor=128,
-               stacked_dim_names=None):
+               stacked_dim_names=None,
+               exclude_from_parameter_scale=None):
     """Construct a new Adafactor optimizer.
 
     See class comment.
@@ -237,6 +238,8 @@ class AdafactorOptimizer(Optimizer):
         are at least this size.
       stacked_dim_names: an optional list of dimension names never to be
         factored or reduced over.
+      exclude_from_parameter_scale: an optional list of strings of parameter
+        names to exclude from updating proportion to its parameter scale.
 
     Raises:
       ValueError: if absolute_update_scale and relative_update_scale_fn are both
@@ -256,6 +259,7 @@ class AdafactorOptimizer(Optimizer):
     self._epsilon2 = epsilon2
     self._min_dim_size_to_factor = min_dim_size_to_factor
     self._stacked_dim_names = stacked_dim_names or []
+    self._exclude_from_parameter_scale = exclude_from_parameter_scale or []
 
   def _factored_dims(self, shape):
     """Should we use a factored second moment estimator.
@@ -330,7 +334,8 @@ class AdafactorOptimizer(Optimizer):
       grad_squared = mtf.square(grad) + self._epsilon1
       decay_rate = self._decay_rate
       old_val = mtf.to_float(var.value)
-      if self._multiply_by_parameter_scale:
+      if self._multiply_by_parameter_scale and not any([
+          s in var.name for s in self._exclude_from_parameter_scale]):
         update_scale = self._parameter_scale(old_val) * self._learning_rate
       else:
         update_scale = self._learning_rate
@@ -373,7 +378,7 @@ class AdafactorOptimizer(Optimizer):
       return updates
 
   def _decay_rate_default(self):
-    return adafactor_decay_rate_pow(0.8)
+    return adafactor_decay_rate_pow()
 
   def _learning_rate_default(self, multiply_by_parameter_scale):
     step_num = tf.cast(tf.train.get_or_create_global_step(), tf.float32)
@@ -398,7 +403,7 @@ def adafactor_decay_rate_adam(beta2):
 
 
 @gin.configurable
-def adafactor_decay_rate_pow(exponent, offset=0):
+def adafactor_decay_rate_pow(exponent=0.8, offset=0):
   """Second moment decay rate where memory-length grows as step_num^exponent.
 
   For fine-tuning, you may want to gin-configure offset to equal the starting
