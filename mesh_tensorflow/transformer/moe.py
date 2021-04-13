@@ -60,7 +60,8 @@ class MoE1D(transformer.TransformerLayer):
                switch_jitter=1e-2,
                ntlb_top_k=4,
                output_dim=None,
-               use_experts_attention=False):
+               use_experts_attention=False,
+               z_loss=None):
     self._hparams = HParams(
         moe_gating=moe_gating,
         moe_num_experts=num_experts,
@@ -83,7 +84,8 @@ class MoE1D(transformer.TransformerLayer):
         moe_switch_jitter=switch_jitter,
         moe_output_dim=output_dim,
         moe_ntlb_top_k=ntlb_top_k,
-        moe_use_experts_attention=use_experts_attention)
+        moe_use_experts_attention=use_experts_attention,
+        moe_z_loss=z_loss)
     self._activation = activation
 
   def call(self, context, x, losses=None):
@@ -1115,6 +1117,19 @@ def _switch_gating(
       mtf.scalar_summary("experts/" + fraction.name.replace(":", "/"),
                          mtf.reduce_mean(fraction))
     mtf.scalar_summary("aux_loss", mtf.reduce_mean(loss))
+
+  # Add in the z_loss for router.
+  if train and hparams.moe_z_loss is not None:
+    tf.logging.info("Using z_loss: {}".format(hparams.moe_z_loss))
+    log_z = mtf.reduce_logsumexp(gate_logits, experts_dim)
+    z_loss = mtf.square(log_z)
+    if importance is not None:
+      z_loss *= mtf.cast(mtf.equal(importance, 1.0), dtype=z_loss.dtype)
+    denom = mtf.reduce_sum(
+        mtf.cast(mtf.equal(importance, 1.0), dtype=z_loss.dtype))
+    z_loss = mtf.reduce_sum(z_loss) / (denom * num_microbatches)
+    mtf.scalar_summary(name + "/z_loss", z_loss)
+    loss += (hparams.moe_z_loss * z_loss)
 
   # COMPUTE ASSIGNMENT TO EXPERT
   # Experts have a limited capacity, ensure we do not exceed it. Construct
