@@ -1205,6 +1205,11 @@ def get_inputs_from_file(input_filename, ignore_comments=False):
   with tf.io.gfile.GFile(input_filename, "r") as f:
     inputs = [line.rstrip() for line in f]
 
+  # If this is an empty file (because of stripping), return early.
+  if not inputs:
+    tf.logging.info("input file is empty after rstrip: %s", input_filename)
+    return []
+
   # Strip the last empty line.
   if not inputs[-1]:
     inputs.pop()
