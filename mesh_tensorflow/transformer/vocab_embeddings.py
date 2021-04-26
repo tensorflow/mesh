@@ -27,7 +27,7 @@ import tensorflow.compat.v1 as tf
 class FactorizedVocabEmbedding(object):
   """Factorizes the embedding matrix with projection to a small inner dimension.
 
-  Like ALBERT (https://arxiv.org/abs/1706.03762).
+  Like ALBERT (https://arxiv.org/abs/1909.11942).
 
   Interface matches mesh_tensorflow.transformer VocabEmbedding object.
   """
