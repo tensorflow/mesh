@@ -474,8 +474,9 @@ def transformer_moe_layer_v1(
       activation_functions=activation, use_bias=False,
       variable_dtype=variable_dtype, name="wi")
 
-  if train and hparams.moe_dropout_rate != 0.0:
-    h = mtf.dropout(h, 1.0 - hparams.moe_dropout_rate)
+  if hparams.moe_dropout_rate != 0.0:
+    h = mtf.dropout(h, is_training=train,
+                    keep_prob=1.0 - hparams.moe_dropout_rate)
 
   def _compute_output(hidden, layer_name):
     """Compute the output of the attention layer from the hidden vector."""
@@ -957,8 +958,10 @@ def _switch_max_gating(
   gate_inputs = mtf.to_float(inputs)
 
   # Input perturbations
-  if train and policy == "input_dropout":
-    gate_inputs = mtf.dropout(gate_inputs, 1.0 - hparams.moe_switch_dropout)
+  if policy == "input_dropout":
+    gate_inputs = mtf.dropout(
+        gate_inputs, is_training=train,
+        keep_prob=1.0 - hparams.moe_switch_dropout)
   elif train and policy == "input_jitter":
     gate_inputs = mtf.layers.multiplicative_jitter(gate_inputs,
                                                    hparams.moe_switch_jitter)
@@ -1068,8 +1071,9 @@ def _expert_selection_gating(
   gate_inputs = mtf.to_float(inputs)
 
   # Input perturbations for exploration.
-  if train and policy == "input_dropout":
-    gate_inputs = mtf.dropout(gate_inputs, 1.0 - hparams.moe_switch_dropout)
+  if policy == "input_dropout":
+    gate_inputs = mtf.dropout(gate_inputs, is_training=train,
+                              keep_prob=1.0 - hparams.moe_switch_dropout)
   elif train and policy == "input_jitter":
     gate_inputs = mtf.layers.multiplicative_jitter(gate_inputs,
                                                    hparams.moe_switch_jitter)
@@ -1185,8 +1189,11 @@ def _switch_gating(
   gate_inputs = mtf.to_float(inputs)
 
   # Input perturbations
-  if train and policy == "input_dropout":
-    gate_inputs = mtf.dropout(gate_inputs, 1.0 - hparams.moe_switch_dropout)
+  if policy == "input_dropout":
+    gate_inputs = mtf.dropout(
+        gate_inputs,
+        is_training=train,
+        keep_prob=1.0 - hparams.moe_switch_dropout)
   elif train and policy == "input_jitter":
     gate_inputs = mtf.layers.multiplicative_jitter(gate_inputs,
                                                    hparams.moe_switch_jitter)
