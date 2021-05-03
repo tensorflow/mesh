@@ -22,13 +22,12 @@ from __future__ import print_function
 import contextlib
 
 # pylint: disable=g-direct-tensorflow-import
-from tensorflow.python.compat import compat
 from tensorflow.python.framework import ops
 from tensorflow.python.ops import control_flow_ops
 from tensorflow.python.ops import gen_resource_variable_ops
 
 try:
-  from tensorflow.python.types import core  # pylint:disable=g-import-not-at-top
+  from tensorflow.python.types import core  # pylint:disable=g-import-not-at-top,g-direct-tensorflow-import
   TF_23 = True
 except ImportError:
   TF_23 = False
@@ -82,11 +81,8 @@ class ReplicatedVariable(VariableBase):
     tpu_context = _enclosing_tpu_context()
     if tpu_context is None:
       return self._primary_var.handle
-    if compat.forward_compatible(2021, 4, 29):
-      handles = [v.handle for v in self._vars]
-      return tpu_context.get_replicated_var_handle(self._name, handles)
-    else:
-      return tpu_context.get_replicated_var_handle(self._name, self._vars)
+
+    return tpu_context.get_replicated_var_handle(self._name, self._vars)
 
   @contextlib.contextmanager
   def _assign_dependencies(self):
