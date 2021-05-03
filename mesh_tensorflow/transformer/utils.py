@@ -962,7 +962,8 @@ def tpu_estimator_model_fn(model_type,
           tf.logging.info("Variables in %s but not in graph:", init_checkpoint)
           tf.logging.info("\n".join(sorted(
               ckpt_vars -
-              {init_checkpoint_variable_mapping(v) for v in global_vars})))
+              {init_checkpoint_variable_mapping(v)
+               for v in filtered_global_vars})))
           tf.logging.info("Variables in graph but not in %s:", init_checkpoint)
           tf.logging.info("\n".join(sorted(global_vars - restore_vars)))
           tf.train.init_from_checkpoint(
