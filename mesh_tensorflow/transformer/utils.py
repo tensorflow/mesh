@@ -1612,7 +1612,7 @@ def save_scores(results, vocabulary,
   scores = [r["scores"] for r in results]
 
   if scores_filename is not None:
-    write_lines_to_file(["%f" % f for f in scores], scores_filename+".scores")
+    write_lines_to_file(["%g" % f for f in scores], scores_filename+".scores")
 
   if save_example_text:
     results = _maybe_add_pretokenized_features(results, vocabulary)
