@@ -24,7 +24,7 @@ from mesh_tensorflow.ops import mtf_abs as abs  # pylint: disable=redefined-buil
 from mesh_tensorflow.ops import mtf_pow as pow  # pylint: disable=redefined-builtin,unused-import
 from mesh_tensorflow.ops import mtf_range as range  # pylint: disable=redefined-builtin,unused-import
 from mesh_tensorflow.ops import mtf_slice as slice  # pylint: disable=redefined-builtin,unused-import
-
+import mesh_tensorflow.signal_ops as signal
 
 
 # TODO(trandustin): Seal module.
