@@ -363,7 +363,7 @@ cd mesh/
 pip install --user .
 ```
 
-## Run the Transfomer model (no Tensor2Tensor dependencies)
+## Run the Transformer model (no Tensor2Tensor dependencies)
 
 ```sh
 pip install tensorflow_datasets
