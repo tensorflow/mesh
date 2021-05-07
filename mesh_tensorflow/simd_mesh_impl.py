@@ -63,6 +63,9 @@ class SimdMeshImpl(mtf.MeshImpl):
     super(SimdMeshImpl, self).__init__(shape, layout)
     if devices is not None:
       tf.logging.warning("SimdMeshImpl ignoring devices %s" % devices)
+    for dim in shape.dims:
+        assert dim.name in layout._mesh_dims, "dim " + dim.name + " not in " + str(layout._mesh_dims)
+    self._devices = devices
     self._device_assignment = device_assignment
     tf.logging.info("SimdMeshImpl init: {0} {1}".format(shape, layout))
     tf.logging.info("Device Assignment: {0}".format(device_assignment))
